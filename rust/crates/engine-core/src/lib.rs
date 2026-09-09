@@ -1,5 +1,11 @@
-//! Fase 0: cadena de humo del pipeline de build (Rust -> cxx -> C++ -> nanobind -> Python).
-//! Los kernels numéricos y el trait `ComputeBackend` (PLAN.md §5.1) llegan en Fase 1.
+//! `engine-core`: kernels numéricos del motor XVA (PLAN.md §3.1).
+//!
+//! Todo el código de valoración es genérico sobre el trait [`scalar::Scalar`], de forma
+//! que puede instanciarse tanto con `f64` (valoración pura) como con `dual::Dual`
+//! (sensibilidades vía AAD forward-mode, PLAN.md §5.3).
+
+pub mod dual;
+pub mod scalar;
 
 pub fn ping() -> f64 {
     42.0
