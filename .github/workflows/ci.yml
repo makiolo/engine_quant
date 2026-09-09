@@ -28,7 +28,7 @@ jobs:
         run: cargo test --workspace --locked
 
   build-and-smoke-test:
-    name: Build completo (CMake + Corrosion + cxx + nanobind + gtest) + tests C++ + smoke test Python
+    name: Build completo (CMake + Corrosion + cxx + nanobind + gtest) + tests C++ + tests Python
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -72,3 +72,9 @@ jobs:
 
       - name: Python smoke test (ping + Hull-White/IRS/CVA sobre Burn)
         run: python clients/python/tests/test_smoke.py build/clients/python
+
+      # Fase 3 (PLAN.md §5.4, §7.6): equivalente Python de cpp/engine/tests/test_registry.cpp,
+      # confirma que el binding nanobind expone Registries/register_builtins/Registry<T>::create/
+      # IMeasure::evaluate con la misma semántica que el registry C++.
+      - name: Python registry test (Engine/Model/Product/Measure)
+        run: python clients/python/tests/test_registry.py build/clients/python
