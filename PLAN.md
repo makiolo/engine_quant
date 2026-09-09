@@ -1,7 +1,7 @@
 # XVA Engine — Plan de Arquitectura
 
 > Documento vivo. Se construye de forma incremental, sección a sección.
-> Estado: **v0.4 — Fase 1 completada (core Rust: kernels genéricos, backend CPU, Hull-White, IRS, AAD)**
+> Estado: **v0.5 — Fase 2 completada (registry C++: modelos/productos/medidas, EE/PFE + CVA end-to-end)**
 
 ## 1. Visión
 
@@ -211,7 +211,7 @@ añade en cuanto exista más de un cliente.
    `Backend`, backend CPU (`burn-ndarray`) + simulación Hull-White 1F + valoración IRS + AAD (modo
    reverse de Burn) validado contra bump-and-reval (ver §7.5, verificado con las 4 capas de test de
    §5.6 que ya aplican en esta fase).
-3. **Fase 2** — Capa C++: registry de modelos/productos/medidas, cálculo de exposición (EE/PFE) y CVA unilateral end-to-end sobre IRS+Hull-White.
+3. **Fase 2** ✅ — Capa C++: registry de modelos/productos/medidas, cálculo de exposición (EE/PFE) y CVA unilateral end-to-end sobre IRS+Hull-White (ver §7.6).
 4. **Fase 3** — Cliente Python (nanobind) + Jupyter funcional.
 5. **Fase 4** — Cliente Excel (XLL).
 6. **Fase 5** — Backend GPU: ejercitar en serio el alias `GpuBackend` (`burn-wgpu`, ya presente
@@ -423,7 +423,79 @@ Las cuatro capas de test de §5.6 que aplican en Fase 1 (1: unit deterministas; 
 fórmula cerrada; 3: AAD vs bump-and-reval) ya corren en `rust-tests` de CI sin cambios en el
 workflow — `cargo test --workspace --locked` las cubre todas.
 
+### 7.6 Fase 2 — registry C++: modelos, productos, medidas
+
+Todo el código nuevo de esta fase vive en `cpp/engine` (ver estructura de §7). Antes de esta
+fase, `engine.hpp`/`engine.cpp` eran la única API C++ y exponían funciones sueltas
+("cadena de humo ampliada" de §7.5, fijas a un IRS 5y anual). Esta fase añade la capa de
+orquestación real (§3.2, §5.4) por encima de esa fachada, sin romperla: las funciones de Fase
+0-1 (`ping`, `hull_white_zero_coupon_bond`, `irs_unilateral_cva_5y`, ...) siguen existiendo tal
+cual.
+
+**Generalización previa en Rust** (`engine_core::api`, nuevo módulo junto a `smoke`): antes de
+que el registry C++ pudiera tener sentido hacía falta que la capa Rust dejara de asumir un IRS
+fijo a 5 años anuales. `irs_hull_white_exposure_profile` acepta un IRS arbitrario
+(`payment_times`/`accruals` propios) y devuelve el perfil EE/PFE completo (no solo el CVA
+agregado como hacía `smoke::irs_unilateral_cva_5y`); `unilateral_cva_from_exposure` calcula el
+CVA a partir de un perfil ya calculado, separando ambos pasos para que la capa de medidas C++
+pueda componerlos sin recalcular la simulación Monte Carlo. Ambas funciones son `f64` puro (sin
+tipos de Burn en la firma, mismo principio que documenta `crate::smoke`: mantener `engine-ffi`
+como frontera aislada, PLAN.md §7), y se bridgean a C++ vía un struct compartido de `cxx`
+(`ExposureProfileResult { times, ee, pfe_95 }`, PLAN.md §5.5: "los tipos complejos ... se pasan
+mediante structs planos").
+
+**Registry — diseño concreto** (implementa la decisión de §5.4):
+
+- `params.hpp` — `Params = std::unordered_map<std::string, ParamValue>` con
+  `ParamValue = std::variant<double, std::vector<double>, bool>`: bag de parámetros genérico
+  que hace uniforme la firma de cualquier factory del registry (`Registry<Interface>::create`),
+  sin importar qué modelo/producto/medida concreto construye. Helpers `get_double`/`get_bool`/
+  `get_vector` lanzan `std::out_of_range`/`std::invalid_argument` con el nombre de la clave en
+  el mensaje si falta o el tipo no coincide.
+- `model.hpp`/`product.hpp`/`measure.hpp` — interfaces `IModel`/`IProduct`/`IMeasure` (cada una
+  con un único método propio además del destructor virtual y `type_name()`) e implementaciones
+  concretas del caso base de §5.2: `HullWhite1FModel`, `IrSwapProduct`, `ExposureProfileMeasure`
+  (perfil EE/PFE) y `UnilateralCvaMeasure` (CVA). Todas se construyen exclusivamente desde un
+  `Params` (incluidas las medidas, que no lo necesitan para construirse — solo para
+  `evaluate()` — pero llevan un constructor `Concrete(const Params&)` igualmente para que
+  `Registry<T>::register_type<Concrete>` sea uniforme entre las tres interfaces).
+  `IrSwapProduct` trata la clave `"fixed_rate"` como opcional: si está ausente, el swap se
+  marca "a la par" (`use_par_rate() == true`) y el tipo fijo se calcula en Rust, que es quien
+  tiene `r0` disponible en el momento de evaluar la medida.
+- `IMeasure::evaluate` hace `dynamic_cast` de `model`/`product` a los tipos concretos que sabe
+  evaluar y lanza `std::invalid_argument` si no coinciden — limitación conocida y documentada
+  del caso base de Fase 2 (un único modelo y un único producto soportados), no un defecto de
+  diseño del registry en sí (el registry en sí es agnóstico a cuántos tipos existan).
+  `UnilateralCvaMeasure::evaluate` reutiliza `ExposureProfileMeasure::evaluate` por composición
+  en vez de duplicar la llamada a `irs_hull_white_exposure_profile`.
+- `registry.hpp` — `Registry<Interface>` genérico y header-only (sin `.cpp`: es una plantilla),
+  un registry independiente por interfaz (`Registry<IModel>`, `Registry<IProduct>`,
+  `Registry<IMeasure>`, no uno monolítico, tal como fija §5.4). `register_type<Concrete>(name)`
+  registra una factory `std::make_unique<Concrete>(params)`; `create(name, params)` lanza
+  `std::out_of_range` si `name` no está registrado.
+- `bootstrap.hpp`/`bootstrap.cpp` — `struct Registries { Registry<IModel> models; Registry<IProduct> products; Registry<IMeasure> measures; }`
+  y `register_builtins(Registries&)` como punto único de arranque (§5.4): registra
+  `"HullWhite1F"`, `"IRSwap"`, `"ExposureProfile"`, `"UnilateralCVA"`. Añadir un modelo/
+  producto/medida nuevo implica una línea aquí, nada más.
+
+**Testing C++** (PLAN.md §7.3 dejaba pendiente decidir el framework): GoogleTest
+(`v1.15.2` pinneado) vía `FetchContent` en `cpp/engine/tests/CMakeLists.txt`, mismo patrón que
+ya usan Corrosion (raíz) y nanobind (`clients/python`) — `gtest_force_shared_crt` a `ON` antes
+de `FetchContent_MakeAvailable` para evitar el mismatch de CRT en MSVC (mismo tipo de gotcha ya
+documentado en §7.1 para el CRT de Rust, pero del lado de gtest). `cpp/engine/tests/test_registry.cpp`
+cubre el wiring end-to-end del registry (alta de builtins, creación vía `Params`, EE≥0 y
+PFE≥EE, CVA positivo con hazard rate>0 y ~0 con hazard rate=0, rechazo de tipos incompatibles) —
+son tests de integración del registry/composición de medidas, no repiten la validación numérica
+fina que ya cubre Rust (§5.6 capas 1-3, siguen viviendo en `rust-tests`). `ctest` se añade como
+paso nuevo de `build-and-smoke-test` en CI (§7.4), entre el build y el smoke test de Python.
+
+**Verificado end-to-end** (build local Release, CMake+Corrosion+cxx+nanobind+gtest): `cargo
+test --workspace` (Rust, incluye `engine_core::api`), `ctest` (6/6 tests C++ del registry) y el
+smoke test de Python de Fase 1 (que sigue ejercitando la fachada de Fase 0-1 directamente, sin
+pasar por el registry) pasan los tres.
+
 ---
-*Próxima iteración: arrancar Fase 2 — registry de modelos/productos/medidas en la capa C++
-(§5.4), consumiendo `engine-ffi` para exponer Hull-White/IRS/exposición/CVA desde C++, con el
-mismo caso base IRS + Hull-White (§5.2) end-to-end desde esa capa.*
+*Próxima iteración: arrancar Fase 3 — cliente Python (nanobind) + Jupyter funcional (§6):
+binding 1:1 (o casi) con la API pública de la capa C++ de Fase 2 (`Registries`,
+`register_builtins`, `Registry<T>::create`, `IMeasure::evaluate`), no solo las funciones de
+cadena de humo que ya expone `clients/python/src/engine_py_ext.cpp` desde Fase 0.*

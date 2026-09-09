@@ -28,7 +28,7 @@ jobs:
         run: cargo test --workspace --locked
 
   build-and-smoke-test:
-    name: Build completo (CMake + Corrosion + cxx + nanobind) + smoke test Python
+    name: Build completo (CMake + Corrosion + cxx + nanobind + gtest) + tests C++ + smoke test Python
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -63,6 +63,12 @@ jobs:
       # Release por el mismatch de CRT Debug/Release documentado en PLAN.md §7.1.
       - name: Build
         run: cmake --build build
+
+      # Capas 2-3 de §5.6 sobre el registry C++ (PLAN.md §5.4, Fase 2): wiring de
+      # Registry<T>/IModel/IProduct/IMeasure, no repite la validación numérica fina que ya
+      # cubre `rust-tests`.
+      - name: C++ tests (registry de modelos/productos/medidas)
+        run: ctest --test-dir build --output-on-failure -C Release
 
       - name: Python smoke test (ping + Hull-White/IRS/CVA sobre Burn)
         run: python clients/python/tests/test_smoke.py build/clients/python
