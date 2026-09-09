@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  rust-tests:
+    name: Rust (engine-core, engine-ffi)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            rust/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('rust/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      # rustup respeta rust/rust-toolchain.toml automáticamente (PLAN.md §7.3).
+      - name: cargo test --workspace
+        working-directory: rust
+        run: cargo test --workspace --locked
+
+  build-and-smoke-test:
+    name: Build completo (CMake + Corrosion + cxx + nanobind) + smoke test Python
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up MSVC dev environment
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Set up Ninja
+        uses: seanmiddleditch/gha-setup-ninja@master
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            rust/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('rust/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Configure (CMake + Corrosion + cxx + nanobind)
+        shell: bash
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DPython_EXECUTABLE="$(python -c 'import sys; print(sys.executable)')"
+
+      # Release por el mismatch de CRT Debug/Release documentado en PLAN.md §7.1.
+      - name: Build
+        run: cmake --build build
+
+      - name: Python smoke test (engine.ping == 42.0)
+        run: python clients/python/tests/test_smoke.py build/clients/python

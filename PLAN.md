@@ -331,6 +331,26 @@ Revisar esta decisión si el entorno de CI/desarrollo termina necesitando builds
 **CMake mínimo**: 3.24 (buen soporte de `FetchContent` moderno y compatible con las versiones
 recientes de Corrosion/nanobind en Windows/MSVC).
 
+### 7.4 CI — GitHub Actions
+
+Repositorio: `github.com/makiolo/engine_quant`. Workflow en `.github/workflows/ci.yml`, disparado en
+todo `push` y `pull_request` ("cada commit"). Dos jobs, cada uno cubriendo las capas testeables que
+existen hoy (§5.6 layers 1-2 en Rust; el resto de capas de §5.6 se añaden a medida que exista
+lógica real que testear en Fase 1+):
+
+- **`rust-tests`** (`ubuntu-latest`) — `cargo test --workspace --locked` dentro de `rust/`. Cubre
+  los unit tests deterministas de `engine-core` (§5.6 capa 1) y valida que `engine-ffi` (el bridge
+  `cxx`) compila en una plataforma distinta a Windows — señal temprana de portabilidad, relevante
+  de cara al backend GPU multiplataforma (§5.1). rustup respeta `rust/rust-toolchain.toml`
+  automáticamente, sin paso explícito de instalación de toolchain.
+- **`build-and-smoke-test`** (`windows-latest`, la plataforma principal del proyecto) — build
+  completo vía CMake + Corrosion + `cxx` + nanobind (`ilammy/msvc-dev-cmd` para tener `cl.exe` en
+  el `PATH`, replicando el recipe verificado manualmente en §7.1) seguido del smoke test de Python
+  (`engine.ping() == 42.0`). Build en `Release` por el mismatch de CRT documentado en §7.1.
+
+Pendiente para cuando exista contenido real: añadir tests de C++ (capas 2-3 de §5.6, requiere el
+framework de test decidido en Fase 2) y el job de equivalencia Python↔Excel (capa 4, Fase 3-4).
+
 ---
 *Próxima iteración: arrancar Fase 1 — kernels genéricos sobre tipo escalar, backend `ComputeBackend`
 CPU, simulación Hull-White 1F, valoración IRS y primer mecanismo de AAD (§5.3, §6).*
