@@ -570,6 +570,20 @@ Excel no tiene un generador de bindings equivalente: un XLL es una DLL corriente
 carga con `LoadLibrary` y con la que habla a través de una API C plana (`XLCALL.H`,
 `Excel12`/`Excel12v`) — no hay wrapper que abstraiga la construcción manual de `XLOPER12`.
 
+**Qué se propaga solo y qué no** (relevante para juzgar cuánto esfuerzo exige extender el
+motor): un modelo/producto/medida nuevo registrado en `bootstrap.cpp` (§5.4) queda
+disponible en Python **y** en Excel con **cero** cambios en `clients/python`/`clients/excel`
+— `list_models`/`create_model`/`Measure.evaluate` (y sus equivalentes `ENGINE.*` en Excel)
+son genéricos sobre el nombre registrado, no una función por tipo concreto; ese es el punto
+central de tener un registry (§4: "un producto o modelo nuevo se registra una vez y queda
+disponible en todos los clientes sin duplicar lógica"). Lo que **sí** exige tocar ambos
+clientes es una operación de la capa C++ que no encaja en el patrón
+`Registries`/`Registry<T>::create`/`IMeasure::evaluate` (un método nuevo de `Registries`, o
+una función suelta al estilo de las de Fase 0-1) — ninguno de los dos bindings tiene
+reflexión sobre C++, así que el suelo real es una línea en `engine_py_ext.cpp` (un
+`m.def(...)`, ya mínimo de por sí) más los dos sitios de `engine_excel.cpp` descritos más
+abajo (antes tres, ver la revisión de esta sección).
+
 **Vendoring de `XLCALL.H`/`XLCALL.CPP`** (`clients/excel/thirdparty/xlcall`, ver `NOTICE.md`
 ahí): el *Microsoft Excel Developer's Toolkit*, header y fuente oficiales que cualquier XLL
 de terceros necesita para hablar con Excel. Se vendorizan sin modificar (mismo fichero que
@@ -616,17 +630,39 @@ por su complejidad, no verificable sin Excel instalado en este entorno de desarr
 ver "Alcance y limitaciones" en `clients/excel/README.md`): las instancias viven hasta
 `xlAutoClose`, no por-celda.
 
-**`engine_excel.cpp`** — las 7 UDFs (`ENGINE.LIST_MODELS`/`LIST_PRODUCTS`/`LIST_MEASURES`/
-`CREATE_MODEL`/`CREATE_PRODUCT`/`CREATE_MEASURE`/`EVALUATE`, tabla `kFunctions` — registro
-explícito centralizado, mismo principio que §5.4) más los 3 puntos de entrada que Excel
-exige de todo XLL: `xlAutoOpen` (registra las 7 UDFs vía `Excel12(xlfRegister, ...)`, tipo
-`"U"` de retorno y `"Q"` por argumento según la tabla de tipos de `xlfRegister`),
-`xlAutoClose` (`HandleRegistry::clear()`) y `xlAutoFree12`. Cada UDF envuelve su cuerpo en
-`try/catch (...) { return xlbridge::new_error(xlerrValue); }`: ninguna excepción de C++
-puede cruzar la frontera hacia Excel sin desencadenar comportamiento indefinido.
-`engine_excel.def` fuerza los nombres de export sin decorar (`__stdcall` decora con `"@N"`
-salvo `.def`), necesario porque Excel resuelve el `procedure` de `xlfRegister` y los
-`xlAuto*` por `GetProcAddress` con el nombre exacto.
+**`engine_excel.cpp`** — las UDFs (`ENGINE.LIST_MODELS`/`LIST_PRODUCTS`/`LIST_MEASURES`/
+`CREATE_MODEL`/`CREATE_PRODUCT`/`CREATE_MEASURE`/`EVALUATE`) más los 3 puntos de entrada que
+Excel exige de todo XLL (`xlAutoOpen`, `xlAutoClose`, `xlAutoFree12`). **Rediseñado tras la
+primera versión** (revisión post-Fase 4) para minimizar cuántos sitios hay que tocar al
+añadir una UDF nueva — el problema original: el nombre de cada función se escribía a mano
+*tres veces* (la propia definición, una fila de la tabla de registro, y una línea en
+`engine_excel.def`), sin ninguna comprobación que detectara un desajuste entre las tres.
+Ahora son dos sitios, no tres:
+
+1. La definición de la función (`extern "C" __declspec(dllexport) LPXLOPER12 WINAPI
+   xlEngineFoo(...)`), con el cuerpo envuelto en `xlbridge::guarded(...)` (plantilla en
+   `xloper.hpp`) en vez de repetir `try/catch (...) { return xlbridge::new_error(xlerrValue); }`
+   en cada una — ninguna excepción de C++ puede cruzar la frontera hacia Excel sin
+   desencadenar comportamiento indefinido, y ahora ese contrato vive en un solo sitio.
+2. Una fila en la tabla `kFunctions` (registro explícito centralizado, mismo principio que
+   §5.4), construida con la macro `ENGINE_XLL_ENTRY(fn, type_text, nombre_excel,
+   argument_text, help)`: deriva el nombre exportado directamente del identificador C++ de
+   `fn` (macro `ENGINE_XLL_WSTRINGIZE`, el truco estándar de "stringize + token-paste con
+   `L`" para obtener un `L"..."` a partir de un nombre de función) en vez de que alguien lo
+   vuelva a teclear a mano, y además fuerza `void(&fn)` (descartado vía el operador coma) —
+   si `fn` no existe con ese nombre exacto, la fila no compila; un typo ya no puede llegar a
+   producir un `#NAME?` silencioso dentro de Excel real.
+
+**Sin fichero `.def`**: se comprobó (build local, `dumpbin /exports`) que en x64 `__stdcall`
+no decora nombres de símbolo (a diferencia de x86, donde se sufija `"@N"` con el tamaño de
+los argumentos) — como este proyecto solo compila para x64 (`x86_64-pc-windows-msvc`,
+`windows-latest` en CI), `__declspec(dllexport)` en cada función basta para que Excel la
+resuelva por `GetProcAddress` con el nombre exacto, sin necesitar un `.def` que repita la
+lista de exports por tercera vez.
+
+`xlAutoOpen` sigue registrando cada fila de `kFunctions` vía `Excel12(xlfRegister, ...)`
+(tipo `"U"` de retorno y `"Q"` por argumento según la tabla de tipos de `xlfRegister`);
+`xlAutoClose` llama a `HandleRegistry::clear()`.
 
 **CMake** (`clients/excel/CMakeLists.txt`): `engine_excel_bridge` (STATIC, la parte
 testeable) y `engine_excel_ext` (`MODULE` — un plugin que Excel carga con `LoadLibrary`,

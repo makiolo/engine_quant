@@ -1,6 +1,6 @@
 # Cliente Excel (XLL, PLAN.md §3.3/§6 Fase 4, §7.8). Especifico de Windows (windows.h, WINAPI,
-# tabla de exports via .def): ver guard WIN32 alrededor de add_subdirectory(clients/excel) en
-# el CMakeLists.txt raiz.
+# __declspec(dllexport)): ver guard WIN32 alrededor de add_subdirectory(clients/excel) en el
+# CMakeLists.txt raiz.
 #
 # engine_excel_bridge: logica de traduccion XLOPER12 <-> engine::Params/MeasureResult
 # (xloper.hpp/.cpp) y el registry memoizado por handle (handles.hpp/.cpp). No depende de
@@ -17,11 +17,12 @@ target_link_libraries(engine_excel_bridge PUBLIC engine)
 # Excel carga via LoadLibrary, nada mas enlaza contra el -- mismo motivo por el que
 # clients/python usa nanobind_add_module en vez de add_library(... SHARED ...).
 # XLCALL.CPP (vendorizado, thirdparty/xlcall) resuelve Excel12/Excel12v en runtime via
-# GetProcAddress; engine_excel.def fuerza los nombres de export sin decorar (xlAuto*/UDFs).
+# GetProcAddress. Sin fichero .def: en x64 __stdcall no decora nombres (a diferencia de x86),
+# asi que __declspec(dllexport) en cada funcion de engine_excel.cpp basta para que Excel las
+# resuelva por GetProcAddress con el nombre exacto.
 add_library(engine_excel_ext MODULE
     src/engine_excel.cpp
     thirdparty/xlcall/src/XLCALL.CPP
-    src/engine_excel.def
 )
 target_link_libraries(engine_excel_ext PRIVATE engine_excel_bridge)
 set_target_properties(engine_excel_ext PROPERTIES

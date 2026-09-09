@@ -69,6 +69,19 @@ XLOPER12* new_str(const std::string& utf8);
 XLOPER12* new_string_column(const std::vector<std::string>& values);
 XLOPER12* new_measure_result(const engine::MeasureResult& result);
 
+// Envuelve el cuerpo de una UDF exportada: ninguna excepción de C++ puede cruzar la
+// frontera con Excel (comportamiento indefinido), así que toda UDF debe atraparlas y
+// devolver un error de Excel en su lugar. Centralizar esto aquí evita repetir el mismo
+// try/catch en cada una de las funciones de engine_excel.cpp (PLAN.md Fase 4, §7.8).
+template <typename Fn>
+XLOPER12* guarded(Fn&& fn) {
+    try {
+        return fn();
+    } catch (...) {
+        return new_error(xlerrValue);
+    }
+}
+
 // Liberación simétrica de cualquier XLOPER12 devuelto por las funciones new_* de arriba
 // (incluye el recorrido recursivo de xltypeMulti, PLAN.md Fase 4 §7.8). Se invoca desde
 // xlAutoFree12 (engine_excel.cpp) para cada XLOPER12 marcado xlbitDLLFree que Excel
