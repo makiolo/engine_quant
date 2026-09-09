@@ -5,6 +5,7 @@
 //! CPU o GPU y, envolviendo el backend con `Autodiff` (PLAN.md §5.3), para propagar
 //! sensibilidades sin reescribir la lógica de negocio.
 
+pub mod api;
 pub mod backend;
 pub mod exposure;
 pub mod kernel;
