@@ -1,7 +1,7 @@
 # XVA Engine — Plan de Arquitectura
 
 > Documento vivo. Se construye de forma incremental, sección a sección.
-> Estado: **v0.5 — Fase 2 completada (registry C++: modelos/productos/medidas, EE/PFE + CVA end-to-end)**
+> Estado: **v0.6 — Fase 3 completada (cliente Python vía nanobind sobre el registry C++, Jupyter funcional)**
 
 ## 1. Visión
 
@@ -212,7 +212,7 @@ añade en cuanto exista más de un cliente.
    reverse de Burn) validado contra bump-and-reval (ver §7.5, verificado con las 4 capas de test de
    §5.6 que ya aplican en esta fase).
 3. **Fase 2** ✅ — Capa C++: registry de modelos/productos/medidas, cálculo de exposición (EE/PFE) y CVA unilateral end-to-end sobre IRS+Hull-White (ver §7.6).
-4. **Fase 3** — Cliente Python (nanobind) + Jupyter funcional.
+4. **Fase 3** ✅ — Cliente Python (nanobind) + Jupyter funcional (ver §7.7).
 5. **Fase 4** — Cliente Excel (XLL).
 6. **Fase 5** — Backend GPU: ejercitar en serio el alias `GpuBackend` (`burn-wgpu`, ya presente
    tras la feature `gpu` de `engine-core` desde Fase 1) — benchmarks, feature por defecto si el
@@ -494,8 +494,73 @@ test --workspace` (Rust, incluye `engine_core::api`), `ctest` (6/6 tests C++ del
 smoke test de Python de Fase 1 (que sigue ejercitando la fachada de Fase 0-1 directamente, sin
 pasar por el registry) pasan los tres.
 
+### 7.7 Fase 3 — cliente Python (nanobind) sobre el registry + Jupyter
+
+Todo el código nuevo de esta fase vive en `clients/python` (ver estructura de §7). Antes de
+esta fase, `engine_py_ext.cpp` solo exponía la cadena de humo de Fase 0-1 (`ping`,
+`hull_white_zero_coupon_bond`, `irs_unilateral_cva_5y`); esta fase añade el binding 1:1 (o
+casi) con la API pública del registry C++ de Fase 2 (§7.6) sin tocar esas funciones, que
+siguen existiendo tal cual.
+
+- **`engine.Engine`** — clase Python que envuelve `Registries` + `register_builtins`
+  (PLAN.md §5.4): se instancia una vez y `register_builtins` se ejecuta en el constructor,
+  en vez de exigir que el cliente Python llame a una función de bootstrap suelta.
+  `list_models()`/`list_products()`/`list_measures()` exponen `Registry<T>::list()`;
+  `create_model(name, params)`/`create_product(name, params)`/`create_measure(name)`
+  exponen `Registry<T>::create(name, params)`.
+- **`Params` como `dict` nativo de Python**, no una clase dedicada: una función auxiliar
+  (`dict_to_params`, en `engine_py_ext.cpp`) convierte cada entrada del dict al
+  `engine::ParamValue` (`double`/`std::vector<double>`/`bool`) correspondiente,
+  comprobando `bool` antes que `double` porque en Python `bool` es subtipo de `int`/`float`.
+  Coherente con PLAN.md §4 ("la API debe sentirse equivalente en Python y en Excel", no
+  idéntica letra a letra al C++ subyacente: un dict es más idiomático en Python que un tipo
+  `Params` envuelto).
+- **`engine.Model`/`engine.Product`/`engine.Measure`** — bindings opacos de
+  `IModel`/`IProduct`/`IMeasure` (solo `type_name` como propiedad de solo lectura;
+  el `dynamic_cast` a los tipos concretos sigue viviendo enteramente en C++, dentro de
+  `IMeasure::evaluate`). **`engine.MeasureResult`** expone los campos de
+  `MeasureResult` como atributos de solo lectura (`times`/`primary`/`secondary`/
+  `has_scalar`/`scalar`).
+- **Traducción de excepciones**: nanobind traduce automáticamente `std::out_of_range` (tipo
+  no registrado, `Registry<T>::create`) a `IndexError` y `std::invalid_argument` (medida
+  incompatible con el modelo/producto recibido, `IMeasure::evaluate`) a `ValueError`, sin
+  código adicional en el binding. Adicionalmente, pasar un `Model` donde se espera un
+  `Product` (o viceversa) a `Measure.evaluate` ya lo rechaza nanobind en la frontera
+  Python/C++ con `TypeError`, antes de llegar al `dynamic_cast` de C++ — una comprobación de
+  tipos más temprana que la que ve el test C++ equivalente (`MeasureRejectsWrongProductType`,
+  §7.6), no un defecto del binding.
+- **`clients/python/tests/test_registry.py`** — equivalente Python de
+  `cpp/engine/tests/test_registry.cpp` (mismos cinco casos, más el de tipos intercambiados
+  vía `TypeError` en vez de `FakeProduct`+`std::invalid_argument`): confirma que el binding
+  expone la misma semántica del registry C++, no solo que compila. Se ejecuta igual que
+  `test_smoke.py` (`python clients/python/tests/test_registry.py <dir-del-build>`), añadido
+  como paso nuevo de `build-and-smoke-test` en CI (§7.4), a continuación del smoke test de
+  Python existente.
+- **`clients/python/notebooks/demo_registry.ipynb`** — notebook Jupyter (Jupyter funcional,
+  objetivo explícito de esta fase en el roadmap de §6) que recorre el mismo caso base de
+  §5.2 (Hull-White 1F + IRS a la par a 5 años) paso a paso desde Python: listar tipos
+  registrados, crear modelo y producto, calcular y graficar (matplotlib) el perfil EE/PFE,
+  calcular el CVA unilateral, y una celda final que vuelve a listar los tipos registrados
+  como demostración de la extensibilidad del registry (§5.4: un modelo/producto/medida
+  nuevo añadido en `bootstrap.cpp` aparece ahí sin tocar el notebook). Notebook sin
+  ejecutar en el repo (celdas de código con `outputs: []`/`execution_count: null`): requiere
+  haber compilado el proyecto y tener `jupyterlab`/`matplotlib` instalados, ver
+  `clients/python/notebooks/README.md`.
+
+**Verificado end-to-end** (build local Release, mismo build que §7.6): `engine.Engine()`
+ejercitado manualmente desde Python (miniconda 3.12, coincide con el `engine.cp312-*.pyd`
+generado) reproduce los mismos resultados que `test_registry.cpp` (EE/PFE no negativos con
+PFE≥EE, CVA positivo con hazard rate>0 y ~0 con hazard rate=0, `IndexError` en tipo no
+registrado); `clients/python/tests/test_registry.py` y `clients/python/tests/test_smoke.py`
+(sin regresión) pasan ambos, igual que los 6/6 tests de `ctest` de Fase 2.
+
+**Pendiente para cuando exista más de un cliente**: la capa 4 de test de §5.6 (equivalencia
+de API entre clientes) sigue esperando a la Fase 4 (cliente Excel/XLL) — con un único
+cliente (Python) todavía no hay nada con lo que comparar.
+
 ---
-*Próxima iteración: arrancar Fase 3 — cliente Python (nanobind) + Jupyter funcional (§6):
-binding 1:1 (o casi) con la API pública de la capa C++ de Fase 2 (`Registries`,
-`register_builtins`, `Registry<T>::create`, `IMeasure::evaluate`), no solo las funciones de
-cadena de humo que ya expone `clients/python/src/engine_py_ext.cpp` desde Fase 0.*
+*Próxima iteración: arrancar Fase 4 — cliente Excel (XLL, §6): UDFs que envuelven la misma
+API pública del registry C++ de Fase 2/3 (`Registries`, `register_builtins`,
+`Registry<T>::create`, `IMeasure::evaluate`) ya consumida desde Python en esta fase, con el
+mismo modelo mental (PLAN.md §4). En cuanto exista, añadir la capa 4 de test de §5.6
+(equivalencia numérica Python↔Excel sobre el mismo caso IRS+Hull-White de §5.2).*
