@@ -1,7 +1,7 @@
 # XVA Engine — Plan de Arquitectura
 
 > Documento vivo. Se construye de forma incremental, sección a sección.
-> Estado: **v0.6 — Fase 3 completada (cliente Python vía nanobind sobre el registry C++, Jupyter funcional)**
+> Estado: **v0.7 — Fase 4 completada (cliente Excel vía XLL sobre el registry C++)**
 
 ## 1. Visión
 
@@ -198,7 +198,11 @@ que el motor gana capacidades (no todas existen desde la Fase 0):
    mismo caso (IRS + Hull-White, §5.2) ejecutado desde Python y desde Excel debe producir el mismo
    resultado numérico dentro de tolerancia de precisión de punto flotante. Objetivo: garantizar que
    "la API se siente equivalente" (principio de §4) no es solo una aspiración de diseño sino algo
-   verificado automáticamente.
+   verificado automáticamente. **Parcial desde Fase 4** (ver §7.8): CI no tiene Excel instalado, así
+   que solo se automatiza la mitad "el bridge de Excel invoca el mismo `engine::Registries`/
+   `IMeasure::evaluate` que Python, con los mismos parámetros/semillas" (`clients/excel/tests`); la
+   verificación con Excel real cargando el `.xll` queda documentada como manual
+   (`clients/excel/README.md`).
 
 Estas capas se ejecutan en CI de forma incremental: las capas 1-2 ya deben existir antes de cerrar
 la Fase 1; la capa 3 antes de cerrar la Fase 1 (coincide con la introducción de AAD); la capa 4 se
@@ -213,7 +217,7 @@ añade en cuanto exista más de un cliente.
    §5.6 que ya aplican en esta fase).
 3. **Fase 2** ✅ — Capa C++: registry de modelos/productos/medidas, cálculo de exposición (EE/PFE) y CVA unilateral end-to-end sobre IRS+Hull-White (ver §7.6).
 4. **Fase 3** ✅ — Cliente Python (nanobind) + Jupyter funcional (ver §7.7).
-5. **Fase 4** — Cliente Excel (XLL).
+5. **Fase 4** ✅ — Cliente Excel (XLL) sobre el registry C++ (ver §7.8).
 6. **Fase 5** — Backend GPU: ejercitar en serio el alias `GpuBackend` (`burn-wgpu`, ya presente
    tras la feature `gpu` de `engine-core` desde Fase 1) — benchmarks, feature por defecto si el
    rendimiento lo justifica, CUDA (`burn-cuda`) si hiciera falta más que wgpu.
@@ -558,9 +562,92 @@ registrado); `clients/python/tests/test_registry.py` y `clients/python/tests/tes
 de API entre clientes) sigue esperando a la Fase 4 (cliente Excel/XLL) — con un único
 cliente (Python) todavía no hay nada con lo que comparar.
 
+### 7.8 Fase 4 — cliente Excel (XLL) sobre el registry C++
+
+Todo el código nuevo de esta fase vive en `clients/excel` (ver estructura de §7). A
+diferencia de Python (nanobind: binding directo, sin escribir a mano la frontera C↔C++),
+Excel no tiene un generador de bindings equivalente: un XLL es una DLL corriente que Excel
+carga con `LoadLibrary` y con la que habla a través de una API C plana (`XLCALL.H`,
+`Excel12`/`Excel12v`) — no hay wrapper que abstraiga la construcción manual de `XLOPER12`.
+
+**Vendoring de `XLCALL.H`/`XLCALL.CPP`** (`clients/excel/thirdparty/xlcall`, ver `NOTICE.md`
+ahí): el *Microsoft Excel Developer's Toolkit*, header y fuente oficiales que cualquier XLL
+de terceros necesita para hablar con Excel. Se vendorizan sin modificar (mismo fichero que
+usan xlw/xll12/xll22/xll24) en vez de depender de un framework de terceros más amplio (se
+evaluó `xlladdins/xll24`, descartado por no tener build de CMake y no tener licencia
+explícita — solo se vendoriza el `XLCALL.H`/`.CPP` que es indiscutiblemente de Microsoft,
+libremente redistribuible desde hace más de dos décadas). `XLCALL.CPP` resuelve el punto de
+entrada `MdCallBack12` en tiempo de ejecución vía `GetProcAddress(GetModuleHandle(NULL),
+"MdCallBack12")`: no hace falta enlazar contra ninguna `.lib` de importación (evita el
+problema clásico de arquitectura/versión de `XLCALL32.LIB`).
+
+**Bridge `xloper.hpp`/`.cpp`** — traducción entre `XLOPER12` y `engine::Params`/
+`engine::MeasureResult`, sin llamar nunca a `Excel12`/`Excel12v` (por eso es testeable con
+GoogleTest sin Excel instalado, `clients/excel/tests`):
+
+- Argumentos de tipo `"Q"` (`XLOPER12` por referencia): según la documentación de
+  `xlfRegister`, Excel los coacciona siempre a uno de `xltypeNum`/`Str`/`Bool`/`Err`/`Multi`/
+  `Missing`/`Nil` (nunca `xltypeRef`/`SRef`, ya desreferenciados) — no hace falta un
+  `xlCoerce` manual.
+- Cadenas Excel12: `XCHAR` (= `WCHAR`) con la longitud en la posición 0, sin terminador nulo
+  (máx. 32767 caracteres); conversión UTF-8 (lo que espera `engine::Params`) vía
+  `WideCharToMultiByte`/`MultiByteToWideChar`.
+- **`params` como rango clave/valor** (columna A = nombre, columnas siguientes = valor(es)),
+  no una UDF por cada modelo/producto/medida: análogo Excel del `dict` nativo que usa el
+  binding Python (`dict_to_params`, §7.7) para la misma razón — "la API debe sentirse
+  equivalente" (§4) sin ser idéntica letra a letra al `Params` de C++. Un valor con una única
+  celda numérica → `double`; con varias → `vector<double>`; con una única celda booleana →
+  `bool` (comprobado antes que numérico, mismo motivo que en Python).
+- Todo valor de retorno se reserva en el heap y se marca `xlbitDLLFree`: Excel llama de
+  vuelta a `xlAutoFree12` (`engine_excel.cpp`) para liberarlo, que delega en
+  `xlbridge::free_xloper` (recorre `xltypeMulti` recursivamente liberando también las
+  cadenas internas).
+
+**Handles memoizados (`handles.hpp`/`.cpp`)** — una celda de Excel no puede contener un
+`IModel`/`IProduct`/`IMeasure` opaco (a diferencia de `engine.Model`/`Product`/`Measure` en
+Python, §7.7): `HandleRegistry` envuelve exactamente el mismo `engine::Registries`/
+`register_builtins`/`Registry<T>::create`/`IMeasure::evaluate` que ya consumen
+`cpp/engine/tests` y `clients/python`, exponiendo cada instancia creada como un **handle**
+(cadena) memoizado por una clave canónica (nombre + parámetros ordenados por clave, formato
+por `std::to_chars` para precisión exacta de round-trip). Mismos parámetros ⇒ mismo handle ⇒
+fórmula determinista, sin necesitar un mecanismo de liberación ligado al ciclo de vida de la
+celda que lo creó (invalidación en recálculo, `xlfGetCaller`, etc. — se evaluó y se descartó
+por su complejidad, no verificable sin Excel instalado en este entorno de desarrollo,
+ver "Alcance y limitaciones" en `clients/excel/README.md`): las instancias viven hasta
+`xlAutoClose`, no por-celda.
+
+**`engine_excel.cpp`** — las 7 UDFs (`ENGINE.LIST_MODELS`/`LIST_PRODUCTS`/`LIST_MEASURES`/
+`CREATE_MODEL`/`CREATE_PRODUCT`/`CREATE_MEASURE`/`EVALUATE`, tabla `kFunctions` — registro
+explícito centralizado, mismo principio que §5.4) más los 3 puntos de entrada que Excel
+exige de todo XLL: `xlAutoOpen` (registra las 7 UDFs vía `Excel12(xlfRegister, ...)`, tipo
+`"U"` de retorno y `"Q"` por argumento según la tabla de tipos de `xlfRegister`),
+`xlAutoClose` (`HandleRegistry::clear()`) y `xlAutoFree12`. Cada UDF envuelve su cuerpo en
+`try/catch (...) { return xlbridge::new_error(xlerrValue); }`: ninguna excepción de C++
+puede cruzar la frontera hacia Excel sin desencadenar comportamiento indefinido.
+`engine_excel.def` fuerza los nombres de export sin decorar (`__stdcall` decora con `"@N"`
+salvo `.def`), necesario porque Excel resuelve el `procedure` de `xlfRegister` y los
+`xlAuto*` por `GetProcAddress` con el nombre exacto.
+
+**CMake** (`clients/excel/CMakeLists.txt`): `engine_excel_bridge` (STATIC, la parte
+testeable) y `engine_excel_ext` (`MODULE` — un plugin que Excel carga con `LoadLibrary`,
+nada más enlaza contra él, mismo motivo por el que `clients/python` usa
+`nanobind_add_module` en vez de `SHARED`), con `SUFFIX ".xll"` explícito (Excel identifica
+un add-in por esa extensión, no basta con que el contenido sea un DLL válido). Guardado tras
+`if(WIN32)` en el `CMakeLists.txt` raíz: un XLL es un artefacto específico de Windows.
+
+**Verificado localmente** (build Release vía CMake+Ninja+MSVC, sin Excel instalado en este
+entorno de desarrollo): `engine_excel_bridge_tests` (15/15, incluye dos casos que reproducen
+los mismos parámetros/semillas que `test_registry.cpp`/`test_registry.py` para confirmar que
+el bridge invoca el mismo código, PLAN.md §5.6 capa 4 parcial) pasa; `engine_excel_ext`
+enlaza y produce `engine_excel.xll`, con `dumpbin /exports` confirmando las 10 entradas
+esperadas sin decorar. **Pendiente de verificación manual con Excel real**
+(`clients/excel/README.md` documenta los pasos y los valores de referencia exactos:
+`CVA = 426.76182440931836` para el caso `UnilateralCVA` de `test_registry.py`).
+
 ---
-*Próxima iteración: arrancar Fase 4 — cliente Excel (XLL, §6): UDFs que envuelven la misma
-API pública del registry C++ de Fase 2/3 (`Registries`, `register_builtins`,
-`Registry<T>::create`, `IMeasure::evaluate`) ya consumida desde Python en esta fase, con el
-mismo modelo mental (PLAN.md §4). En cuanto exista, añadir la capa 4 de test de §5.6
-(equivalencia numérica Python↔Excel sobre el mismo caso IRS+Hull-White de §5.2).*
+*Próxima iteración: arrancar Fase 5 — backend GPU (§6): ejercitar en serio el alias
+`GpuBackend` (`burn-wgpu`, ya presente tras la feature `gpu` de `engine-core` desde Fase 1,
+§5.1) con benchmarks reales sobre el caso IRS+Hull-White de §5.2, decidiendo si conviene
+activarlo por defecto o dejarlo opcional. En cuanto exista verificación manual de Fase 4 con
+Excel real (`clients/excel/README.md`), completar la capa 4 de test de §5.6 marcándola como
+verificada de punta a punta, no solo parcial.*
