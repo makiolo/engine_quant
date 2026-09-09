@@ -6,8 +6,10 @@
 
 pub mod backend;
 pub mod dual;
+pub mod exposure;
 pub mod kernel;
 pub mod models;
+pub mod products;
 pub mod scalar;
 
 pub fn ping() -> f64 {
