@@ -16,14 +16,18 @@
 //! falta (Fase 2+), no es necesario para el perfil de exposición del prototipo.
 
 use crate::models::hull_white::HullWhite1F;
-use crate::scalar::Scalar;
+use burn::tensor::backend::Backend;
+use burn::tensor::Tensor;
 
 /// IRS vanilla: nocional fijo, tipo fijo `K`, fechas de pago `T_1 < ... < T_n` con
-/// fracciones de año (`accruals[i]` = `T_i - T_{i-1}`, con `T_0 = start`).
+/// fracciones de año (`accruals[i]` = `T_i - T_{i-1}`, con `T_0 = start`). `notional` y
+/// `fixed_rate` son tensores forma `[1]` (Burn los difunde contra `[n_paths]` al operar
+/// con `r_t`), genéricos sobre `B: Backend` para poder diferenciarlos vía AAD (PLAN.md
+/// §5.3) igual que `HullWhite1F`.
 #[derive(Debug, Clone)]
-pub struct IrSwap<T: Scalar> {
-    pub notional: T,
-    pub fixed_rate: T,
+pub struct IrSwap<B: Backend> {
+    pub notional: Tensor<B, 1>,
+    pub fixed_rate: Tensor<B, 1>,
     /// Fecha de inicio de la pata flotante (`T_0`).
     pub start: f64,
     /// Fechas de pago `T_1..T_n` (absolutas, en años desde t=0).
@@ -32,30 +36,32 @@ pub struct IrSwap<T: Scalar> {
     pub accruals: Vec<f64>,
 }
 
-impl<T: Scalar> IrSwap<T> {
+impl<B: Backend> IrSwap<B> {
     /// NPV del swap pagador (paga fijo, recibe flotante) visto desde `t`, dado el tipo
-    /// corto `r_t` observado en `t` y el modelo que descuenta/proyecta.
+    /// corto `r_t` observado en `t` (forma `[n_paths]`, o `[1]` para un único nodo) y el
+    /// modelo que descuenta/proyecta.
     ///
     /// Requiere `t <= self.start` (ver limitación documentada arriba).
-    pub fn npv(&self, r_t: T, t: f64, model: &HullWhite1F<T>) -> T {
+    pub fn npv(&self, r_t: Tensor<B, 1>, t: f64, model: &HullWhite1F<B>) -> Tensor<B, 1> {
         debug_assert!(
             t <= self.start + 1e-9,
             "IrSwap::npv requiere t <= start en esta primera versión"
         );
 
-        let p_start = model.zero_coupon_bond(r_t, t, self.start);
-        let p_end = model.zero_coupon_bond(r_t, t, *self.payment_times.last().unwrap());
-        let floating_leg = self.notional * (p_start - p_end);
+        let p_start = model.zero_coupon_bond(r_t.clone(), t, self.start);
+        let p_end = model.zero_coupon_bond(r_t.clone(), t, *self.payment_times.last().unwrap());
+        let floating_leg = self.notional.clone() * (p_start - p_end);
 
-        let fixed_leg: T = self
+        let fixed_leg = self
             .payment_times
             .iter()
             .zip(self.accruals.iter())
             .map(|(&ti, &tau)| {
-                let p_i = model.zero_coupon_bond(r_t, t, ti);
-                self.notional * self.fixed_rate * T::from_f64(tau) * p_i
+                let p_i = model.zero_coupon_bond(r_t.clone(), t, ti);
+                self.notional.clone() * self.fixed_rate.clone() * p_i.mul_scalar(tau)
             })
-            .sum();
+            .reduce(|acc, leg| acc + leg)
+            .expect("un swap necesita al menos un periodo");
 
         floating_leg - fixed_leg
     }
@@ -64,24 +70,23 @@ impl<T: Scalar> IrSwap<T> {
     /// fecha. Útil para construir swaps "a la par" en tests y en la fecha de arranque de
     /// un perfil de exposición.
     pub fn par_rate(
-        notional: T,
-        r_start: T,
+        r_start: Tensor<B, 1>,
         start: f64,
         payment_times: &[f64],
         accruals: &[f64],
-        model: &HullWhite1F<T>,
-    ) -> T {
-        let p_start = model.zero_coupon_bond(r_start, start, start);
-        let p_end = model.zero_coupon_bond(r_start, start, *payment_times.last().unwrap());
+        model: &HullWhite1F<B>,
+    ) -> Tensor<B, 1> {
+        let p_start = model.zero_coupon_bond(r_start.clone(), start, start);
+        let p_end = model.zero_coupon_bond(r_start.clone(), start, *payment_times.last().unwrap());
         let numerator = p_start - p_end;
 
-        let denominator: T = payment_times
+        let denominator = payment_times
             .iter()
             .zip(accruals.iter())
-            .map(|(&ti, &tau)| T::from_f64(tau) * model.zero_coupon_bond(r_start, start, ti))
-            .sum();
+            .map(|(&ti, &tau)| model.zero_coupon_bond(r_start.clone(), start, ti).mul_scalar(tau))
+            .reduce(|acc, leg| acc + leg)
+            .expect("un swap necesita al menos un periodo");
 
-        let _ = notional; // el nocional se cancela en el tipo a la par.
         numerator / denominator
     }
 
@@ -119,8 +124,8 @@ impl<T: Scalar> IrSwap<T> {
         }
 
         IrSwap {
-            notional: self.notional,
-            fixed_rate: self.fixed_rate,
+            notional: self.notional.clone(),
+            fixed_rate: self.fixed_rate.clone(),
             start: t,
             payment_times,
             accruals,
@@ -131,15 +136,27 @@ impl<T: Scalar> IrSwap<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::CpuBackend;
+    use burn::tensor::TensorData;
 
-    fn reference_model() -> HullWhite1F<f64> {
-        HullWhite1F::new(0.1, 0.03, 0.01)
+    type Device = burn::tensor::Device<CpuBackend>;
+
+    fn scalar(value: f64) -> Tensor<CpuBackend, 1> {
+        Tensor::from_data(TensorData::from([value]), &Device::default())
     }
 
-    fn annual_5y_swap(fixed_rate: f64) -> IrSwap<f64> {
+    fn to_f64(t: Tensor<CpuBackend, 1>) -> f64 {
+        t.into_data().to_vec::<f64>().unwrap()[0]
+    }
+
+    fn reference_model() -> HullWhite1F<CpuBackend> {
+        HullWhite1F::new(scalar(0.1), scalar(0.03), scalar(0.01))
+    }
+
+    fn annual_5y_swap(fixed_rate: f64) -> IrSwap<CpuBackend> {
         IrSwap {
-            notional: 1_000_000.0,
-            fixed_rate,
+            notional: scalar(1_000_000.0),
+            fixed_rate: scalar(fixed_rate),
             start: 0.0,
             payment_times: vec![1.0, 2.0, 3.0, 4.0, 5.0],
             accruals: vec![1.0, 1.0, 1.0, 1.0, 1.0],
@@ -151,16 +168,12 @@ mod tests {
         let model = reference_model();
         let r0 = 0.02;
         let swap = annual_5y_swap(0.0); // fixed_rate se sobreescribe abajo
-        let k = IrSwap::par_rate(
-            swap.notional,
-            r0,
-            swap.start,
-            &swap.payment_times,
-            &swap.accruals,
-            &model,
-        );
-        let par_swap = annual_5y_swap(k);
-        let npv = par_swap.npv(r0, 0.0, &model);
+        let k = IrSwap::par_rate(scalar(r0), swap.start, &swap.payment_times, &swap.accruals, &model);
+        let par_swap = IrSwap {
+            fixed_rate: k,
+            ..swap
+        };
+        let npv = to_f64(par_swap.npv(scalar(r0), 0.0, &model));
         assert!(
             npv.abs() < 1e-6,
             "NPV del swap a la par debería ser ~0, got {npv}"
@@ -172,18 +185,14 @@ mod tests {
         let model = reference_model();
         let r0 = 0.02;
         let swap = annual_5y_swap(0.0);
-        let k = IrSwap::par_rate(
-            swap.notional,
-            r0,
-            swap.start,
-            &swap.payment_times,
-            &swap.accruals,
-            &model,
-        );
-        let par_swap = annual_5y_swap(k);
+        let k = IrSwap::par_rate(scalar(r0), swap.start, &swap.payment_times, &swap.accruals, &model);
+        let par_swap = IrSwap {
+            fixed_rate: k,
+            ..swap
+        };
 
-        let npv_base = par_swap.npv(r0, 0.0, &model);
-        let npv_higher_rate = par_swap.npv(r0 + 0.01, 0.0, &model);
+        let npv_base = to_f64(par_swap.npv(scalar(r0), 0.0, &model));
+        let npv_higher_rate = to_f64(par_swap.npv(scalar(r0 + 0.01), 0.0, &model));
         // Un swap pagador (paga fijo, recibe flotante) gana valor cuando suben los tipos.
         assert!(npv_higher_rate > npv_base);
     }

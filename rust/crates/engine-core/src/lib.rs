@@ -1,16 +1,15 @@
 //! `engine-core`: kernels numéricos del motor XVA (PLAN.md §3.1).
 //!
-//! Todo el código de valoración es genérico sobre el trait [`scalar::Scalar`], de forma
-//! que puede instanciarse tanto con `f64` (valoración pura) como con `dual::Dual`
-//! (sensibilidades vía AAD forward-mode, PLAN.md §5.3).
+//! Todo el código de valoración es genérico sobre `B: burn::tensor::backend::Backend`
+//! (ver `crate::backend`), de forma que la misma función sirve para valoración pura en
+//! CPU o GPU y, envolviendo el backend con `Autodiff` (PLAN.md §5.3), para propagar
+//! sensibilidades sin reescribir la lógica de negocio.
 
 pub mod backend;
-pub mod dual;
 pub mod exposure;
 pub mod kernel;
 pub mod models;
 pub mod products;
-pub mod scalar;
 
 pub fn ping() -> f64 {
     42.0
