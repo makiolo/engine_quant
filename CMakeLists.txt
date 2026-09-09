@@ -6,6 +6,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 include(FetchContent)
+enable_testing()
 
 # Corrosion: importa el workspace de Cargo (rust/) como targets CMake nativos (PLAN.md §5, §7.3).
 FetchContent_Declare(
@@ -27,3 +28,4 @@ corrosion_add_cxxbridge(engine-ffi-cxx
 
 add_subdirectory(cpp/engine)
 add_subdirectory(clients/python)
+add_subdirectory(cpp/engine/tests)

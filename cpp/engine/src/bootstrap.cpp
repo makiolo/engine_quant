@@ -1,0 +1,12 @@
+#include "engine/bootstrap.hpp"
+
+namespace engine {
+
+void register_builtins(Registries& registries) {
+    registries.models.register_type<HullWhite1FModel>("HullWhite1F");
+    registries.products.register_type<IrSwapProduct>("IRSwap");
+    registries.measures.register_type<ExposureProfileMeasure>("ExposureProfile");
+    registries.measures.register_type<UnilateralCvaMeasure>("UnilateralCVA");
+}
+
+} // namespace engine

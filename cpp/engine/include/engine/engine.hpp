@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <vector>
 
 namespace engine {
 
@@ -25,6 +26,38 @@ double irs_unilateral_cva_5y(
     double recovery_rate,
     std::uint64_t n_paths,
     std::uint64_t seed
+);
+
+// API generalizada de Fase 2 (PLAN.md §5.4, §6): a diferencia de irs_unilateral_cva_5y
+// (cadena de humo de Fase 1, IRS 5y anual fijo), separa el cálculo del perfil de exposición
+// del cálculo del CVA a partir de ese perfil, para que measure.hpp pueda componerlas.
+struct ExposureProfile {
+    std::vector<double> times;
+    std::vector<double> ee;
+    std::vector<double> pfe_95;
+};
+
+// Perfil de exposición (EE/PFE) de un IRS bajo Hull-White 1F, vía Monte Carlo (PLAN.md §5.2).
+// notional/fixed_rate/start describen el IRS; si use_par_rate es true, fixed_rate se ignora y
+// el tipo fijo se calcula a la par en `start` (igual que hace irs_unilateral_cva_5y, pero
+// aquí el IRS es arbitrario en vez de fijo a 5 años anuales).
+ExposureProfile irs_hull_white_exposure_profile(
+    double a, double b, double sigma, double r0,
+    double notional, double fixed_rate, bool use_par_rate,
+    double start,
+    const std::vector<double>& payment_times,
+    const std::vector<double>& accruals,
+    const std::vector<double>& monitoring_times,
+    std::uint64_t n_paths, std::uint64_t seed
+);
+
+// CVA unilateral (hazard rate plana, recovery rate constante) a partir de un perfil EE ya
+// calculado (times/ee, mismo largo) — separa el cálculo del perfil del cálculo del CVA para
+// que la capa de medidas (measure.hpp) pueda componerlas.
+double unilateral_cva_from_exposure(
+    double a, double b, double sigma, double r0,
+    const std::vector<double>& times, const std::vector<double>& ee,
+    double hazard_rate, double recovery_rate
 );
 
 } // namespace engine
