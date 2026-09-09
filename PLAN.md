@@ -71,29 +71,45 @@ Objetivo de diseño central: **un producto o modelo nuevo se registra una vez y 
 
 ## 5. Decisiones abiertas (a resolver de forma incremental)
 
-- [x] **Backend GPU** → Abstracción propia multi-backend (ver §5.1).
+- [x] **Backend GPU** → Framework tensorial [Burn](https://burn.dev), no una abstracción propia (ver §5.1).
 - [x] **Alcance de la v1** → IRS + Hull-White 1 factor, exposición vía Monte Carlo (ver §5.2).
 - [x] **FFI Rust↔C++** → crate `cxx` (bindings seguros bidireccionales, integración vía `cxx-build`).
 - [x] **Build multiplataforma** → CMake como build system principal (C++/XLL/nanobind) + crate `Corrosion` para integrar el build de Cargo dentro de CMake.
-- [x] **Sensibilidades** → AAD desde la Fase 1 (ver §5.3). Impacta el diseño del core Rust desde el inicio.
+- [x] **Sensibilidades** → AAD desde la Fase 1 vía el autodiff en modo reverse de Burn (ver §5.3). Impacta el diseño del core Rust desde el inicio.
 - [x] **Diseño del registry** → registro explícito centralizado (ver §5.4).
 - [x] **API universal** → C ABI estable expuesta directamente desde la capa C++ (ver §5.5).
 - [x] **Testing/validación numérica** → capas progresivas (ver §5.6).
 
-### 5.1 Compute backend — abstracción propia multi-backend
+### 5.1 Compute backend — framework tensorial Burn, no una abstracción propia
 
-Se define un trait `ComputeBackend` en el core Rust que encapsula las operaciones vectoriales
-necesarias (generación de paths, evaluación de payoffs vectorizada, reducciones/agregaciones,
-generación de números aleatorios). Cada backend concreto (CPU/rayon+SIMD, wgpu, CUDA en el
-futuro) implementa ese trait. La capa C++ y los clientes nunca hablan con un backend concreto:
-seleccionan el backend por configuración (ej. `ComputeBackend::Cpu` vs `ComputeBackend::Gpu(...)`).
+**Revisado en Fase 1** (ver §7.5): la primera versión de esta sección definía un trait
+`ComputeBackend` propio (generación de paths, payoffs vectorizados, reducciones, RNG) con un
+backend CPU manual (rayon + SIMD vía `wide`). Se abandona esa abstracción propia en favor de
+[Burn](https://burn.dev), un framework tensorial de Rust ya maduro que resuelve exactamente el
+mismo problema (cómputo vectorial portable entre CPU y GPU tras un único tipo `Backend` genérico)
+sin mantener código propio de bajo nivel:
 
-Orden de implementación propuesto:
-1. Backend **CPU** (rayon + SIMD vía `std::simd` o `wide`) — referencia funcional y de correctitud.
-2. Trait `ComputeBackend` estabilizado a partir de las necesidades reales del backend CPU (evitar
-   diseñar la interfaz en abstracto antes de tener un caso de uso real).
-3. Backend **GPU** (wgpu como primera opción por portabilidad; CUDA queda abierto como backend
-   adicional si el rendimiento lo justifica) implementando el mismo trait.
+- Los kernels numéricos y la lógica de valoración se escriben genéricos sobre
+  `B: burn::tensor::backend::Backend`, operando sobre `Tensor<B, D>` en vez de sobre un escalar
+  `f64`/tipo dual propio (ver §5.3): una trayectoria Monte Carlo completa (todos los paths a la
+  vez) es un tensor de forma `[n_paths]`, y el "paralelizar entre paths" (antes responsabilidad de
+  `rayon` en el backend CPU manual) pasa a ser responsabilidad de Burn/del backend elegido.
+- La capa C++ y los clientes siguen sin hablar nunca con un backend concreto (principio de §4
+  intacto): elegir CPU o GPU sigue siendo una decisión de configuración, ahora expresada
+  literalmente como qué alias de tipo de Burn se instancia (`CpuBackend = burn::backend::NdArray<f64>`
+  vs, tras la feature `gpu` del crate `engine-core`, `GpuBackend = burn::backend::Wgpu<f64>`).
+- `f64` como tipo de elemento flotante en ambos backends (Burn usa `f32` por defecto, pensado para
+  entrenar redes neuronales): la precisión importa más que el rendimiento en valoración de
+  derivados, y este motor nunca entrena nada, solo reutiliza el motor tensorial/autodiff de Burn.
+
+Orden de implementación real (Fase 1):
+1. Backend **CPU** vía `burn-ndarray` (feature `ndarray` de Burn) — referencia funcional y de
+   correctitud, es la que usan todos los tests de Fase 1.
+2. Backend **GPU** vía `burn-wgpu` (feature `wgpu` de Burn, portable: Vulkan/Metal/DX12/WebGPU) tras
+   la feature `gpu` de `engine-core`, no compilada por defecto (árbol de dependencias y tiempo de
+   compilación considerables) — alias de tipo ya presente en `backend.rs`, pendiente de ejercitar en
+   serio en Fase 5. CUDA (`burn-cuda`) queda abierto como backend adicional si hiciera falta más
+   rendimiento que wgpu, con el mismo cambio de una línea.
 
 ### 5.2 Caso base del prototipo (Fase 0-2)
 
@@ -104,23 +120,25 @@ Orden de implementación propuesto:
 - Sirve como caso de validación para: registry de modelos/productos, FFI Rust↔C++, y equivalencia
   de API entre Python y Excel.
 
-### 5.3 AAD (differenciación automática) desde la Fase 1
+### 5.3 AAD (diferenciación automática) desde la Fase 1 — autodiff de Burn
 
-Al decidir AAD desde el inicio en lugar de bump-and-reval, el core Rust debe ser **genérico sobre
-el tipo numérico escalar** desde el primer kernel (no solo `f64`), de forma que el mismo código de
-valoración pueda instanciarse tanto con `f64` (valoración pura) como con un tipo "dual"/tape-based
-que propague derivadas (ej. vía un crate de autodiff en modo reverse, tipo `dfdx`/`enzyme`/
-implementación propia de tape). Implicaciones sobre el diseño:
+**Revisado en Fase 1** (ver §7.5): la primera versión de esta sección optaba por un tipo `Dual`
+propio (AAD forward-mode de una variable, `val + eps·ε`). Se abandona esa implementación manual en
+favor del autodiff en modo reverse que ya trae Burn (`burn::backend::Autodiff<B>`, un decorador de
+backend): envolver cualquier backend base con `Autodiff` lo equipa transparentemente con
+`backward()`/`grad()`, sin tocar la lógica de valoración.
 
-- El trait `ComputeBackend` (§5.1) y los kernels numéricos deben parametrizarse por un tipo
-  escalar genérico (`T: Float + ...`) en vez de asumir `f64` directamente.
-- El payoff de cada producto y la dinámica de cada modelo deben escribirse de forma genérica sobre
-  ese tipo, para que el grafo de cómputo sea diferenciable sin reescribir lógica de negocio.
-- La elección concreta del mecanismo de AAD (tape propio vs crate existente) queda pendiente y se
-  resolverá en la Fase 1, una vez exista el kernel CPU de referencia (§5.1, punto 1) para validar
-  contra bump-and-reval como método de contraste numérico.
+- El core Rust sigue siendo genérico, pero sobre `B: Backend` (§5.1) en vez de sobre un tipo
+  escalar propio: la misma función de valoración sirve para cómputo puro (`B = CpuBackend`) o para
+  sensibilidades (`B = Autodiff<CpuBackend>`), marcando con `.require_grad()` el/los tensores
+  respecto a los que se quiere diferenciar.
+- Frente al `Dual` forward-mode manual (una pasada por sensibilidad), el modo reverse de Burn
+  calcula el grafo de cómputo una vez y obtiene **todas** las sensibilidades de una única pasada
+  `backward()` — relevante en cuanto se necesite un vector de griegas completo (todas las curvas de
+  Hull-White, no solo `r0`) en vez de una sensibilidad a la vez.
 - Bump-and-reval **no desaparece**: se mantiene como mecanismo de validación cruzada de las
-  sensibilidades calculadas vía AAD, no como alternativa de producción.
+  sensibilidades calculadas vía AAD (`tests/aad_vs_bump_reval.rs`), no como alternativa de
+  producción.
 
 ### 5.4 Registry — registro explícito centralizado
 
@@ -189,11 +207,16 @@ añade en cuanto exista más de un cliente.
 ## 6. Roadmap por fases (borrador, pendiente de detallar)
 
 1. **Fase 0** ✅ — Esqueleto de repos/build: CMake + Corrosion orquestando un workspace Rust mínimo + binding C++ trivial vía `cxx` + smoke test desde Python (ver §7.1, verificado end-to-end).
-2. **Fase 1** ✅ — Core Rust: kernels genéricos sobre tipo escalar (para AAD, §5.3), backend `ComputeBackend` CPU (rayon/SIMD) + simulación Hull-White 1F + valoración IRS + primer mecanismo de AAD validado contra bump-and-reval (ver §7.5, verificado con las 4 capas de test de §5.6 que ya aplican en esta fase).
+2. **Fase 1** ✅ — Core Rust sobre Burn (§5.1, §5.3): kernels/modelos/productos genéricos sobre
+   `Backend`, backend CPU (`burn-ndarray`) + simulación Hull-White 1F + valoración IRS + AAD (modo
+   reverse de Burn) validado contra bump-and-reval (ver §7.5, verificado con las 4 capas de test de
+   §5.6 que ya aplican en esta fase).
 3. **Fase 2** — Capa C++: registry de modelos/productos/medidas, cálculo de exposición (EE/PFE) y CVA unilateral end-to-end sobre IRS+Hull-White.
 4. **Fase 3** — Cliente Python (nanobind) + Jupyter funcional.
 5. **Fase 4** — Cliente Excel (XLL).
-6. **Fase 5** — Backend GPU (wgpu) implementando `ComputeBackend`.
+6. **Fase 5** — Backend GPU: ejercitar en serio el alias `GpuBackend` (`burn-wgpu`, ya presente
+   tras la feature `gpu` de `engine-core` desde Fase 1) — benchmarks, feature por defecto si el
+   rendimiento lo justifica, CUDA (`burn-cuda`) si hiciera falta más que wgpu.
 7. **Fase 6** — API universal / interoperabilidad externa.
 
 ## 7. Estructura de repos/carpetas (Fase 0)
@@ -308,18 +331,21 @@ puramente un test de fontanería (plumbing) del pipeline de build multi-lenguaje
 ### 7.2 Pendiente antes de escribir código
 
 - [x] **Inicializar el repositorio git** → hecho (ver §7.3).
-- [x] **Toolchain de Rust / SIMD** → stable pinneado + crate `wide` (ver §7.3).
+- [x] **Toolchain de Rust** → stable pinneado (ver §7.3).
 - [x] **Dependencias C++ (Corrosion, nanobind, test framework)** → CMake `FetchContent` (ver §7.3).
 
 ### 7.3 Decisiones de toolchain resueltas
 
-**Rust: stable + `wide`.** Se fija la versión exacta del toolchain en `rust/rust-toolchain.toml`
+**Rust: stable + Burn.** Se fija la versión exacta del toolchain en `rust/rust-toolchain.toml`
 (canal `stable`, versión concreta a determinar al arrancar Fase 1 — la más reciente estable en ese
-momento). El backend CPU (§5.1) usa la crate `wide` para SIMD portable en vez de `std::simd`
-(`portable_simd`, nightly-only): evita atar el proyecto a nightly y a una API todavía inestable,
-a costa de un poco menos de control de bajo nivel que `std::simd`. Si en el futuro `portable_simd`
-se estabiliza, migrar es un cambio localizado al backend CPU, no a `engine-core` en general (el
-trait `ComputeBackend` ya lo aísla).
+momento). El cómputo vectorial CPU/GPU y el AAD (§5.1, §5.3) delegan en el framework tensorial
+[Burn](https://burn.dev) (crate `burn`, pinneada a una versión exacta en
+`rust/crates/engine-core/Cargo.toml`) en vez de en primitivas propias (`wide` para SIMD, un tipo
+`Dual` manual): decisión revisada en Fase 1 tras implementar primero la versión manual y comprobar
+que Burn resuelve el mismo problema con menos código propio que mantener (ver §7.5). `engine-core`
+activa solo las features de Burn que necesita (`ndarray`, `autodiff`, y `wgpu` tras la feature
+`gpu` propia) con `default-features = false`, para no arrastrar el resto del ecosistema de Burn
+(datasets, entrenamiento, etc.) que este motor no usa.
 
 **C++: CMake `FetchContent`.** El `CMakeLists.txt` raíz trae Corrosion, nanobind y el framework de
 test C++ (a decidir en Fase 2, probablemente GoogleTest) vía `FetchContent_Declare(... GIT_TAG
@@ -354,36 +380,44 @@ framework de test decidido en Fase 2) y el job de equivalencia Python↔Excel (c
 ### 7.5 Fase 1 — core Rust: kernels, backend, Hull-White, IRS, AAD
 
 Todo el código de esta fase vive en `rust/crates/engine-core` (sin dependencia de `cxx`, testeable
-con `cargo test` puro, ver notas de §7). Módulos añadidos:
+con `cargo test` puro, ver notas de §7). Módulos:
 
-- `scalar.rs` — trait `Scalar` propio (no `num_traits::Float` completo, ver comentario del
-  módulo): las operaciones mínimas que los kernels necesitan, implementado para `f64` y para
-  `dual::Dual`.
-- `dual.rs` — AAD forward-mode de una sola variable (`Dual { val, eps }`, `ε² = 0`). Elegido sobre
-  una tape en modo reverse por ser la implementación más simple y verificable para el primer
-  mecanismo de AAD (§5.3); basta para sensibilidades de un parámetro a la vez (delta, vega, ...),
-  que es lo que necesita el caso base del prototipo. Revisar si migrar a modo reverse cuando haga
-  falta un vector de griegas completo en una sola pasada (más eficiente que repetir el forward-mode
-  una vez por sensibilidad).
-- `kernel.rs` — primitivas genéricas reutilizables por cualquier modelo: `TimeGrid`, paso de
-  Euler-Maruyama, media.
-- `backend.rs` — trait `ComputeBackend` (§5.1) y `CpuBackend`: `rayon` para paralelizar entre paths,
-  SIMD portable (`wide::f64x4`) en la reducción `mean_f64_simd` (camino rápido explícito para
-  `T=f64`; las sensibilidades con `T=Dual` usan la reducción genérica, ya que `Dual` no es
-  vectorizable por SIMD).
+- `backend.rs` — alias de tipo sobre los backends de Burn (§5.1): `CpuBackend = NdArray<f64>`
+  (siempre disponible), `GpuBackend = Wgpu<f64>` (tras la feature `gpu` del crate, no compilada por
+  defecto), y `Autodiff<B>` reexportado como el decorador que añade AAD en modo reverse (§5.3) a
+  cualquiera de los dos.
+- `kernel.rs` — primitivas genéricas reutilizables por cualquier modelo: `TimeGrid` (sin cambios,
+  es aritmética `f64` pura) y un paso de Euler-Maruyama genérico sobre `B: Backend`, operando sobre
+  `Tensor<B, 1>` de forma `[n_paths]` en vez de sobre un escalar — vectorizado sobre todos los paths
+  Monte Carlo a la vez.
 - `models/hull_white.rs` — Hull-White 1F **con nivel de reversión de largo plazo constante**
   (equivalente matemático a Vasicek) en vez de `theta(t)` calibrado a una curva de mercado:
   simplificación deliberada para no necesitar la infraestructura de calibración/curvas de Fase 2
-  todavía, documentada en el propio módulo. Aporta la fórmula cerrada afín del bono cero-cupón y la
-  simulación del tipo corto.
+  todavía, documentada en el propio módulo (sin relación con el cambio a Burn). Aporta la fórmula
+  cerrada afín del bono cero-cupón y la simulación del tipo corto, ambas genéricas sobre `B:
+  Backend` y vectorizadas sobre paths.
 - `products/irs.rs` — IRS valorado por réplica en bonos cero-cupón bajo curva única. Limitación
   documentada: `IrSwap::npv` requiere que la fecha de valoración coincida con una fecha de reseteo
   del swap (`IrSwap::is_reset_date` / `remaining_from`); valorar a mitad de un periodo ya fijado
   queda para cuando haga falta.
-- `exposure.rs` — perfil EE/PFE vía Monte Carlo (simula el tipo corto, revalora el swap restante
-  analíticamente en cada trayectoria) y CVA unilateral simple con hazard rate plana.
-- `tests/aad_vs_bump_reval.rs` — capa 3 de §5.6: sensibilidades vía `Dual` contra diferencias
-  finitas centrales sobre las mismas funciones con `f64`.
+- `exposure.rs` — perfil EE/PFE vía Monte Carlo (simula el tipo corto vectorizado sobre `CpuBackend`,
+  revalora el swap restante analíticamente en cada trayectoria) y CVA unilateral simple con hazard
+  rate plana. Concreto sobre `CpuBackend` (no genérico sobre `B`): el perfil de exposición no se
+  diferencia en Fase 1, solo la valoración puntual (§5.3), así que no necesita `Autodiff`.
+- `tests/aad_vs_bump_reval.rs` — capa 3 de §5.6: instancia el mismo código de valoración con
+  `B = Autodiff<CpuBackend>`, marca el parámetro de interés con `.require_grad()`, llama
+  `.backward()` y compara el gradiente (`.grad(&grads)`) contra diferencias finitas centrales sobre
+  el mismo código instanciado con `B = CpuBackend`.
+
+**Migración de la primera implementación (Scalar/Dual/ComputeBackend manuales) a Burn**: la
+versión inicial de Fase 1 implementaba todo esto a mano (trait `Scalar` propio, tipo `Dual` para
+AAD forward-mode, trait `ComputeBackend` con `CpuBackend` sobre `rayon`+`wide`). Se sustituyó por
+Burn una vez la versión manual ya funcionaba y estaba testeada, tras confirmar que Burn cubre el
+mismo terreno (tensores vectorizados CPU/GPU + autodiff en modo reverse) con una librería madura en
+vez de código propio de bajo nivel que mantener — ver §5.1 y §5.3 para el razonamiento completo de
+la decisión. La migración fue mecánica: los tests de cada módulo (incluida la convergencia MC vs
+fórmula cerrada y AAD vs bump-and-reval) se reescribieron sobre la nueva API y siguen verificando
+exactamente las mismas propiedades matemáticas que antes.
 
 Las cuatro capas de test de §5.6 que aplican en Fase 1 (1: unit deterministas; 2: convergencia MC vs
 fórmula cerrada; 3: AAD vs bump-and-reval) ya corren en `rust-tests` de CI sin cambios en el
