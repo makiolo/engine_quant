@@ -1,0 +1,16 @@
+; PLAN.md Fase 4, §7.8: exporta los nombres SIN decorar (Excel resuelve el "procedure" de
+; xlfRegister y los xlAuto* por GetProcAddress con el nombre exacto, y __stdcall decora el
+; nombre con "@N" salvo que se fuerce via .def).
+LIBRARY engine_excel
+
+EXPORTS
+    xlAutoOpen
+    xlAutoClose
+    xlAutoFree12
+    xlEngineListModels
+    xlEngineListProducts
+    xlEngineListMeasures
+    xlEngineCreateModel
+    xlEngineCreateProduct
+    xlEngineCreateMeasure
+    xlEngineEvaluate
