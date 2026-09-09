@@ -7,6 +7,7 @@
 pub mod backend;
 pub mod dual;
 pub mod kernel;
+pub mod models;
 pub mod scalar;
 
 pub fn ping() -> f64 {
