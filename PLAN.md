@@ -1,7 +1,7 @@
 # XVA Engine — Plan de Arquitectura
 
 > Documento vivo. Se construye de forma incremental, sección a sección.
-> Estado: **v0.2 — decisiones clave cerradas + estructura de carpetas Fase 0**
+> Estado: **v0.3 — Fase 0 completada (scaffolding + smoke test end-to-end verificado)**
 
 ## 1. Visión
 
@@ -188,7 +188,7 @@ añade en cuanto exista más de un cliente.
 
 ## 6. Roadmap por fases (borrador, pendiente de detallar)
 
-1. **Fase 0** — Esqueleto de repos/build: CMake + Corrosion orquestando un workspace Rust mínimo + binding C++ trivial vía `cxx` + smoke test desde Python.
+1. **Fase 0** ✅ — Esqueleto de repos/build: CMake + Corrosion orquestando un workspace Rust mínimo + binding C++ trivial vía `cxx` + smoke test desde Python (ver §7.1, verificado end-to-end).
 2. **Fase 1** — Core Rust: kernels genéricos sobre tipo escalar (para AAD, §5.3), backend `ComputeBackend` CPU (rayon/SIMD) + simulación Hull-White 1F + valoración IRS + primer mecanismo de AAD validado contra bump-and-reval.
 3. **Fase 2** — Capa C++: registry de modelos/productos/medidas, cálculo de exposición (EE/PFE) y CVA unilateral end-to-end sobre IRS+Hull-White.
 4. **Fase 3** — Cliente Python (nanobind) + Jupyter funcional.
@@ -281,6 +281,27 @@ antes de escribir lógica de negocio real.
 4. `clients/python`: módulo nanobind que expone `engine.ping()`.
 5. Test de humo en Python (`import engine; assert engine.ping() == 42.0`) ejecutado en CI.
 
+**Estado: verificado end-to-end** (`engine.ping() == 42.0` desde Python, atravesando las 4 capas).
+
+Gotchas encontrados al implementarlo, relevantes para cualquier crate/target que se añada después:
+
+- **Nombres de target**: Corrosion reemplaza guiones por guiones bajos en el nombre del target
+  CMake para crates `staticlib`/`cdylib` (el paquete Cargo `engine-ffi` da lugar al target CMake
+  `engine_ffi`, no `engine-ffi`). El nombre del paquete Cargo no cambia, solo cómo se referencia
+  desde `CMakeLists.txt` (ej. `corrosion_add_cxxbridge(... CRATE engine_ffi ...)`).
+- **Include del header generado por `cxx`**: con `corrosion_add_cxxbridge(<cxx_target> CRATE
+  <crate> FILES lib.rs)`, el header queda en `<cxx_target>/lib.h` (no `<crate>/src/lib.rs.h`) —
+  se nombra por el `cxx_target` elegido, no por la ruta del archivo fuente.
+- **Mismatch de CRT en Windows/MSVC**: el `cc`/`cxx-build` que compila el shim C++ generado desde
+  `build.rs` no sigue el `CMAKE_BUILD_TYPE` de la parte C++; en concreto, con un `cargo build`
+  no-release enlaza con la CRT de release (`/MD`) por defecto, lo que choca (`LNK2038`) contra un
+  `CMakeLists.txt` configurado en `Debug` (`/MDd`). Solución para Fase 0: build de CMake en
+  **Release**. Revisar en Fase 1 si se necesita build de Debug real (ej. vía
+  `corrosion_add_target_local_rustflags` o forzando el profile de cargo).
+- El entorno de build en Windows requiere el compilador de MSVC en el `PATH` (cargar
+  `vcvars64.bat` / usar una "Developer Command Prompt" antes de invocar `cmake configure`/`build`),
+  ya que tanto `cxx-build` (Rust) como CMake/Ninja necesitan `cl.exe`.
+
 Este caso trivial **no** implementa IRS ni Hull-White todavía (eso es Fase 1-2, §5.2) — es
 puramente un test de fontanería (plumbing) del pipeline de build multi-lenguaje.
 
@@ -311,4 +332,5 @@ Revisar esta decisión si el entorno de CI/desarrollo termina necesitando builds
 recientes de Corrosion/nanobind en Windows/MSVC).
 
 ---
-*Próxima iteración: scaffolding real de Fase 0 (carpetas, `Cargo.toml`, `CMakeLists.txt`, smoke test de §7.1).*
+*Próxima iteración: arrancar Fase 1 — kernels genéricos sobre tipo escalar, backend `ComputeBackend`
+CPU, simulación Hull-White 1F, valoración IRS y primer mecanismo de AAD (§5.3, §6).*

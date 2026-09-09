@@ -1,0 +1,14 @@
+[package]
+name = "engine-ffi"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+crate-type = ["staticlib"]
+
+[dependencies]
+cxx = "1"
+engine-core = { path = "../engine-core" }
+
+[build-dependencies]
+cxx-build = "1"

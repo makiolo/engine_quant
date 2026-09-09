@@ -1,0 +1,24 @@
+# Rust
+/rust/target/
+**/target/
+# Cargo.lock se versiona a propósito (motor final, no librería publicada: build reproducible)
+
+# CMake / C++ build output
+/build/
+/cpp/**/build/
+/clients/**/build/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+
+# IDE / editor
+.vs/
+.vscode/
+*.user
+
+# OS
+Thumbs.db
+.DS_Store
