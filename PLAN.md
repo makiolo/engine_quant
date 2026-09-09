@@ -1,7 +1,7 @@
 # XVA Engine — Plan de Arquitectura
 
 > Documento vivo. Se construye de forma incremental, sección a sección.
-> Estado: **v0.3 — Fase 0 completada (scaffolding + smoke test end-to-end verificado)**
+> Estado: **v0.4 — Fase 1 completada (core Rust: kernels genéricos, backend CPU, Hull-White, IRS, AAD)**
 
 ## 1. Visión
 
@@ -189,7 +189,7 @@ añade en cuanto exista más de un cliente.
 ## 6. Roadmap por fases (borrador, pendiente de detallar)
 
 1. **Fase 0** ✅ — Esqueleto de repos/build: CMake + Corrosion orquestando un workspace Rust mínimo + binding C++ trivial vía `cxx` + smoke test desde Python (ver §7.1, verificado end-to-end).
-2. **Fase 1** — Core Rust: kernels genéricos sobre tipo escalar (para AAD, §5.3), backend `ComputeBackend` CPU (rayon/SIMD) + simulación Hull-White 1F + valoración IRS + primer mecanismo de AAD validado contra bump-and-reval.
+2. **Fase 1** ✅ — Core Rust: kernels genéricos sobre tipo escalar (para AAD, §5.3), backend `ComputeBackend` CPU (rayon/SIMD) + simulación Hull-White 1F + valoración IRS + primer mecanismo de AAD validado contra bump-and-reval (ver §7.5, verificado con las 4 capas de test de §5.6 que ya aplican en esta fase).
 3. **Fase 2** — Capa C++: registry de modelos/productos/medidas, cálculo de exposición (EE/PFE) y CVA unilateral end-to-end sobre IRS+Hull-White.
 4. **Fase 3** — Cliente Python (nanobind) + Jupyter funcional.
 5. **Fase 4** — Cliente Excel (XLL).
@@ -351,6 +351,45 @@ lógica real que testear en Fase 1+):
 Pendiente para cuando exista contenido real: añadir tests de C++ (capas 2-3 de §5.6, requiere el
 framework de test decidido en Fase 2) y el job de equivalencia Python↔Excel (capa 4, Fase 3-4).
 
+### 7.5 Fase 1 — core Rust: kernels, backend, Hull-White, IRS, AAD
+
+Todo el código de esta fase vive en `rust/crates/engine-core` (sin dependencia de `cxx`, testeable
+con `cargo test` puro, ver notas de §7). Módulos añadidos:
+
+- `scalar.rs` — trait `Scalar` propio (no `num_traits::Float` completo, ver comentario del
+  módulo): las operaciones mínimas que los kernels necesitan, implementado para `f64` y para
+  `dual::Dual`.
+- `dual.rs` — AAD forward-mode de una sola variable (`Dual { val, eps }`, `ε² = 0`). Elegido sobre
+  una tape en modo reverse por ser la implementación más simple y verificable para el primer
+  mecanismo de AAD (§5.3); basta para sensibilidades de un parámetro a la vez (delta, vega, ...),
+  que es lo que necesita el caso base del prototipo. Revisar si migrar a modo reverse cuando haga
+  falta un vector de griegas completo en una sola pasada (más eficiente que repetir el forward-mode
+  una vez por sensibilidad).
+- `kernel.rs` — primitivas genéricas reutilizables por cualquier modelo: `TimeGrid`, paso de
+  Euler-Maruyama, media.
+- `backend.rs` — trait `ComputeBackend` (§5.1) y `CpuBackend`: `rayon` para paralelizar entre paths,
+  SIMD portable (`wide::f64x4`) en la reducción `mean_f64_simd` (camino rápido explícito para
+  `T=f64`; las sensibilidades con `T=Dual` usan la reducción genérica, ya que `Dual` no es
+  vectorizable por SIMD).
+- `models/hull_white.rs` — Hull-White 1F **con nivel de reversión de largo plazo constante**
+  (equivalente matemático a Vasicek) en vez de `theta(t)` calibrado a una curva de mercado:
+  simplificación deliberada para no necesitar la infraestructura de calibración/curvas de Fase 2
+  todavía, documentada en el propio módulo. Aporta la fórmula cerrada afín del bono cero-cupón y la
+  simulación del tipo corto.
+- `products/irs.rs` — IRS valorado por réplica en bonos cero-cupón bajo curva única. Limitación
+  documentada: `IrSwap::npv` requiere que la fecha de valoración coincida con una fecha de reseteo
+  del swap (`IrSwap::is_reset_date` / `remaining_from`); valorar a mitad de un periodo ya fijado
+  queda para cuando haga falta.
+- `exposure.rs` — perfil EE/PFE vía Monte Carlo (simula el tipo corto, revalora el swap restante
+  analíticamente en cada trayectoria) y CVA unilateral simple con hazard rate plana.
+- `tests/aad_vs_bump_reval.rs` — capa 3 de §5.6: sensibilidades vía `Dual` contra diferencias
+  finitas centrales sobre las mismas funciones con `f64`.
+
+Las cuatro capas de test de §5.6 que aplican en Fase 1 (1: unit deterministas; 2: convergencia MC vs
+fórmula cerrada; 3: AAD vs bump-and-reval) ya corren en `rust-tests` de CI sin cambios en el
+workflow — `cargo test --workspace --locked` las cubre todas.
+
 ---
-*Próxima iteración: arrancar Fase 1 — kernels genéricos sobre tipo escalar, backend `ComputeBackend`
-CPU, simulación Hull-White 1F, valoración IRS y primer mecanismo de AAD (§5.3, §6).*
+*Próxima iteración: arrancar Fase 2 — registry de modelos/productos/medidas en la capa C++
+(§5.4), consumiendo `engine-ffi` para exponer Hull-White/IRS/exposición/CVA desde C++, con el
+mismo caso base IRS + Hull-White (§5.2) end-to-end desde esa capa.*
