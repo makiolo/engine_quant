@@ -4,7 +4,9 @@
 //! que puede instanciarse tanto con `f64` (valoración pura) como con `dual::Dual`
 //! (sensibilidades vía AAD forward-mode, PLAN.md §5.3).
 
+pub mod backend;
 pub mod dual;
+pub mod kernel;
 pub mod scalar;
 
 pub fn ping() -> f64 {
