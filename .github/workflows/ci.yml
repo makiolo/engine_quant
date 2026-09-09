@@ -64,5 +64,5 @@ jobs:
       - name: Build
         run: cmake --build build
 
-      - name: Python smoke test (engine.ping == 42.0)
+      - name: Python smoke test (ping + Hull-White/IRS/CVA sobre Burn)
         run: python clients/python/tests/test_smoke.py build/clients/python

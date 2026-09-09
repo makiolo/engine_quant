@@ -10,6 +10,7 @@ pub mod exposure;
 pub mod kernel;
 pub mod models;
 pub mod products;
+pub mod smoke;
 
 pub fn ping() -> f64 {
     42.0
