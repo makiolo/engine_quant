@@ -8,6 +8,12 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 include(FetchContent)
 enable_testing()
 
+# Permiten acotar el build a lo que hace falta en cada contexto (PLAN.md §7.9): un build de
+# paquete/wheel (pyproject.toml, scikit-build-core) solo necesita cpp/engine + clients/python,
+# sin traerse GoogleTest (cpp/engine/tests, clients/excel/tests) ni compilar el XLL.
+option(ENGINE_QUANT_BUILD_TESTS "Compilar los tests de C++ (ctest: registry + bridge Excel)" ON)
+option(ENGINE_QUANT_BUILD_EXCEL "Compilar el cliente Excel (XLL)" ON)
+
 # Corrosion: importa el workspace de Cargo (rust/) como targets CMake nativos (PLAN.md §5, §7.3).
 FetchContent_Declare(
     Corrosion
@@ -28,12 +34,15 @@ corrosion_add_cxxbridge(engine-ffi-cxx
 
 add_subdirectory(cpp/engine)
 add_subdirectory(clients/python)
-add_subdirectory(cpp/engine/tests)
 
-# Cliente Excel (PLAN.md Fase 4, §7.8): artefacto especifico de Windows (XLL = DLL con tabla
-# de exports xlAuto*/UDFs via .def, API de Excel via windows.h). El resto del arbol de CMake
-# ya solo se construye/testea en windows-latest en CI (§7.4); este guard hace explicito que
-# clients/excel en particular no tiene sentido fuera de Windows.
-if(WIN32)
+if(ENGINE_QUANT_BUILD_TESTS)
+    add_subdirectory(cpp/engine/tests)
+endif()
+
+# Cliente Excel (PLAN.md Fase 4, §7.8): artefacto especifico de Windows (XLL, API de Excel
+# via windows.h). El resto del arbol de CMake ya solo se construye/testea en windows-latest
+# en CI (§7.4); este guard hace explicito que clients/excel en particular no tiene sentido
+# fuera de Windows.
+if(WIN32 AND ENGINE_QUANT_BUILD_EXCEL)
     add_subdirectory(clients/excel)
 endif()

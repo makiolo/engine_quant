@@ -30,4 +30,6 @@ set_target_properties(engine_excel_ext PROPERTIES
     SUFFIX ".xll"
 )
 
-add_subdirectory(tests)
+if(ENGINE_QUANT_BUILD_TESTS)
+    add_subdirectory(tests)
+endif()

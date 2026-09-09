@@ -1,0 +1,27 @@
+[build-system]
+requires = ["scikit-build-core>=0.10"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "engine-quant"
+# Sobrescrita por el workflow de release (.github/workflows/release.yml) a partir del tag
+# de la release; "0.0.0" es solo el valor para builds locales/de desarrollo.
+version = "0.0.0"
+description = "Motor de calculo XVA (CVA/DVA/FVA/MVA/KVA): cliente Python (import engine) sobre el registry C++/Rust del motor."
+readme = "clients/python/README_PYPI.md"
+requires-python = ">=3.9"
+
+[tool.scikit-build]
+# El CMakeLists.txt raiz orquesta Rust (Corrosion) + C++ (registry) + Python (nanobind) +
+# tests + Excel/XLL (PLAN.md §7). Para un build de wheel solo hace falta compilar/instalar
+# el target `engine_py_ext` (clients/python/CMakeLists.txt): ENGINE_QUANT_BUILD_TESTS/
+# ENGINE_QUANT_BUILD_EXCEL=OFF evitan traerse GoogleTest y compilar el XLL sin necesidad.
+build.targets = ["engine_py_ext"]
+build.verbose = true
+cmake.build-type = "Release"
+cmake.define = { ENGINE_QUANT_BUILD_TESTS = "OFF", ENGINE_QUANT_BUILD_EXCEL = "OFF" }
+# El unico artefacto instalado es engine.pyd (nanobind, OUTPUT_NAME "engine") vía el
+# install(TARGETS engine_py_ext ...) de clients/python/CMakeLists.txt: no hay paquete Python
+# (src/<paquete>) que auto-copiar.
+wheel.packages = []
+wheel.install-dir = "."

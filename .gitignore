@@ -13,6 +13,9 @@ __pycache__/
 *.pyc
 .venv/
 *.egg-info/
+/dist/
+/dist_*/
+/wheelhouse/
 
 # IDE / editor
 .vs/
