@@ -2,27 +2,75 @@ name: Release
 
 # Empaqueta y publica los artefactos de una release (PLAN.md §7.9): ruedas de Python
 # autocontenidas (una por version de CPython) y el .xll de Excel con sus dependencias y el
-# instalador. Se dispara al empujar un tag "vX.Y.Z" -- crea la release en GitHub con
-# softprops/action-gh-release si no existe, y le adjunta los assets. `workflow_dispatch`
-# permite probar el pipeline de build sin publicar nada (build-wheels/build-xll corren igual,
-# pero publish-release se salta si no viene de un tag).
+# instalador. Dos formas de disparar una publicacion real (job publish-release):
+#   1. Empujar un tag "vX.Y.Z" (`git tag v0.1.0 && git push origin v0.1.0`).
+#   2. Lanzarlo a mano (pestaña Actions > Release > Run workflow) con "publish" marcado y
+#      "version" relleno -- softprops/action-gh-release crea el tag "vX.Y.Z" y la release en
+#      el mismo paso, sin necesitar tocar git en local.
+# Un `workflow_dispatch` sin "publish" marcado compila wheels + .xll y los deja como
+# artefactos del workflow (pestaña Summary del run), sin crear ninguna release ni tag: sirve
+# para probar el pipeline de build antes de publicar de verdad.
 on:
   push:
     tags:
       - "v*"
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "Publicar una release en GitHub al terminar (si no, solo se compilan y suben los artefactos del workflow)"
+        type: boolean
+        default: false
+      version:
+        description: "Version a publicar, p.ej. 0.1.0 (obligatorio si 'publish' esta marcado; se ignora en un disparo por tag)"
+        type: string
+        default: ""
 
 permissions:
   contents: write
 
 jobs:
+  determine-version:
+    name: Determinar version y si se publica
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.compute.outputs.version }}
+      tag_name: ${{ steps.compute.outputs.tag_name }}
+      publish: ${{ steps.compute.outputs.publish }}
+    steps:
+      - name: Calcular version/tag/publish
+        id: compute
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            version="${GITHUB_REF_NAME#v}"
+            tag_name="$GITHUB_REF_NAME"
+            publish=true
+          elif [[ "${{ inputs.publish }}" == "true" ]]; then
+            version="${{ inputs.version }}"
+            if [[ -z "$version" ]]; then
+              echo "::error::Con 'publish' marcado hace falta indicar 'version' (p.ej. 0.1.0)"
+              exit 1
+            fi
+            tag_name="v$version"
+            publish=true
+          else
+            version="0.0.0.dev0+${GITHUB_SHA::8}"
+            tag_name=""
+            publish=false
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag_name=$tag_name" >> "$GITHUB_OUTPUT"
+          echo "publish=$publish" >> "$GITHUB_OUTPUT"
+          echo "Version: $version | tag: $tag_name | publish: $publish"
+
   build-wheels:
     name: Wheel Python (cp${{ matrix.python-version }}, win_amd64)
+    needs: determine-version
     runs-on: windows-latest
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.10", "3.11", "3.12", "3.13"]
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
     steps:
       - uses: actions/checkout@v4
 
@@ -48,17 +96,12 @@ jobs:
             ${{ runner.os }}-cargo-
 
       # pyproject.toml versiona "0.0.0" en el repo (solo para builds locales/de desarrollo);
-      # aqui se sobrescribe con el tag de la release (v1.2.3 -> 1.2.3).
-      - name: Fijar la version del paquete desde el tag
+      # aqui se sobrescribe con la version calculada por determine-version.
+      - name: Fijar la version del paquete
         shell: bash
         run: |
-          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
-            version="${GITHUB_REF_NAME#v}"
-          else
-            version="0.0.0.dev0+${GITHUB_SHA::8}"
-          fi
-          sed -i "s/^version = \"0.0.0\"/version = \"$version\"/" pyproject.toml
-          echo "Version fijada: $version"
+          sed -i "s/^version = \"0.0.0\"/version = \"${{ needs.determine-version.outputs.version }}\"/" pyproject.toml
+          echo "Version fijada: ${{ needs.determine-version.outputs.version }}"
 
       - name: Instalar herramientas de build
         run: python -m pip install --upgrade pip delvewheel
@@ -87,7 +130,10 @@ jobs:
 
   build-xll:
     name: Complemento de Excel (.xll + instalador)
+    needs: determine-version
     runs-on: windows-latest
+    env:
+      ASSET_VERSION: ${{ needs.determine-version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
 
@@ -125,15 +171,6 @@ jobs:
       # va a empaquetar mas abajo y ejerce xlAutoOpen/las UDFs como lo haria Excel de verdad.
       - name: Tests (registry + bridge Excel + harness del .xll)
         run: ctest --test-dir build --output-on-failure -C Release
-
-      - name: Determinar la version del asset desde el tag
-        shell: bash
-        run: |
-          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
-            echo "ASSET_VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
-          else
-            echo "ASSET_VERSION=0.0.0-dev-${GITHUB_SHA::8}" >> "$GITHUB_ENV"
-          fi
 
       # engine_excel.xll enlaza Rust estaticamente (PLAN.md §5.4); la unica dependencia
       # dinamica que no forma parte de Windows es MSVCP140.dll (mismo criterio que la wheel
@@ -183,8 +220,8 @@ jobs:
 
   publish-release:
     name: Publicar la release en GitHub
-    needs: [build-wheels, build-xll]
-    if: startsWith(github.ref, 'refs/tags/')
+    needs: [determine-version, build-wheels, build-xll]
+    if: needs.determine-version.outputs.publish == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -199,5 +236,6 @@ jobs:
 
       - uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ needs.determine-version.outputs.tag_name }}
           files: release_assets/*
           generate_release_notes: true
