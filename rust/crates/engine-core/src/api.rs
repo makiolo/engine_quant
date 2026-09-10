@@ -53,7 +53,7 @@ pub fn irs_hull_white_exposure_profile(
         accruals,
     };
 
-    expected_exposure_profile(&model, &swap, r0, monitoring_times, n_paths, seed)
+    expected_exposure_profile(&model, &swap, r0, monitoring_times, n_paths, seed, &device)
 }
 
 /// CVA unilateral a partir de un perfil de exposición ya calculado (`times`/`ee`, mismo
@@ -78,7 +78,7 @@ pub fn unilateral_cva_from_exposure(
         ee,
         pfe_95: Vec::new(),
     };
-    unilateral_cva(&profile, &model, r0, hazard_rate, recovery_rate)
+    unilateral_cva(&profile, &model, r0, hazard_rate, recovery_rate, &device)
 }
 
 #[cfg(test)]

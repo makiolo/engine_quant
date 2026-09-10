@@ -76,8 +76,9 @@ pub fn irs_unilateral_cva_5y(
     };
 
     let monitoring_times = vec![0.0, 1.0, 2.0, 3.0, 4.0];
-    let profile = expected_exposure_profile(&model, &swap, r0, &monitoring_times, n_paths as usize, seed);
-    unilateral_cva(&profile, &model, r0, hazard_rate, recovery_rate)
+    let profile =
+        expected_exposure_profile(&model, &swap, r0, &monitoring_times, n_paths as usize, seed, &device);
+    unilateral_cva(&profile, &model, r0, hazard_rate, recovery_rate, &device)
 }
 
 #[cfg(test)]

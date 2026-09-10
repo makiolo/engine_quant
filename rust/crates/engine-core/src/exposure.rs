@@ -1,26 +1,25 @@
 //! Perfil de exposición (EE/PFE) vía Monte Carlo y CVA unilateral simple sobre ese
 //! perfil — PLAN.md §5.2: primera métrica XVA end-to-end del prototipo (IRS +
 //! Hull-White). En Fase 2 esto se convierte en una "métrica XVA" registrable desde la
-//! capa C++ (PLAN.md §5.4); aquí vive como función libre sobre `CpuBackend` porque las
-//! sensibilidades de exposición (AAD de EE/CVA) no son parte del alcance de Fase 1
-//! (§5.3 solo pide AAD para la valoración puntual, no para el perfil completo) — el
-//! perfil se calcula con Monte Carlo vectorizado (todos los paths a la vez, ver
-//! `crate::models::hull_white`) y se reduce a `Vec<f64>` en Rust plano para EE/PFE, sin
-//! necesidad de mantener el grafo de cómputo de Burn más allá de ese punto.
+//! capa C++ (PLAN.md §5.4); aquí vive como función libre genérica sobre `B: Backend`
+//! (PLAN.md §6 Fase 5: el mismo código sirve para `CpuBackend` y, tras la feature `gpu`,
+//! `GpuBackend`, ver `benches/exposure_backend.rs`) porque las sensibilidades de
+//! exposición (AAD de EE/CVA) no son parte del alcance de Fase 1 (§5.3 solo pide AAD
+//! para la valoración puntual, no para el perfil completo) — el perfil se calcula con
+//! Monte Carlo vectorizado (todos los paths a la vez, ver `crate::models::hull_white`) y
+//! se reduce a `Vec<f64>` en Rust plano para EE/PFE, sin necesidad de mantener el grafo
+//! de cómputo de Burn más allá de ese punto.
 
-use crate::backend::CpuBackend;
 use crate::models::hull_white::HullWhite1F;
 use crate::products::irs::IrSwap;
 use burn::tensor::backend::Backend;
 use burn::tensor::{Distribution, Tensor, TensorData};
 
-type Device = burn::tensor::Device<CpuBackend>;
-
-fn scalar(value: f64) -> Tensor<CpuBackend, 1> {
-    Tensor::from_data(TensorData::from([value]), &Device::default())
+fn scalar<B: Backend>(value: f64, device: &burn::tensor::Device<B>) -> Tensor<B, 1> {
+    Tensor::from_data(TensorData::from([value]), device)
 }
 
-fn to_vec(t: Tensor<CpuBackend, 1>) -> Vec<f64> {
+fn to_vec<B: Backend>(t: Tensor<B, 1>) -> Vec<f64> {
     t.into_data().to_vec::<f64>().unwrap()
 }
 
@@ -42,13 +41,14 @@ pub struct ExposureProfile {
 /// (`swap.is_reset_date`, ver limitación documentada en `crate::products::irs`): la
 /// pata flotante debe fijar su próximo cupón exactamente ahí para que la fórmula de
 /// réplica en bonos siga siendo válida.
-pub fn expected_exposure_profile(
-    model: &HullWhite1F<CpuBackend>,
-    swap: &IrSwap<CpuBackend>,
+pub fn expected_exposure_profile<B: Backend<FloatElem = f64>>(
+    model: &HullWhite1F<B>,
+    swap: &IrSwap<B>,
     r0: f64,
     monitoring_times: &[f64],
     n_paths: usize,
     seed: u64,
+    device: &burn::tensor::Device<B>,
 ) -> ExposureProfile {
     assert!(!monitoring_times.is_empty(), "monitoring_times vacío");
     for &t in monitoring_times {
@@ -59,14 +59,14 @@ pub fn expected_exposure_profile(
     }
     let t_max = monitoring_times.iter().cloned().fold(f64::MIN, f64::max);
 
-    let remaining_swaps: Vec<IrSwap<CpuBackend>> =
+    let remaining_swaps: Vec<IrSwap<B>> =
         monitoring_times.iter().map(|&t| swap.remaining_from(t)).collect();
 
     // Con t_max = 0 (única fecha de monitorización = hoy) no hace falta simular nada:
     // todas las trayectorias arrancan en r0.
     if t_max <= 0.0 {
         let npv = remaining_swaps[0]
-            .npv(scalar(r0), monitoring_times[0], model)
+            .npv(scalar(r0, device), monitoring_times[0], model)
             .into_scalar()
             .max(0.0);
         return ExposureProfile {
@@ -81,12 +81,11 @@ pub fn expected_exposure_profile(
     let n_steps = ((t_max / (1.0 / 52.0)).ceil() as usize).max(monitoring_times.len());
     let dt = t_max / n_steps as f64;
 
-    let device = Device::default();
-    CpuBackend::seed(&device, seed);
-    let shocks: Vec<Tensor<CpuBackend, 1>> = (0..n_steps)
-        .map(|_| Tensor::random([n_paths], Distribution::Normal(0.0, 1.0), &device))
+    B::seed(device, seed);
+    let shocks: Vec<Tensor<B, 1>> = (0..n_steps)
+        .map(|_| Tensor::random([n_paths], Distribution::Normal(0.0, 1.0), device))
         .collect();
-    let path = model.simulate_path(scalar(r0), dt, &shocks);
+    let path = model.simulate_path(scalar(r0, device), dt, &shocks);
 
     let mut ee = Vec::with_capacity(monitoring_times.len());
     let mut pfe_95 = Vec::with_capacity(monitoring_times.len());
@@ -120,12 +119,13 @@ pub fn expected_exposure_profile(
 /// prototipo: no usa la medida de riesgo neutral simulada para el descuento del CVA en
 /// sí (solo para generar el perfil EE), consistente con PLAN.md §5.2 ("CVA unilateral
 /// simple como primera métrica XVA end-to-end").
-pub fn unilateral_cva(
+pub fn unilateral_cva<B: Backend<FloatElem = f64>>(
     profile: &ExposureProfile,
-    model: &HullWhite1F<CpuBackend>,
+    model: &HullWhite1F<B>,
     r0: f64,
     hazard_rate: f64,
     recovery_rate: f64,
+    device: &burn::tensor::Device<B>,
 ) -> f64 {
     let mut cva = 0.0;
     let mut prev_survival = 1.0;
@@ -133,7 +133,7 @@ pub fn unilateral_cva(
     for (i, &t) in profile.times.iter().enumerate() {
         let survival = (-hazard_rate * t).exp();
         let default_prob = prev_survival - survival;
-        let discount = model.zero_coupon_bond(scalar(r0), 0.0, t).into_scalar();
+        let discount = model.zero_coupon_bond(scalar(r0, device), 0.0, t).into_scalar();
         cva += (1.0 - recovery_rate) * profile.ee[i] * default_prob * discount;
         prev_survival = survival;
     }
@@ -143,17 +143,20 @@ pub fn unilateral_cva(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::CpuBackend;
 
-    fn reference_model() -> HullWhite1F<CpuBackend> {
-        HullWhite1F::new(scalar(0.1), scalar(0.03), scalar(0.01))
+    type Device = burn::tensor::Device<CpuBackend>;
+
+    fn reference_model(device: &Device) -> HullWhite1F<CpuBackend> {
+        HullWhite1F::new(scalar(0.1, device), scalar(0.03, device), scalar(0.01, device))
     }
 
-    fn par_swap(r0: f64, model: &HullWhite1F<CpuBackend>) -> IrSwap<CpuBackend> {
+    fn par_swap(r0: f64, model: &HullWhite1F<CpuBackend>, device: &Device) -> IrSwap<CpuBackend> {
         let payment_times = vec![1.0, 2.0, 3.0, 4.0, 5.0];
         let accruals = vec![1.0, 1.0, 1.0, 1.0, 1.0];
-        let k = IrSwap::par_rate(scalar(r0), 0.0, &payment_times, &accruals, model);
+        let k = IrSwap::par_rate(scalar(r0, device), 0.0, &payment_times, &accruals, model);
         IrSwap {
-            notional: scalar(1_000_000.0),
+            notional: scalar(1_000_000.0, device),
             fixed_rate: k,
             start: 0.0,
             payment_times,
@@ -163,11 +166,12 @@ mod tests {
 
     #[test]
     fn exposure_is_nonnegative_and_pfe_dominates_ee() {
-        let model = reference_model();
+        let device = Device::default();
+        let model = reference_model(&device);
         let r0 = 0.02;
-        let swap = par_swap(r0, &model);
+        let swap = par_swap(r0, &model, &device);
         let times = vec![0.0, 1.0, 2.0];
-        let profile = expected_exposure_profile(&model, &swap, r0, &times, 5_000, 7);
+        let profile = expected_exposure_profile(&model, &swap, r0, &times, 5_000, 7, &device);
 
         for i in 0..times.len() {
             assert!(profile.ee[i] >= 0.0);
@@ -179,37 +183,40 @@ mod tests {
     fn exposure_at_time_zero_matches_deterministic_npv_exactly() {
         // En t=0 todas las trayectorias arrancan en r0: sin aleatoriedad, EE(0) debe
         // coincidir exactamente (salvo redondeo) con el NPV determinista.
-        let model = reference_model();
+        let device = Device::default();
+        let model = reference_model(&device);
         let r0 = 0.02;
-        let swap = par_swap(r0, &model);
-        let profile = expected_exposure_profile(&model, &swap, r0, &[0.0], 1_000, 11);
+        let swap = par_swap(r0, &model, &device);
+        let profile = expected_exposure_profile(&model, &swap, r0, &[0.0], 1_000, 11, &device);
 
-        let deterministic = swap.npv(scalar(r0), 0.0, &model).into_scalar().max(0.0);
+        let deterministic = swap.npv(scalar(r0, &device), 0.0, &model).into_scalar().max(0.0);
         assert!((profile.ee[0] - deterministic).abs() < 1e-6);
         assert!((profile.pfe_95[0] - deterministic).abs() < 1e-6);
     }
 
     #[test]
     fn unilateral_cva_is_positive_for_nonzero_hazard_rate() {
-        let model = reference_model();
+        let device = Device::default();
+        let model = reference_model(&device);
         let r0 = 0.02;
-        let swap = par_swap(r0, &model);
+        let swap = par_swap(r0, &model, &device);
         let times = vec![0.0, 1.0, 2.0, 3.0];
-        let profile = expected_exposure_profile(&model, &swap, r0, &times, 5_000, 13);
+        let profile = expected_exposure_profile(&model, &swap, r0, &times, 5_000, 13, &device);
 
-        let cva = unilateral_cva(&profile, &model, r0, 0.02, 0.4);
+        let cva = unilateral_cva(&profile, &model, r0, 0.02, 0.4, &device);
         assert!(cva > 0.0, "CVA debería ser positivo, got {cva}");
     }
 
     #[test]
     fn unilateral_cva_is_zero_when_hazard_rate_is_zero() {
-        let model = reference_model();
+        let device = Device::default();
+        let model = reference_model(&device);
         let r0 = 0.02;
-        let swap = par_swap(r0, &model);
+        let swap = par_swap(r0, &model, &device);
         let times = vec![0.0, 1.0, 2.0];
-        let profile = expected_exposure_profile(&model, &swap, r0, &times, 2_000, 17);
+        let profile = expected_exposure_profile(&model, &swap, r0, &times, 2_000, 17, &device);
 
-        let cva = unilateral_cva(&profile, &model, r0, 0.0, 0.4);
+        let cva = unilateral_cva(&profile, &model, r0, 0.0, 0.4, &device);
         assert!(cva.abs() < 1e-9, "CVA con hazard=0 debería ser 0, got {cva}");
     }
 }

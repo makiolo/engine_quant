@@ -27,6 +27,13 @@ jobs:
         working-directory: rust
         run: cargo test --workspace --locked
 
+      # PLAN.md §7.11 (Fase 5): la feature `gpu` (burn-wgpu) no se ejercita en CI porque
+      # este runner no tiene adaptador GPU (eso se hace a mano con `examples/gpu_probe.rs`
+      # y `examples/gpu_vs_cpu_bench.rs`), pero sí debe seguir compilando en cada cambio.
+      - name: cargo check --features gpu (compila, no requiere GPU)
+        working-directory: rust
+        run: cargo check -p engine-core --features gpu --locked --examples
+
   build-and-smoke-test:
     name: Build completo (CMake + Corrosion + cxx + nanobind + gtest) + tests C++ + tests Python
     runs-on: windows-latest

@@ -1,9 +1,10 @@
 # XVA Engine — Plan de Arquitectura
 
 > Documento vivo. Se construye de forma incremental, sección a sección.
-> Estado: **v0.9 — Fase 4 completada (cliente Excel vía XLL sobre el registry C++) +
+> Estado: **v0.10 — Fase 4 completada (cliente Excel vía XLL sobre el registry C++) +
 > empaquetado/distribución (wheel Python + XLL autocontenidos, release automática en CI, §7.9)
-> + instalador Windows todo-en-uno (wizard .exe, §7.10)**
+> + instalador Windows todo-en-uno (wizard .exe, §7.10) + Fase 5 completada (backend GPU
+> ejercitado con benchmarks reales, se mantiene opcional, §7.11)**
 
 ## 1. Visión
 
@@ -109,9 +110,10 @@ Orden de implementación real (Fase 1):
    correctitud, es la que usan todos los tests de Fase 1.
 2. Backend **GPU** vía `burn-wgpu` (feature `wgpu` de Burn, portable: Vulkan/Metal/DX12/WebGPU) tras
    la feature `gpu` de `engine-core`, no compilada por defecto (árbol de dependencias y tiempo de
-   compilación considerables) — alias de tipo ya presente en `backend.rs`, pendiente de ejercitar en
-   serio en Fase 5. CUDA (`burn-cuda`) queda abierto como backend adicional si hiciera falta más
-   rendimiento que wgpu, con el mismo cambio de una línea.
+   compilación considerables) — alias de tipo ya presente en `backend.rs`, ejercitado con
+   benchmarks reales en Fase 5 (ver §7.11): sigue opcional, no por defecto. CUDA (`burn-cuda`)
+   queda abierto como backend adicional si hiciera falta más rendimiento que wgpu, con el mismo
+   cambio de una línea.
 
 ### 5.2 Caso base del prototipo (Fase 0-2)
 
@@ -220,9 +222,8 @@ añade en cuanto exista más de un cliente.
 3. **Fase 2** ✅ — Capa C++: registry de modelos/productos/medidas, cálculo de exposición (EE/PFE) y CVA unilateral end-to-end sobre IRS+Hull-White (ver §7.6).
 4. **Fase 3** ✅ — Cliente Python (nanobind) + Jupyter funcional (ver §7.7).
 5. **Fase 4** ✅ — Cliente Excel (XLL) sobre el registry C++ (ver §7.8).
-6. **Fase 5** — Backend GPU: ejercitar en serio el alias `GpuBackend` (`burn-wgpu`, ya presente
-   tras la feature `gpu` de `engine-core` desde Fase 1) — benchmarks, feature por defecto si el
-   rendimiento lo justifica, CUDA (`burn-cuda`) si hiciera falta más que wgpu.
+6. **Fase 5** ✅ — Backend GPU: alias `GpuBackend` (`burn-wgpu`) ejercitado con benchmarks reales
+   sobre IRS+Hull-White; se mantiene tras feature opcional `gpu`, no por defecto (ver §7.11).
 7. **Fase 6** — API universal / interoperabilidad externa.
 
 ## 7. Estructura de repos/carpetas (Fase 0)
@@ -920,15 +921,71 @@ máquina exactamente como al principio (paquete no importable, clave de Excel el
 carpetas de `%LOCALAPPDATA%`/`Program Files` limpias, entrada de Programas y características
 eliminada).
 
+### 7.11 Fase 5 — backend GPU: benchmarks reales y decisión de feature por defecto
+
+Objetivo (§6, §5.1): dejar de tratar `GpuBackend` (`burn-wgpu`) como un alias de tipo sin
+ejercitar y decidir, con datos, si conviene compilarlo por defecto o mantenerlo tras la
+feature opcional `gpu` de `engine-core`.
+
+**Cambio previo necesario — `crate::exposure` genérico sobre `Backend`**: antes de esta fase
+`expected_exposure_profile`/`unilateral_cva` estaban escritos directamente sobre `CpuBackend`
+(el resto del motor — `HullWhite1F<B>`, `IrSwap<B>` — ya era genérico desde Fase 1). Se
+generaliza ambas funciones a `B: Backend<FloatElem = f64>` (el `FloatElem = f64` es el mismo
+que ya fija `backend.rs` para ambos backends concretos, §5.1 — evita tener que arrastrar
+`ElementConversion` genérico solo para comparar/multiplicar el resultado de `into_scalar()`)
+para poder instanciarlas también con `GpuBackend`. La API pública de `crate::api` (frontera
+consumida por `engine-ffi`/C++) sigue fijada a `CpuBackend`, sin cambios de comportamiento.
+
+**Sonda de disponibilidad** (`examples/gpu_probe.rs`, `cargo run -p engine-core --features gpu
+--example gpu_probe`): confirma antes de fiarse de cualquier benchmark que `burn-wgpu`
+encuentra un adaptador GPU real en la máquina y devuelve resultados correctos. En la máquina
+de desarrollo usada: adaptador `DefaultDevice` disponible, resultado numérico correcto.
+
+**Benchmark** (`examples/gpu_vs_cpu_bench.rs`, `cargo run -p engine-core --release --features
+gpu --example gpu_vs_cpu_bench`): mide el tiempo de `expected_exposure_profile` sobre el caso
+base de §5.2 (IRS 5y anual a la par bajo Hull-White 1F) para una serie de tamaños de
+`n_paths`, en `CpuBackend` (`burn-ndarray`) y `GpuBackend` (`burn-wgpu`), descartando una
+primera pasada de calentamiento en cada backend (el pool de threads en CPU, la compilación de
+shaders/inicialización del adaptador en GPU) para medir solo el coste en estado estable.
+Resultado real (build `--release`, misma máquina que la sonda anterior):
+
+| `n_paths` | CPU (`ndarray`) | GPU (`wgpu`) |
+|---:|---:|---:|
+| 1.000 | 5,6 ms | 53,8 ms |
+| 10.000 | 72,5 ms | 76,9 ms |
+| 100.000 | 555,0 ms | 90,7 ms (**6,1x**) |
+| 1.000.000 | 9,27 s | 2,17 s (**4,3x**) |
+
+**Decisión: `gpu` sigue siendo una feature opcional, no se activa por defecto.** Motivos,
+todos con datos de la propia tabla o de esta fase:
+
+1. **El punto de cruce está lejos del caso de uso por defecto.** Por debajo de ~10.000 paths
+   (el rango típico de un smoke test o de una consulta interactiva desde Python/Excel, §5.2)
+   la GPU es más lenta que la CPU — el overhead de lanzar kernels/shaders no se amortiza. Solo
+   a partir de ~100.000 paths (perfiles de exposición de alta precisión, cálculo de un
+   portfolio grande) la GPU gana con claridad.
+2. **Coste de compilación no trivial** (ya anticipado en §5.1): compilar `engine-core` con
+   `--features gpu` en `--release` tardó ~4 min adicionales frente a la compilación sin la
+   feature, por el árbol de dependencias de `burn-wgpu`/`wgpu`/`naga`. Pagar ese coste en todo
+   build (CI, desarrollo local) sin necesitarlo no está justificado.
+3. **No hay adaptador GPU garantizado en CI**: los runners de `ubuntu-latest`/`windows-latest`
+   usados en `.github/workflows/ci.yml` no tienen GPU; `rust-tests` seguiría verificando el
+   motor sobre `CpuBackend` sin cambios. `gpu` queda como feature que un desarrollador activa
+   explícitamente en una máquina con GPU real, verificado aquí con `gpu_probe`.
+
+Guía práctica resultante para quien necesite decidir qué backend usar en un caso concreto:
+activar `gpu` (y usar `GpuBackend` en vez de `CpuBackend` al construir el modelo/producto)
+cuando el número de paths de Monte Carlo del cálculo sea del orden de 10⁵ o superior; para
+todo lo demás (incluida toda la superficie actual de `crate::api`/clientes), `CpuBackend`
+sigue siendo la opción correcta y es la que se mantiene compilada por defecto.
+
 ---
 *Próxima iteración: confirmar en la práctica (no se pudo ejecutar GitHub Actions desde este
 entorno de desarrollo) que el job `build-installer` de `.github/workflows/release.yml` (§7.10)
 compila y publica `engine_quant_setup.exe` en una release real, con la misma cautela que en
 §7.9: la primera ejecución real del pipeline de wheel+xll ya reveló un problema (carpeta de
 Redist con nombre distinto en un toolset de CI más nuevo) que no había aparecido en ninguna
-verificación local. Con eso resuelto, arrancar Fase 5 — backend GPU (§6): ejercitar en serio
-el alias `GpuBackend` (`burn-wgpu`, ya presente tras la feature `gpu` de `engine-core` desde
-Fase 1, §5.1) con benchmarks reales sobre el caso IRS+Hull-White de §5.2, decidiendo si
-conviene activarlo por defecto o dejarlo opcional. En cuanto exista verificación manual de
-Fase 4 con Excel real (`clients/excel/README.md`), completar la capa 4 de test de §5.6
-marcándola como verificada de punta a punta, no solo parcial.*
+verificación local. En cuanto exista verificación manual de Fase 4 con Excel real
+(`clients/excel/README.md`), completar la capa 4 de test de §5.6 marcándola como verificada de
+punta a punta, no solo parcial. Con Fase 5 (§7.11) cerrada, arrancar Fase 6 — API universal /
+interoperabilidad externa (§5.5): C ABI plana y versionada sobre la capa C++.*
