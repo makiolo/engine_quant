@@ -76,8 +76,13 @@ pub fn irs_unilateral_cva_5y(
     };
 
     let monitoring_times = vec![0.0, 1.0, 2.0, 3.0, 4.0];
-    let profile =
-        expected_exposure_profile(&model, &swap, r0, &monitoring_times, n_paths as usize, seed, &device);
+    // Malla semanal (~1 paso/semana): la que calculaba internamente expected_exposure_profile
+    // antes de que n_steps pasara a ser explícito (PLAN.md §7.15) -- se preserva aquí tal
+    // cual porque esta es la cadena de humo de Fase 0/1, no la superficie de ENGINE.CALC.
+    let n_steps = ((4.0_f64 / (1.0 / 52.0)).ceil() as usize).max(monitoring_times.len());
+    let profile = expected_exposure_profile(
+        &model, &swap, r0, &monitoring_times, n_steps, n_paths as usize, seed, &device,
+    );
     unilateral_cva(&profile, &model, r0, hazard_rate, recovery_rate, &device)
 }
 

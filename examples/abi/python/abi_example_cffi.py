@@ -1,8 +1,9 @@
-"""Ejemplo de Python consumiendo engine/abi.h (PLAN.md Fase 6, §5.5/§7.13) via `cffi`, en modo
-ABI (`ffi.dlopen`, sin compilar una extension C -- a diferencia del modo API de cffi, que sí
-compilaría un `.pyd`/`.so` propio y se parecería mas a `clients/python`). Mismo recorrido que
-`abi_example_ctypes.py`: comparar ambos ficheros lado a lado es la forma mas directa de ver la
-diferencia entre las dos librerias de FFI mas comunes de Python.
+"""Ejemplo de Python consumiendo engine/abi.h (PLAN.md Fase 6, §5.5/§7.13; ENGINE.CALC en
+PLAN.md §7.15) via `cffi`, en modo ABI (`ffi.dlopen`, sin compilar una extension C -- a
+diferencia del modo API de cffi, que sí compilaría un `.pyd`/`.so` propio y se parecería mas a
+`clients/python`). Mismo recorrido que `abi_example_ctypes.py`: comparar ambos ficheros lado a
+lado es la forma mas directa de ver la diferencia entre las dos librerias de FFI mas comunes
+de Python.
 
 Frente a ctypes (ver abi_example_ctypes.py): `ffi.cdef(...)` acepta declaraciones en sintaxis
 C casi literal (la version de abi.h sin macros de exportacion ni directivas de preprocesador,
@@ -34,7 +35,6 @@ _CDEF = """
 
     typedef struct EngineModel EngineModel;
     typedef struct EngineProduct EngineProduct;
-    typedef struct EngineMeasure EngineMeasure;
 
     typedef enum EngineParamKind {
         ENGINE_PARAM_DOUBLE = 0,
@@ -57,11 +57,29 @@ _CDEF = """
 
     EngineModel* engine_abi_create_model(const char* name, const EngineParam* params, size_t n_params);
     EngineProduct* engine_abi_create_product(const char* name, const EngineParam* params, size_t n_params);
-    EngineMeasure* engine_abi_create_measure(const char* name);
 
     void engine_abi_free_model(EngineModel* model);
     void engine_abi_free_product(EngineProduct* product);
-    void engine_abi_free_measure(EngineMeasure* measure);
+
+    typedef struct EngineMarketSnapshot {
+        const double* pillars;
+        const double* zero_rates;
+        size_t count;
+        double hazard_rate;
+        double recovery_rate;
+    } EngineMarketSnapshot;
+
+    typedef struct EnginePricingContext {
+        double pricing_date;
+        uint64_t n_paths;
+        uint64_t n_steps;
+        uint64_t seed;
+    } EnginePricingContext;
+
+    typedef struct EngineExecutionContext {
+        const char* backend;
+        const char* precision;
+    } EngineExecutionContext;
 
     typedef struct EngineMeasureResult {
         double* times;
@@ -72,18 +90,24 @@ _CDEF = """
         double scalar;
     } EngineMeasureResult;
 
-    int engine_abi_evaluate(
-        const EngineMeasure* measure,
-        const EngineModel* model,
-        const EngineProduct* product,
-        const EngineParam* params,
-        size_t n_params,
-        EngineMeasureResult* out_result
-    );
-    void engine_abi_free_measure_result(EngineMeasureResult* result);
+    typedef struct EngineCalcResultEntry {
+        char* measure_name;
+        EngineMeasureResult result;
+    } EngineCalcResultEntry;
 
-    int engine_abi_set_compute_backend(const char* name);
-    size_t engine_abi_get_compute_backend(char* buffer, size_t buffer_len);
+    int engine_abi_calc(
+        const EngineProduct* product,
+        const char** measure_names,
+        size_t n_measure_names,
+        const EngineModel* model,
+        const EngineMarketSnapshot* market,
+        const EnginePricingContext* pricing,
+        const EngineExecutionContext* execution,
+        EngineCalcResultEntry** out_entries,
+        size_t* out_count
+    );
+    void engine_abi_free_calc_results(EngineCalcResultEntry* entries, size_t count);
+
     int engine_abi_is_gpu_backend_available(void);
 
     size_t engine_abi_last_error(char* buffer, size_t buffer_len);
@@ -126,12 +150,6 @@ def last_error(ffi, lib) -> str:
     return bytes(ffi.buffer(buffer, min(length, len(buffer)))).decode("utf-8", errors="replace")
 
 
-def get_compute_backend(ffi, lib) -> str:
-    buffer = ffi.new("char[]", 16)
-    length = lib.engine_abi_get_compute_backend(buffer, len(buffer))
-    return bytes(ffi.buffer(buffer, min(length, len(buffer)))).decode("ascii")
-
-
 ENGINE_PARAM_DOUBLE = 0
 ENGINE_PARAM_VECTOR = 1
 # ENGINE_PARAM_BOOL = 2  -- no usado en este ejemplo (ningun parametro bool en el caso base)
@@ -148,6 +166,13 @@ def vector_param(ffi, keepalive, key: bytes, values) -> dict:
     values_buf = ffi.new("double[]", values)
     keepalive += [key_buf, values_buf]
     return {"key": key_buf, "kind": ENGINE_PARAM_VECTOR, "scalar": 0.0, "values": values_buf, "count": len(values)}
+
+
+def find_measure(ffi, entries, count: int, name: str):
+    for i in range(count):
+        if ffi.string(entries[i].measure_name).decode("utf-8") == name:
+            return entries[i].result
+    raise KeyError(f"no se pidio la medida '{name}'")
 
 
 def main() -> None:
@@ -198,54 +223,67 @@ def main() -> None:
         lib.engine_abi_free_model(model)
         raise RuntimeError(f"engine_abi_create_product(IRSwap): {last_error(ffi, lib)}")
 
-    # --- ExposureProfile / UnilateralCVA: mismo caso/semillas que
-    # clients/excel/README.md ("Verificacion manual") -- si estos numeros no coinciden, algo
-    # se rompio en la traduccion C ABI <-> engine::Registries/IMeasure. ----------------------
-    profile_measure = lib.engine_abi_create_measure(ffi.new("char[]", b"ExposureProfile"))
-    assert profile_measure != ffi.NULL, f"engine_abi_create_measure(ExposureProfile): {last_error(ffi, lib)}"
-    profile_params = ffi.new(
-        "EngineParam[]",
-        [
-            vector_param(ffi, keepalive, b"monitoring_times", [0.0, 1.0, 2.0]),
-            scalar_param(ffi, keepalive, b"n_paths", 5000.0),
-            scalar_param(ffi, keepalive, b"seed", 7.0),
-        ],
+    # --- ENGINE.CALC (PLAN.md §7.15): mismo caso base que cpp/engine/tests/test_registry.cpp
+    # (Registry.UnilateralCvaMatchesGoldenValue/ExposureProfileMatchesGoldenValue), pero aqui
+    # basta con invariantes cualitativos -- este ejemplo verifica el mecanismo de la ABI, no
+    # vuelve a fijar el numero exacto. --------------------------------------------------------
+    pillars = ffi.new("double[]", [1.0])
+    zero_rates = ffi.new("double[]", [0.02])
+    market = ffi.new(
+        "EngineMarketSnapshot *",
+        {"pillars": pillars, "zero_rates": zero_rates, "count": 1, "hazard_rate": 0.02, "recovery_rate": 0.4},
     )
-    profile_result = ffi.new("EngineMeasureResult *")
-    rc = lib.engine_abi_evaluate(profile_measure, model, product, profile_params, len(profile_params), profile_result)
-    assert rc == 0, f"engine_abi_evaluate(ExposureProfile): {last_error(ffi, lib)}"
-    ee = [profile_result.primary[i] for i in range(profile_result.len)]
-    print(f"ExposureProfile EE = {ee}  (esperado [0.0, 12862.62, 13673.53])")
-    lib.engine_abi_free_measure_result(profile_result)
-    lib.engine_abi_free_measure(profile_measure)
+    pricing = ffi.new("EnginePricingContext *", {"pricing_date": 0.0, "n_paths": 5000, "n_steps": 208, "seed": 7})
+    backend_buf = ffi.new("char[]", b"cpu")
+    precision_buf = ffi.new("char[]", b"FP64")
+    execution = ffi.new("EngineExecutionContext *", {"backend": backend_buf, "precision": precision_buf})
 
-    cva_measure = lib.engine_abi_create_measure(ffi.new("char[]", b"UnilateralCVA"))
-    assert cva_measure != ffi.NULL, f"engine_abi_create_measure(UnilateralCVA): {last_error(ffi, lib)}"
-    cva_params = ffi.new(
-        "EngineParam[]",
-        [
-            vector_param(ffi, keepalive, b"monitoring_times", [0.0, 1.0, 2.0, 3.0]),
-            scalar_param(ffi, keepalive, b"n_paths", 5000.0),
-            scalar_param(ffi, keepalive, b"seed", 13.0),
-            scalar_param(ffi, keepalive, b"hazard_rate", 0.02),
-            scalar_param(ffi, keepalive, b"recovery_rate", 0.4),
-        ],
+    measure_name_bufs = [ffi.new("char[]", name) for name in (b"PV", b"DV01", b"ExpectedExposure", b"PFE95", b"UnilateralCVA")]
+    measure_names = ffi.new("const char*[]", measure_name_bufs)
+
+    entries_ptr = ffi.new("EngineCalcResultEntry **")
+    entry_count = ffi.new("size_t *")
+    rc = lib.engine_abi_calc(
+        product, measure_names, len(measure_name_bufs), model, market, pricing, execution, entries_ptr, entry_count
     )
-    cva_result = ffi.new("EngineMeasureResult *")
-    rc = lib.engine_abi_evaluate(cva_measure, model, product, cva_params, len(cva_params), cva_result)
-    assert rc == 0, f"engine_abi_evaluate(UnilateralCVA): {last_error(ffi, lib)}"
-    print(f"UnilateralCVA = {cva_result.scalar}  (esperado 426.7618244093184)")
-    lib.engine_abi_free_measure_result(cva_result)
-    lib.engine_abi_free_measure(cva_measure)
+    assert rc == 0, f"engine_abi_calc: {last_error(ffi, lib)}"
+    entries = entries_ptr[0]
+    count = entry_count[0]
+
+    pv = find_measure(ffi, entries, count, "PV")
+    dv01 = find_measure(ffi, entries, count, "DV01")
+    ee = find_measure(ffi, entries, count, "ExpectedExposure")
+    pfe = find_measure(ffi, entries, count, "PFE95")
+    cva = find_measure(ffi, entries, count, "UnilateralCVA")
+
+    print(f"PV            = {pv.scalar}  (swap a la par: ~0)")
+    print(f"DV01          = {dv01.scalar}  (swap pagador: > 0)")
+    print(f"UnilateralCVA = {cva.scalar}  (> 0 con hazard_rate > 0)")
+    for i in range(ee.len):
+        print(f"  t={ee.times[i]}: EE={ee.primary[i]}  PFE95={pfe.primary[i]}")
+
+    assert abs(pv.scalar) < 1e-6, "PV de un swap a la par deberia ser ~0"
+    assert dv01.scalar > 0.0 and cva.scalar > 0.0, "se esperaba DV01 > 0 y UnilateralCVA > 0"
+    for i in range(ee.len):
+        assert ee.primary[i] >= 0.0 and pfe.primary[i] >= ee.primary[i], "se esperaba PFE95 >= ExpectedExposure >= 0"
+
+    lib.engine_abi_free_calc_results(entries, count)
+
+    gpu_available = lib.engine_abi_is_gpu_backend_available() != 0
+    print(f"gpu disponible: {'si' if gpu_available else 'no'}")
+
+    # --- engine_abi_calc rechaza un nombre de medida desconocido (PLAN.md §7.15): el error
+    # queda en engine_abi_last_error(), nunca lanza/aborta a traves de esta frontera C. --------
+    bad_name_buf = ffi.new("char[]", b"NoExiste")
+    bad_names = ffi.new("const char*[]", [bad_name_buf])
+    bad_entries_ptr = ffi.new("EngineCalcResultEntry **")
+    bad_count = ffi.new("size_t *")
+    rc = lib.engine_abi_calc(product, bad_names, 1, model, market, pricing, execution, bad_entries_ptr, bad_count)
+    assert rc != 0, "se esperaba error con un nombre de medida desconocido"
+    print(f"error esperado al pedir una medida inexistente: {last_error(ffi, lib)}")
 
     lib.engine_abi_free_product(product)
     lib.engine_abi_free_model(model)
-
-    # --- Backend de computo (PLAN.md §7.12), misma ABI --------------------------------------
-    backend = get_compute_backend(ffi, lib)
-    gpu_available = lib.engine_abi_is_gpu_backend_available() != 0
-    print(f"backend: {backend}  (gpu disponible: {'si' if gpu_available else 'no'})")
-    assert lib.engine_abi_set_compute_backend(ffi.new("char[]", b"cpu")) == 1, '"cpu" siempre debe aceptarse'
 
     # --- Manejo de errores (PLAN.md §5.5): nunca lanza/aborta al otro lado de la ABI, un
     # nombre desconocido devuelve NULL -- se distingue de un puntero valido comparando con
@@ -254,7 +292,7 @@ def main() -> None:
     assert unknown == ffi.NULL, "se esperaba NULL al pedir un modelo inexistente"
     print(f"error esperado al pedir un modelo inexistente: {last_error(ffi, lib)}")
 
-    print("OK: ejemplo de Python (cffi) sobre engine/abi.h completado.")
+    print("OK: ejemplo de Python (cffi) sobre engine/abi.h (ENGINE.CALC) completado.")
 
 
 if __name__ == "__main__":

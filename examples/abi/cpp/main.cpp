@@ -1,9 +1,10 @@
-// Ejemplo de C++ consumiendo engine/abi.h (PLAN.md Fase 6, §5.5/§7.13) SIN pasar por el
-// registry C++ interno (engine::Registries/IMeasure, cpp/engine/include/engine/*.hpp) ni por
-// cxx -- exactamente la misma superficie extern "C" que vería un consumidor externo real
-// (Julia vía ccall, .NET vía P/Invoke, Go vía cgo). Este fichero envuelve esa superficie con
-// RAII y excepciones porque el consumidor aquí sí es C++ y puede permitírselo; abi.h en sí no
-// asume eso (por eso es un header C puro, ver examples/abi/c-puro más abajo).
+// Ejemplo de C++ consumiendo engine/abi.h (PLAN.md Fase 6, §5.5/§7.13; ENGINE.CALC en PLAN.md
+// §7.15) SIN pasar por el registry C++ interno (engine::Registries/engine::calc, cpp/engine/
+// include/engine/*.hpp) ni por cxx -- exactamente la misma superficie extern "C" que vería un
+// consumidor externo real (Julia vía ccall, .NET vía P/Invoke, Go vía cgo). Este fichero
+// envuelve esa superficie con RAII y excepciones porque el consumidor aquí sí es C++ y puede
+// permitírselo; abi.h en sí no asume eso (por eso es un header C puro, ver examples/abi/c-puro
+// más abajo).
 //
 // Compilar dentro de este repo (ver examples/abi/README.md): es un target más de
 // cpp/engine/CMakeLists.txt (engine_abi_cpp_example), `cmake --build build` lo compila junto
@@ -12,6 +13,7 @@
 
 #include "engine/abi.h"
 
+#include <cmath>
 #include <iostream>
 #include <memory>
 #include <stdexcept>
@@ -37,13 +39,9 @@ struct ModelDeleter {
 struct ProductDeleter {
     void operator()(EngineProduct* p) const { engine_abi_free_product(p); }
 };
-struct MeasureDeleter {
-    void operator()(EngineMeasure* p) const { engine_abi_free_measure(p); }
-};
 
 using ModelPtr = std::unique_ptr<EngineModel, ModelDeleter>;
 using ProductPtr = std::unique_ptr<EngineProduct, ProductDeleter>;
-using MeasurePtr = std::unique_ptr<EngineMeasure, MeasureDeleter>;
 
 EngineParam scalar_param(const char* key, double value) {
     EngineParam p{};
@@ -74,36 +72,40 @@ ProductPtr create_product(const char* name, const std::vector<EngineParam>& para
     return ProductPtr(raw);
 }
 
-MeasurePtr create_measure(const char* name) {
-    EngineMeasure* raw = engine_abi_create_measure(name);
-    if (!raw) throw_last_error(std::string("engine_abi_create_measure(") + name + ")");
-    return MeasurePtr(raw);
-}
-
-// RAII para EngineMeasureResult (los arrays times/primary/secondary son owned por engine_abi,
-// ver abi.h): se liberan en el destructor con engine_abi_free_measure_result, nunca con
-// delete[] directo.
-class MeasureResult {
+// RAII para el array EngineCalcResultEntry* que devuelve engine_abi_calc (owned por engine_abi,
+// ver abi.h): se libera en el destructor con engine_abi_free_calc_results, nunca con delete[]
+// directo.
+class CalcResults {
 public:
-    explicit MeasureResult(EngineMeasureResult value) : value_(value) {}
-    ~MeasureResult() { engine_abi_free_measure_result(&value_); }
-    MeasureResult(const MeasureResult&) = delete;
-    MeasureResult& operator=(const MeasureResult&) = delete;
+    CalcResults(EngineCalcResultEntry* entries, std::size_t count) : entries_(entries), count_(count) {}
+    ~CalcResults() { engine_abi_free_calc_results(entries_, count_); }
+    CalcResults(const CalcResults&) = delete;
+    CalcResults& operator=(const CalcResults&) = delete;
 
-    const EngineMeasureResult& get() const { return value_; }
+    const EngineMeasureResult& operator[](const char* measure_name) const {
+        for (std::size_t i = 0; i < count_; ++i) {
+            if (std::string(entries_[i].measure_name) == measure_name) return entries_[i].result;
+        }
+        throw std::out_of_range(std::string("CalcResults: no se pidio la medida '") + measure_name + "'");
+    }
 
 private:
-    EngineMeasureResult value_;
+    EngineCalcResultEntry* entries_;
+    std::size_t count_;
 };
 
-MeasureResult evaluate(
-    EngineMeasure* measure, EngineModel* model, EngineProduct* product, const std::vector<EngineParam>& params
+// Sustituye por completo create_measure/evaluate (PLAN.md §7.15): calcula un lote de medidas
+// nombradas de una vez.
+CalcResults calc(
+    EngineProduct* product, std::vector<const char*> measure_names, EngineModel* model,
+    const EngineMarketSnapshot& market, const EnginePricingContext& pricing, const EngineExecutionContext& execution
 ) {
-    EngineMeasureResult result{};
-    if (engine_abi_evaluate(measure, model, product, params.data(), params.size(), &result) != 0) {
-        throw_last_error("engine_abi_evaluate");
-    }
-    return MeasureResult(result);
+    EngineCalcResultEntry* entries = nullptr;
+    std::size_t count = 0;
+    int rc = engine_abi_calc(
+        product, measure_names.data(), measure_names.size(), model, &market, &pricing, &execution, &entries, &count);
+    if (rc != 0) throw_last_error("engine_abi_calc");
+    return CalcResults(entries, count);
 }
 
 } // namespace
@@ -111,9 +113,9 @@ MeasureResult evaluate(
 int main() {
     std::cout << "engine_abi_version() = " << engine_abi_version() << "\n";
 
-    // payment_times/accruals/monitoring_times deben seguir vivos mientras se usan los
-    // EngineParam que apuntan a ellos (uno por llamada, ver vector_param); les basta con
-    // sobrevivir hasta el final de la llamada correspondiente, aquí hasta el final de main().
+    // payment_times/accruals deben seguir vivos mientras se usan los EngineParam que apuntan a
+    // ellos (uno por llamada, ver vector_param); les basta con sobrevivir hasta el final de la
+    // llamada correspondiente, aquí hasta el final de main().
     std::vector<double> payment_times{1.0, 2.0, 3.0, 4.0, 5.0};
     std::vector<double> accruals{1.0, 1.0, 1.0, 1.0, 1.0};
 
@@ -127,33 +129,65 @@ int main() {
          vector_param("accruals", accruals)}
     );
 
-    // ExposureProfile y UnilateralCVA sobre el mismo caso/semillas que
-    // clients/excel/README.md ("Verificación manual") -- si estos números no coinciden, algo
-    // se rompió en la traducción C ABI <-> engine::Registries/IMeasure.
-    std::vector<double> profile_times{0.0, 1.0, 2.0};
-    MeasurePtr profile_measure = create_measure("ExposureProfile");
-    MeasureResult profile = evaluate(
-        profile_measure.get(), model.get(), product.get(),
-        {vector_param("monitoring_times", profile_times), scalar_param("n_paths", 5000.0),
-         scalar_param("seed", 7.0)}
-    );
-    std::cout << "ExposureProfile EE = [" << profile.get().primary[0] << ", " << profile.get().primary[1] << ", "
-              << profile.get().primary[2] << "]  (esperado [0, 12862.62, 13673.53])\n";
+    // Mismo caso base que cpp/engine/tests/test_registry.cpp (Registry.
+    // UnilateralCvaMatchesGoldenValue/ExposureProfileMatchesGoldenValue), pero aquí basta con
+    // invariantes cualitativos: esta sonda verifica el mecanismo de la ABI, no vuelve a fijar
+    // el numero exacto.
+    double pillar = 1.0, zero_rate = 0.02;
+    EngineMarketSnapshot market{};
+    market.pillars = &pillar;
+    market.zero_rates = &zero_rate;
+    market.count = 1;
+    market.hazard_rate = 0.02;
+    market.recovery_rate = 0.4;
 
-    std::vector<double> cva_times{0.0, 1.0, 2.0, 3.0};
-    MeasurePtr cva_measure = create_measure("UnilateralCVA");
-    MeasureResult cva = evaluate(
-        cva_measure.get(), model.get(), product.get(),
-        {vector_param("monitoring_times", cva_times), scalar_param("n_paths", 5000.0), scalar_param("seed", 13.0),
-         scalar_param("hazard_rate", 0.02), scalar_param("recovery_rate", 0.4)}
-    );
-    std::cout << "UnilateralCVA = " << cva.get().scalar << "  (esperado 426.7618244093184)\n";
+    EnginePricingContext pricing{};
+    pricing.pricing_date = 0.0;
+    pricing.n_paths = 5000;
+    pricing.n_steps = 208; // ~1 paso/semana sobre los 4 anios hasta la ultima fecha de reseteo
+    pricing.seed = 7;
 
-    // Backend de cómputo (PLAN.md §7.12), misma ABI que el resto.
-    char backend[16];
-    std::size_t len = engine_abi_get_compute_backend(backend, sizeof(backend));
-    std::cout << "backend: " << std::string(backend, len)
-              << "  (gpu disponible: " << (engine_abi_is_gpu_backend_available() ? "si" : "no") << ")\n";
+    EngineExecutionContext execution{};
+    execution.backend = "cpu";
+    execution.precision = "FP64";
+
+    CalcResults results = calc(
+        product.get(), {"PV", "DV01", "ExpectedExposure", "PFE95", "UnilateralCVA"}, model.get(), market, pricing,
+        execution);
+
+    const EngineMeasureResult& pv = results["PV"];
+    const EngineMeasureResult& dv01 = results["DV01"];
+    const EngineMeasureResult& ee = results["ExpectedExposure"];
+    const EngineMeasureResult& pfe = results["PFE95"];
+    const EngineMeasureResult& cva = results["UnilateralCVA"];
+
+    std::cout << "PV            = " << pv.scalar << "  (swap a la par: ~0)\n";
+    std::cout << "DV01          = " << dv01.scalar << "  (swap pagador: > 0)\n";
+    std::cout << "UnilateralCVA = " << cva.scalar << "  (> 0 con hazard_rate > 0)\n";
+    for (std::size_t i = 0; i < ee.len; ++i) {
+        std::cout << "  t=" << ee.times[i] << ": EE=" << ee.primary[i] << "  PFE95=" << pfe.primary[i] << "\n";
+    }
+
+    if (std::abs(pv.scalar) > 1e-6) throw std::runtime_error("PV de un swap a la par deberia ser ~0");
+    if (!(dv01.scalar > 0.0) || !(cva.scalar > 0.0)) throw std::runtime_error("se esperaba DV01 > 0 y UnilateralCVA > 0");
+    for (std::size_t i = 0; i < ee.len; ++i) {
+        if (ee.primary[i] < 0.0 || pfe.primary[i] < ee.primary[i]) {
+            throw std::runtime_error("se esperaba ExpectedExposure >= 0 y PFE95 >= ExpectedExposure");
+        }
+    }
+
+    std::cout << "gpu disponible: " << (engine_abi_is_gpu_backend_available() ? "si" : "no") << "\n";
+
+    // engine_abi_calc rechaza un nombre de medida desconocido (PLAN.md §7.15): el error queda
+    // en engine_abi_last_error(), nunca lanza/aborta a traves de esta frontera C -- calc() de
+    // este fichero lo convierte en una excepcion de C++.
+    try {
+        calc(product.get(), {"NoExiste"}, model.get(), market, pricing, execution);
+        std::cerr << "ERROR: se esperaba una excepcion con una medida desconocida\n";
+        return 1;
+    } catch (const std::exception& e) {
+        std::cout << "error esperado al pedir una medida inexistente: " << e.what() << "\n";
+    }
 
     // Manejo de errores (PLAN.md §5.5): un nombre de modelo desconocido nunca lanza/aborta al
     // otro lado de la ABI, devuelve NULL -- create_model() de este fichero lo convierte en
@@ -166,6 +200,6 @@ int main() {
         std::cout << "error esperado al pedir un modelo inexistente: " << e.what() << "\n";
     }
 
-    std::cout << "OK: ejemplo de C++ sobre engine/abi.h completado.\n";
+    std::cout << "OK: ejemplo de C++ sobre engine/abi.h (ENGINE.CALC) completado.\n";
     return 0;
 }

@@ -124,42 +124,19 @@ product = eng.create_product("IRSwap", {
     "accruals": [1.0, 1.0, 1.0, 1.0, 1.0],
 })
 
-measure = eng.create_measure("UnilateralCVA")
-result = measure.evaluate(
-    model,
-    product,
-    {
-        "monitoring_times": [0.0, 1.0, 2.0, 3.0],
-        "n_paths": 5000.0,
-        "seed": 13.0,
-        "hazard_rate": 0.02,
-        "recovery_rate": 0.4,
-    },
-)
+market = engine.MarketSnapshot(pillars=[1.0, 2.0], zero_rates=[0.02, 0.02], hazard_rate=0.02, recovery_rate=0.4)
+pricing = engine.PricingContext({"pricing_date": 0.0, "n_paths": 5000.0, "n_steps": 208.0, "seed": 7.0})
+execution = engine.ExecutionContext({"backend": "auto", "precision": "FP64"})
 
-print(result.scalar)
-# ~ 426.76
+result = eng.calc(product, ["PV", "DV01", "ExpectedExposure", "PFE95", "UnilateralCVA"], model, market, pricing, execution)
+
+print(result["UnilateralCVA"].scalar)
+# ~ 503.64
+print(result["ExpectedExposure"].primary)   # expected exposure (EE), per auto-derived reset date
+print(result["PFE95"].primary)              # PFE 95%
 ```
 
-That is not just a toy example: it captures a realistic XVA workflow in a compact, testable shape.
-
-A more “analytics-first” view is the exposure profile itself:
-
-```python
-measure = eng.create_measure("ExposureProfile")
-profile = measure.evaluate(
-    model,
-    product,
-    {
-        "monitoring_times": [0.0, 1.0, 2.0],
-        "n_paths": 5000.0,
-        "seed": 7.0,
-    },
-)
-
-print(profile.primary)   # expected exposure (EE)
-print(profile.secondary)  # PFE 95%
-```
+That is not just a toy example: it captures a realistic XVA workflow in a compact, testable shape — a batch of related measures (PV, DV01, expected exposure, PFE, CVA) computed together against the same trade/model/market/pricing/execution context, sharing the underlying Monte Carlo simulation where possible.
 
 This is exactly the kind of data used to estimate CVA, exposure management limits, and counterparty risk over time.
 
@@ -170,10 +147,12 @@ The project consciously keeps the same semantics in Excel as in Python.
 Conceptually:
 
 ```excel
-=ENGINE.CREATE_MODEL("HullWhite1F", RangoHullWhite)
-=ENGINE.CREATE_PRODUCT("IRSwap", RangoIRS)
-=ENGINE.CREATE_MEASURE("UnilateralCVA")
-=ENGINE.EVALUATE(handleMedida, handleModelo, handleProducto, RangoParametros)
+Trade    = ENGINE.CREATE_PRODUCT("IRSwap", SwapParams)
+Model    = ENGINE.CREATE_MODEL("HullWhite1F", HullWhiteParams)
+Market   = ENGINE.CREATE_MARKET(MarketParams)
+Pricing  = ENGINE.CREATE_CONTEXT(PricingParams)
+Compute  = ENGINE.CREATE_EXECUTION(ExecutionParams)
+         = ENGINE.CALC(Trade, {"PV";"DV01";"ExpectedExposure";"PFE95";"UnilateralCVA"}, Model, Market, Pricing, Compute)
 ```
 
 The idea is that a trader or quant should not need a different mental model when switching from a notebook to a spreadsheet. The same model/product/measure registry should power both frontends.
@@ -209,18 +188,21 @@ The project plan in `PLAN.md` outlines a progressive roadmap:
 - phase 4: Excel XLL client
 - phase 5: GPU backend (`burn-wgpu`) benchmarked on the IRS+Hull-White case; kept opt-in
   behind the `gpu` feature (see `PLAN.md` §7.11) rather than default, since it only pays off
-  above ~100k Monte Carlo paths. Selectable from clients: `with engine.backend("gpu"):` in
-  Python, `ENGINE.SET_BACKEND("gpu")` in Excel (`PLAN.md` §7.12)
+  above ~100k Monte Carlo paths (`PLAN.md` §7.12, superseded by `ExecutionContext` in §7.15 —
+  see below)
 - phase 6: universal API as a flat, versioned C ABI (`cpp/engine/include/engine/abi.h`) —
-  the same registry/backend-selection surface Python/Excel already consume, for languages
-  with C FFI (Julia, .NET, Go, ...) without going through `cxx`/nanobind. Verified with
-  GoogleTest and a pure-C smoke program, plus standalone C++/Rust/Python examples under
-  `examples/abi/` that all produce the same numbers; not yet published as its own release
-  artifact (`PLAN.md` §7.13)
+  the same registry surface Python/Excel already consume, for languages with C FFI (Julia,
+  .NET, Go, ...) without going through `cxx`/nanobind. Verified with GoogleTest and a pure-C
+  smoke program, plus standalone C++/Rust/Python examples under `examples/abi/`; not yet
+  published as its own release artifact (`PLAN.md` §7.13)
 - phase 7: `MarketSnapshot` (a market curve, real or fabricated) and a new `ICalibrator`
   registry — calibrates `HullWhite1F`'s `a`/`b` to a curve by damped Gauss-Newton using the
   autodiff already built for sensitivities (§5.3), across all five layers: Rust, the C++
   registry, the C ABI, Python, and Excel (`PLAN.md` §7.14)
+- phase 7.15: public API redesign — explicit `Market`/`PricingContext`/`ExecutionContext`
+  objects and a single `ENGINE.CALC` batching PV/DV01/ExpectedExposure/PFE95/UnilateralCVA in
+  one call, replacing the old `CREATE_MEASURE`+`EVALUATE` pair and the global backend state of
+  phase 5, across all five layers (`PLAN.md` §7.15)
 - future phases: broader XVA metrics, more products
 
 ## Why this might get attention

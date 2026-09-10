@@ -102,19 +102,20 @@ int main() {
     using AutoFreeFn = void(WINAPI*)(LPXLOPER12);
     using ListFn = LPXLOPER12(WINAPI*)();
     using CreateModelFn = LPXLOPER12(WINAPI*)(LPXLOPER12, LPXLOPER12);
-    using GetBackendFn = LPXLOPER12(WINAPI*)();
 
     auto auto_open = reinterpret_cast<AutoOpenFn>(GetProcAddress(module, "xlAutoOpen"));
     auto auto_free = reinterpret_cast<AutoFreeFn>(GetProcAddress(module, "xlAutoFree12"));
     auto list_models = reinterpret_cast<ListFn>(GetProcAddress(module, "xlEngineListModels"));
+    auto list_measures = reinterpret_cast<ListFn>(GetProcAddress(module, "xlEngineListMeasures"));
     auto create_model = reinterpret_cast<CreateModelFn>(GetProcAddress(module, "xlEngineCreateModel"));
-    auto get_backend = reinterpret_cast<GetBackendFn>(GetProcAddress(module, "xlEngineGetBackend"));
+    auto create_market = reinterpret_cast<CreateModelFn>(GetProcAddress(module, "xlEngineCreateMarket"));
 
     bool ok = check(auto_open != nullptr, "GetProcAddress(xlAutoOpen)")
         & check(auto_free != nullptr, "GetProcAddress(xlAutoFree12)")
         & check(list_models != nullptr, "GetProcAddress(xlEngineListModels)")
+        & check(list_measures != nullptr, "GetProcAddress(xlEngineListMeasures)")
         & check(create_model != nullptr, "GetProcAddress(xlEngineCreateModel)")
-        & check(get_backend != nullptr, "GetProcAddress(xlEngineGetBackend)");
+        & check(create_market != nullptr, "GetProcAddress(xlEngineCreateMarket)");
     if (!ok) return 1;
 
     int rc = auto_open();
@@ -138,11 +139,20 @@ int main() {
         auto_free(models);
     }
 
-    LPXLOPER12 backend = get_backend();
-    ok &= check(backend != nullptr, "xlEngineGetBackend devuelve un XLOPER12");
-    if (backend) {
-        ok &= check(narrow(backend) == "cpu", "xlEngineGetBackend() es \"cpu\" por defecto");
-        auto_free(backend);
+    // PLAN.md §7.15: ENGINE.LIST_MEASURES ahora devuelve los 5 nombres de ENGINE.CALC, no los
+    // nombres registrados en crudo en Registry<IMeasure>.
+    LPXLOPER12 measures = list_measures();
+    ok &= check(measures != nullptr, "xlEngineListMeasures devuelve un XLOPER12");
+    if (measures) {
+        ok &= check(base_type(*measures) == xltypeMulti, "xlEngineListMeasures devuelve xltypeMulti");
+        if (base_type(*measures) == xltypeMulti) {
+            bool found = false;
+            for (int i = 0; i < measures->val.array.rows; ++i) {
+                if (narrow(&measures->val.array.lparray[i]) == "UnilateralCVA") found = true;
+            }
+            ok &= check(found, "\"UnilateralCVA\" aparece en xlEngineListMeasures()");
+        }
+        auto_free(measures);
     }
 
     FreeLibrary(module);

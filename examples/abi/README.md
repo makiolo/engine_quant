@@ -1,20 +1,22 @@
-# Ejemplos de la C ABI (`engine/abi.h`, PLAN.md Fase 6, §5.5/§7.13)
+# Ejemplos de la C ABI (`engine/abi.h`, PLAN.md Fase 6, §5.5/§7.13; ENGINE.CALC en PLAN.md §7.15)
 
 Cinco versiones del mismo recorrido -- listar modelos registrados, construir un IRS a 5 años
-bajo Hull-White 1F, evaluar `ExposureProfile` y `UnilateralCVA`, consultar/seleccionar el
-backend de cómputo (PLAN.md §7.12) y provocar un error controlado -- consumiendo únicamente la
-interfaz `extern "C"` de [`cpp/engine/include/engine/abi.h`](../../cpp/engine/include/engine/abi.h),
-nunca el registry C++ interno, `cxx` ni nanobind. El objetivo es documentar cómo se ve "de
-verdad" consumir el motor desde fuera de este repo, en distintos lenguajes/librerías de FFI,
-no repetir la validación numérica fina (eso ya lo cubren `rust/crates/engine-core` y
-`cpp/engine/tests/test_abi.cpp`).
-
-Los cinco deben imprimir los mismos números -- el mismo caso/semillas que documenta
-[`clients/excel/README.md`](../../clients/excel/README.md) ("Verificación manual"):
-`ExposureProfile EE ≈ [0, 12862.62, 13673.53]` (`seed=7`) y `UnilateralCVA = 426.7618244093184`
-(`seed=13`, `hazard_rate=0.02`, `recovery_rate=0.4`). Si alguno da un número distinto, algo se
-rompió en la traducción C ABI ↔ `engine::Registries`/`IMeasure` para ese lenguaje/librería
-concreto, no en el motor (que ya validan los demás).
+bajo Hull-White 1F, calcular un lote de medidas (`PV`, `DV01`, `ExpectedExposure`, `PFE95`,
+`UnilateralCVA`) con `engine_abi_calc` y provocar dos errores controlados (medida y modelo
+desconocidos) -- consumiendo únicamente la interfaz `extern "C"` de
+[`cpp/engine/include/engine/abi.h`](../../cpp/engine/include/engine/abi.h), nunca el registry
+C++ interno, `cxx` ni nanobind. El objetivo es documentar cómo se ve "de verdad" consumir el
+motor desde fuera de este repo, en distintos lenguajes/librerías de FFI, no repetir la
+validación numérica fina (eso ya lo cubren `rust/crates/engine-core` y
+`cpp/engine/tests/test_registry.cpp`/`test_abi.cpp`) -- por eso estos cinco ejemplos verifican
+solo invariantes cualitativos (PV~0, DV01>0, PFE95>=ExpectedExposure>=0, CVA>0), no un valor
+exacto: el valor de referencia exacto para el mismo caso vive en
+`cpp/engine/tests/test_registry.cpp` (`Registry.UnilateralCvaMatchesGoldenValue`/
+`ExposureProfileMatchesGoldenValue`) y en
+[`clients/excel/README.md`](../../clients/excel/README.md) ("Verificación manual"). Si alguno
+de estos cinco falla sus invariantes, algo se rompió en la traducción C ABI ↔
+`engine::Registries`/`engine::calc` para ese lenguaje/librería concreto, no en el motor (que ya
+validan los demás).
 
 ## Requisito común: compilar `engine_abi` primero
 

@@ -1,16 +1,16 @@
-// Implementación de la API universal en C ABI (PLAN.md Fase 6, §5.5, ver engine/abi.h para
+// Implementación de la API universal en C ABI (PLAN.md Fase 6/§7.15, ver engine/abi.h para
 // el contrato). Traduce entre los tipos C planos del header y engine::Registries/Registry<T>/
-// IMeasure ya existentes (PLAN.md §5.4) -- no reimplementa lógica de negocio, solo la
-// frontera: construir/leer engine::Params desde EngineParam[], convertir engine::MeasureResult
-// a EngineMeasureResult con arrays owned por esta librería, y atrapar toda excepción de C++
-// (ninguna puede cruzar a un lenguaje sin soporte de excepciones de C++, PLAN.md §5.5).
+// engine::calc ya existentes (PLAN.md §5.4, §7.15) -- no reimplementa lógica de negocio, solo
+// la frontera: construir/leer engine::Params desde EngineParam[], convertir
+// engine::MarketSnapshot/PricingContext/ExecutionContext desde sus structs C planos, convertir
+// engine::CalcResult a EngineCalcResultEntry[] con arrays owned por esta librería, y atrapar
+// toda excepción de C++ (ninguna puede cruzar a un lenguaje sin soporte de excepciones, PLAN.md
+// §5.5).
 
 #include "engine/abi.h"
 
-#include "engine/bootstrap.hpp"
-#include "engine/calibrator.hpp"
+#include "engine/calc.hpp"
 #include "engine/engine.hpp"
-#include "engine/market.hpp"
 
 #include <algorithm>
 #include <cstring>
@@ -42,7 +42,7 @@ void set_last_error(const std::exception& e) { g_last_error = e.what(); }
 void clear_last_error() { g_last_error.clear(); }
 
 // Copia `src` a `buffer` (hasta buffer_len-1 caracteres + NUL) y devuelve strlen(src), misma
-// convención que snprintf: usada por engine_abi_last_error/engine_abi_get_compute_backend.
+// convención que snprintf: usada por engine_abi_last_error.
 std::size_t copy_to_buffer(const std::string& src, char* buffer, std::size_t buffer_len) {
     if (buffer && buffer_len > 0) {
         std::size_t to_copy = std::min(src.size(), buffer_len - 1);
@@ -71,9 +71,35 @@ engine::Params to_params(const EngineParam* params, std::size_t n_params) {
     return result;
 }
 
+engine::MarketSnapshot to_market(const EngineMarketSnapshot& m) {
+    return engine::MarketSnapshot(
+        std::vector<double>(m.pillars, m.pillars + m.count),
+        std::vector<double>(m.zero_rates, m.zero_rates + m.count),
+        m.hazard_rate, m.recovery_rate
+    );
+}
+
+engine::PricingContext to_pricing_context(const EnginePricingContext& p) {
+    engine::Params params{
+        {"pricing_date", p.pricing_date},
+        {"n_paths", static_cast<double>(p.n_paths)},
+        {"n_steps", static_cast<double>(p.n_steps)},
+        {"seed", static_cast<double>(p.seed)},
+    };
+    return engine::PricingContext(params);
+}
+
+engine::ExecutionContext to_execution_context(const EngineExecutionContext& e) {
+    engine::Params params{
+        {"backend", std::string(e.backend ? e.backend : "")},
+        {"precision", std::string(e.precision ? e.precision : "fp64")},
+    };
+    return engine::ExecutionContext(params);
+}
+
 // engine_abi_list_models/products/measures comparten esta implementación: copia `names` (que
-// vive solo mientras dura la llamada a Registry<T>::list()) a un array en el heap que el
-// consumidor libera con engine_abi_free_string_list.
+// vive solo mientras dura la llamada) a un array en el heap que el consumidor libera con
+// engine_abi_free_string_list.
 std::size_t export_string_list(const std::vector<std::string>& names, const char*** out_names) {
     if (names.empty()) {
         *out_names = nullptr;
@@ -91,22 +117,19 @@ std::size_t export_string_list(const std::vector<std::string>& names, const char
 
 } // namespace
 
-// EngineModel/EngineProduct/EngineMeasure son opacos en el header (PLAN.md §5.5: "un
-// lenguaje sin binding dedicado" no necesita saber qué hay dentro) -- aquí, cada uno envuelve
-// el mismo puntero que ya devuelve Registry<T>::create/Registry<IMeasure>::create.
+// EngineModel/EngineProduct son opacos en el header (PLAN.md §5.5: "un lenguaje sin binding
+// dedicado" no necesita saber qué hay dentro) -- aquí, cada uno envuelve el mismo puntero que
+// ya devuelve Registry<T>::create.
 struct EngineModel {
     std::unique_ptr<engine::IModel> ptr;
 };
 struct EngineProduct {
     std::unique_ptr<engine::IProduct> ptr;
 };
-struct EngineMeasure {
-    std::unique_ptr<engine::IMeasure> ptr;
-};
 
 extern "C" {
 
-int engine_abi_version(void) { return 1; }
+int engine_abi_version(void) { return 2; }
 
 std::size_t engine_abi_list_models(const char*** out_names) {
     return export_string_list(registries().models.list(), out_names);
@@ -117,7 +140,7 @@ std::size_t engine_abi_list_products(const char*** out_names) {
 }
 
 std::size_t engine_abi_list_measures(const char*** out_names) {
-    return export_string_list(registries().measures.list(), out_names);
+    return export_string_list(engine::calc_measure_names(), out_names);
 }
 
 void engine_abi_free_string_list(const char** names, std::size_t count) {
@@ -148,75 +171,8 @@ EngineProduct* engine_abi_create_product(const char* name, const EngineParam* pa
     }
 }
 
-EngineMeasure* engine_abi_create_measure(const char* name) {
-    try {
-        auto measure = registries().measures.create(name);
-        clear_last_error();
-        return new EngineMeasure{std::move(measure)};
-    } catch (const std::exception& e) {
-        set_last_error(e);
-        return nullptr;
-    }
-}
-
 void engine_abi_free_model(EngineModel* model) { delete model; }
 void engine_abi_free_product(EngineProduct* product) { delete product; }
-void engine_abi_free_measure(EngineMeasure* measure) { delete measure; }
-
-int engine_abi_evaluate(
-    const EngineMeasure* measure,
-    const EngineModel* model,
-    const EngineProduct* product,
-    const EngineParam* params,
-    std::size_t n_params,
-    EngineMeasureResult* out_result
-) {
-    *out_result = EngineMeasureResult{};
-    try {
-        if (!measure || !model || !product) {
-            throw std::invalid_argument("engine_abi_evaluate: measure/model/product no puede ser NULL");
-        }
-        engine::MeasureResult result =
-            measure->ptr->evaluate(*model->ptr, *product->ptr, to_params(params, n_params));
-
-        out_result->len = result.times.size();
-        if (out_result->len > 0) {
-            out_result->times = new double[out_result->len];
-            out_result->primary = new double[out_result->len];
-            out_result->secondary = new double[out_result->len];
-            std::memcpy(out_result->times, result.times.data(), out_result->len * sizeof(double));
-            std::memcpy(out_result->primary, result.primary.data(), out_result->len * sizeof(double));
-            std::memcpy(out_result->secondary, result.secondary.data(), out_result->len * sizeof(double));
-        }
-        out_result->has_scalar = result.has_scalar ? 1 : 0;
-        out_result->scalar = result.scalar;
-
-        clear_last_error();
-        return 0;
-    } catch (const std::exception& e) {
-        set_last_error(e);
-        *out_result = EngineMeasureResult{};
-        return 1;
-    }
-}
-
-void engine_abi_free_measure_result(EngineMeasureResult* result) {
-    if (!result) return;
-    delete[] result->times;
-    delete[] result->primary;
-    delete[] result->secondary;
-    *result = EngineMeasureResult{};
-}
-
-int engine_abi_set_compute_backend(const char* name) {
-    return engine::set_compute_backend(name) ? 1 : 0;
-}
-
-std::size_t engine_abi_get_compute_backend(char* buffer, std::size_t buffer_len) {
-    return copy_to_buffer(engine::compute_backend_name(), buffer, buffer_len);
-}
-
-int engine_abi_is_gpu_backend_available(void) { return engine::is_gpu_backend_available() ? 1 : 0; }
 
 int engine_abi_calibrate_hull_white(
     const EngineMarketSnapshot* market,
@@ -231,14 +187,9 @@ int engine_abi_calibrate_hull_white(
         if (!market) {
             throw std::invalid_argument("engine_abi_calibrate_hull_white: market no puede ser NULL");
         }
-        engine::MarketSnapshot snapshot(
-            std::vector<double>(market->pillars, market->pillars + market->count),
-            std::vector<double>(market->zero_rates, market->zero_rates + market->count)
-        );
-
         auto calibrator = registries().calibrators.create("HullWhite1F");
         engine::Params initial_guess{{"a", initial_a}, {"b", initial_b}, {"sigma", sigma}, {"r0", r0}};
-        engine::CalibrationResult result = calibrator->calibrate(snapshot, initial_guess);
+        engine::CalibrationResult result = calibrator->calibrate(to_market(*market), initial_guess);
 
         out_result->a = std::get<double>(result.optimal_params.at("a"));
         out_result->b = std::get<double>(result.optimal_params.at("b"));
@@ -256,6 +207,84 @@ int engine_abi_calibrate_hull_white(
         return 1;
     }
 }
+
+int engine_abi_calc(
+    const EngineProduct* product,
+    const char** measure_names,
+    std::size_t n_measure_names,
+    const EngineModel* model,
+    const EngineMarketSnapshot* market,
+    const EnginePricingContext* pricing,
+    const EngineExecutionContext* execution,
+    EngineCalcResultEntry** out_entries,
+    std::size_t* out_count
+) {
+    *out_entries = nullptr;
+    *out_count = 0;
+    try {
+        if (!product || !model || !market || !pricing || !execution) {
+            throw std::invalid_argument(
+                "engine_abi_calc: product/model/market/pricing/execution no pueden ser NULL");
+        }
+        std::vector<std::string> names;
+        names.reserve(n_measure_names);
+        for (std::size_t i = 0; i < n_measure_names; ++i) names.emplace_back(measure_names[i]);
+
+        engine::CalcResult result = engine::calc(
+            registries(), *product->ptr, names, *model->ptr,
+            to_market(*market), to_pricing_context(*pricing), to_execution_context(*execution)
+        );
+
+        auto* entries = new EngineCalcResultEntry[result.size()]{};
+        for (std::size_t i = 0; i < result.size(); ++i) {
+            const engine::CalcResultEntry& src = result[i];
+
+            char* name_copy = new char[src.measure_name.size() + 1];
+            std::memcpy(name_copy, src.measure_name.data(), src.measure_name.size() + 1);
+            entries[i].measure_name = name_copy;
+
+            EngineMeasureResult& mr = entries[i].result;
+            mr.len = src.result.times.size();
+            if (mr.len > 0 && src.result.times.size() == mr.len) {
+                mr.times = new double[mr.len];
+                std::memcpy(mr.times, src.result.times.data(), mr.len * sizeof(double));
+            }
+            if (mr.len > 0 && src.result.primary.size() == mr.len) {
+                mr.primary = new double[mr.len];
+                std::memcpy(mr.primary, src.result.primary.data(), mr.len * sizeof(double));
+            }
+            if (mr.len > 0 && src.result.secondary.size() == mr.len) {
+                mr.secondary = new double[mr.len];
+                std::memcpy(mr.secondary, src.result.secondary.data(), mr.len * sizeof(double));
+            }
+            mr.has_scalar = src.result.has_scalar ? 1 : 0;
+            mr.scalar = src.result.scalar;
+        }
+
+        *out_entries = entries;
+        *out_count = result.size();
+        clear_last_error();
+        return 0;
+    } catch (const std::exception& e) {
+        set_last_error(e);
+        *out_entries = nullptr;
+        *out_count = 0;
+        return 1;
+    }
+}
+
+void engine_abi_free_calc_results(EngineCalcResultEntry* entries, std::size_t count) {
+    if (!entries) return;
+    for (std::size_t i = 0; i < count; ++i) {
+        delete[] entries[i].measure_name;
+        delete[] entries[i].result.times;
+        delete[] entries[i].result.primary;
+        delete[] entries[i].result.secondary;
+    }
+    delete[] entries;
+}
+
+int engine_abi_is_gpu_backend_available(void) { return engine::is_gpu_backend_available() ? 1 : 0; }
 
 std::size_t engine_abi_last_error(char* buffer, std::size_t buffer_len) {
     return copy_to_buffer(g_last_error, buffer, buffer_len);

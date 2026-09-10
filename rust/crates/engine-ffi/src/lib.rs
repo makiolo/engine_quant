@@ -58,8 +58,10 @@ mod ffi {
         // funciones aceptan un IRS arbitrario (fechas de pago/accruals propios) y separan el
         // cálculo del perfil de exposición del cálculo del CVA a partir de ese perfil, para
         // que el registry de medidas de la capa C++ (`cpp/engine/include/engine/measure.hpp`)
-        // pueda componerlas.
+        // pueda componerlas. `backend` ("cpu"/"gpu") es un parámetro explícito de cada
+        // llamada desde PLAN.md §7.15 — ya no hay estado global de backend (§7.12, retirado).
         fn irs_hull_white_exposure_profile(
+            backend: String,
             a: f64,
             b: f64,
             sigma: f64,
@@ -71,11 +73,13 @@ mod ffi {
             payment_times: Vec<f64>,
             accruals: Vec<f64>,
             monitoring_times: Vec<f64>,
+            n_steps: u64,
             n_paths: u64,
             seed: u64,
         ) -> ExposureProfileResult;
 
         fn unilateral_cva_from_exposure(
+            backend: String,
             a: f64,
             b: f64,
             sigma: f64,
@@ -86,13 +90,35 @@ mod ffi {
             recovery_rate: f64,
         ) -> f64;
 
-        // Selección de backend (PLAN.md §7.12): estado global de proceso que leen las dos
-        // funciones de arriba (`engine_core::backend::current()`), no un parámetro más de
-        // cada una — así encaja con cómo cada cliente quiere seleccionarlo (un `with` de
-        // Python, una UDF global de Excel).
-        fn set_compute_backend(name: String) -> bool;
-        fn compute_backend_name() -> String;
         fn is_gpu_backend_available() -> bool;
+
+        // NPV determinista del IRS a t=0 y su sensibilidad a r0 (PLAN.md §7.15: medidas "PV"/
+        // "DV01" de ENGINE.CALC) — siempre en CpuBackend, ver `crate::api` para el porqué.
+        fn irs_hull_white_npv(
+            a: f64,
+            b: f64,
+            sigma: f64,
+            r0: f64,
+            notional: f64,
+            fixed_rate: f64,
+            use_par_rate: bool,
+            start: f64,
+            payment_times: Vec<f64>,
+            accruals: Vec<f64>,
+        ) -> f64;
+
+        fn irs_hull_white_npv_delta_r0(
+            a: f64,
+            b: f64,
+            sigma: f64,
+            r0: f64,
+            notional: f64,
+            fixed_rate: f64,
+            use_par_rate: bool,
+            start: f64,
+            payment_times: Vec<f64>,
+            accruals: Vec<f64>,
+        ) -> f64;
 
         // Calibración de mercado (PLAN.md §7.14): pillars/zero_rates es el MarketSnapshot en
         // su forma más plana (dos vectores paralelos, PLAN.md §5.5), ver
@@ -144,7 +170,9 @@ fn irs_unilateral_cva_5y(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn irs_hull_white_exposure_profile(
+    backend: String,
     a: f64,
     b: f64,
     sigma: f64,
@@ -156,10 +184,12 @@ fn irs_hull_white_exposure_profile(
     payment_times: Vec<f64>,
     accruals: Vec<f64>,
     monitoring_times: Vec<f64>,
+    n_steps: u64,
     n_paths: u64,
     seed: u64,
 ) -> ffi::ExposureProfileResult {
     let profile = engine_core::api::irs_hull_white_exposure_profile(
+        &backend,
         a,
         b,
         sigma,
@@ -171,6 +201,7 @@ fn irs_hull_white_exposure_profile(
         payment_times,
         accruals,
         &monitoring_times,
+        n_steps as usize,
         n_paths as usize,
         seed,
     );
@@ -182,6 +213,7 @@ fn irs_hull_white_exposure_profile(
 }
 
 fn unilateral_cva_from_exposure(
+    backend: String,
     a: f64,
     b: f64,
     sigma: f64,
@@ -191,19 +223,45 @@ fn unilateral_cva_from_exposure(
     hazard_rate: f64,
     recovery_rate: f64,
 ) -> f64 {
-    engine_core::api::unilateral_cva_from_exposure(a, b, sigma, r0, times, ee, hazard_rate, recovery_rate)
-}
-
-fn set_compute_backend(name: String) -> bool {
-    engine_core::api::set_compute_backend(&name)
-}
-
-fn compute_backend_name() -> String {
-    engine_core::api::compute_backend_name()
+    engine_core::api::unilateral_cva_from_exposure(&backend, a, b, sigma, r0, times, ee, hazard_rate, recovery_rate)
 }
 
 fn is_gpu_backend_available() -> bool {
     engine_core::api::is_gpu_backend_available()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn irs_hull_white_npv(
+    a: f64,
+    b: f64,
+    sigma: f64,
+    r0: f64,
+    notional: f64,
+    fixed_rate: f64,
+    use_par_rate: bool,
+    start: f64,
+    payment_times: Vec<f64>,
+    accruals: Vec<f64>,
+) -> f64 {
+    engine_core::api::irs_hull_white_npv(a, b, sigma, r0, notional, fixed_rate, use_par_rate, start, payment_times, accruals)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn irs_hull_white_npv_delta_r0(
+    a: f64,
+    b: f64,
+    sigma: f64,
+    r0: f64,
+    notional: f64,
+    fixed_rate: f64,
+    use_par_rate: bool,
+    start: f64,
+    payment_times: Vec<f64>,
+    accruals: Vec<f64>,
+) -> f64 {
+    engine_core::api::irs_hull_white_npv_delta_r0(
+        a, b, sigma, r0, notional, fixed_rate, use_par_rate, start, payment_times, accruals,
+    )
 }
 
 fn calibrate_hull_white(

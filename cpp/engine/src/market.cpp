@@ -8,8 +8,11 @@
 
 namespace engine {
 
-MarketSnapshot::MarketSnapshot(std::vector<double> pillars, std::vector<double> zero_rates)
-    : pillars_(std::move(pillars)), zero_rates_(std::move(zero_rates)) {
+MarketSnapshot::MarketSnapshot(
+    std::vector<double> pillars, std::vector<double> zero_rates, double hazard_rate, double recovery_rate
+)
+    : pillars_(std::move(pillars)), zero_rates_(std::move(zero_rates)),
+      hazard_rate_(hazard_rate), recovery_rate_(recovery_rate) {
     if (pillars_.size() != zero_rates_.size()) {
         throw std::invalid_argument("MarketSnapshot: pillars y zero_rates deben tener el mismo tamano");
     }
@@ -22,6 +25,12 @@ MarketSnapshot::MarketSnapshot(std::vector<double> pillars, std::vector<double> 
         }
     }
 }
+
+MarketSnapshot::MarketSnapshot(const Params& params)
+    : MarketSnapshot(
+          get_vector(params, "pillars"), get_vector(params, "zero_rates"),
+          get_double(params, "hazard_rate", 0.0), get_double(params, "recovery_rate", 0.0)
+      ) {}
 
 double MarketSnapshot::zero_rate(double t) const {
     if (t <= pillars_.front()) return zero_rates_.front();
@@ -41,7 +50,8 @@ double MarketSnapshot::discount_factor(double t) const {
 }
 
 MarketSnapshot MarketSnapshot::synthetic_from_hull_white(
-    double a, double b, double sigma, double r0, const std::vector<double>& pillars
+    double a, double b, double sigma, double r0, const std::vector<double>& pillars,
+    double hazard_rate, double recovery_rate
 ) {
     std::vector<double> zero_rates;
     zero_rates.reserve(pillars.size());
@@ -49,7 +59,7 @@ MarketSnapshot MarketSnapshot::synthetic_from_hull_white(
         double price = hull_white_zero_coupon_bond(a, b, sigma, r0, 0.0, t);
         zero_rates.push_back(t > 0.0 ? -std::log(price) / t : 0.0);
     }
-    return MarketSnapshot(pillars, std::move(zero_rates));
+    return MarketSnapshot(pillars, std::move(zero_rates), hazard_rate, recovery_rate);
 }
 
 } // namespace engine

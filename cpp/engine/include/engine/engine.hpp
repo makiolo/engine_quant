@@ -41,35 +41,50 @@ struct ExposureProfile {
 // Perfil de exposición (EE/PFE) de un IRS bajo Hull-White 1F, vía Monte Carlo (PLAN.md §5.2).
 // notional/fixed_rate/start describen el IRS; si use_par_rate es true, fixed_rate se ignora y
 // el tipo fijo se calcula a la par en `start` (igual que hace irs_unilateral_cva_5y, pero
-// aquí el IRS es arbitrario en vez de fijo a 5 años anuales).
+// aquí el IRS es arbitrario en vez de fijo a 5 años anuales). `backend` ("cpu"/"gpu") es un
+// parámetro explícito (PLAN.md §7.15) — ya no hay estado global de backend (§7.12, retirado);
+// `n_steps` (PLAN.md §7.15, `PricingContext::n_steps`) sustituye la malla semanal que se
+// calculaba antes internamente.
 ExposureProfile irs_hull_white_exposure_profile(
+    const std::string& backend,
     double a, double b, double sigma, double r0,
     double notional, double fixed_rate, bool use_par_rate,
     double start,
     const std::vector<double>& payment_times,
     const std::vector<double>& accruals,
     const std::vector<double>& monitoring_times,
-    std::uint64_t n_paths, std::uint64_t seed
+    std::uint64_t n_steps, std::uint64_t n_paths, std::uint64_t seed
 );
 
 // CVA unilateral (hazard rate plana, recovery rate constante) a partir de un perfil EE ya
 // calculado (times/ee, mismo largo) — separa el cálculo del perfil del cálculo del CVA para
-// que la capa de medidas (measure.hpp) pueda componerlas.
+// que la capa de medidas (measure.hpp) pueda componerlas. Mismo `backend` explícito que
+// irs_hull_white_exposure_profile.
 double unilateral_cva_from_exposure(
+    const std::string& backend,
     double a, double b, double sigma, double r0,
     const std::vector<double>& times, const std::vector<double>& ee,
     double hazard_rate, double recovery_rate
 );
 
-// Selección de backend de cómputo (PLAN.md §7.12): "cpu" (siempre disponible) o "gpu" (solo
-// si el core Rust se compiló con la feature `gpu`, ver ENGINE_QUANT_ENABLE_GPU en el
-// CMakeLists.txt raíz). Estado global de proceso, no un parámetro de cada llamada: las dos
-// funciones de arriba lo leen internamente en cada invocación. set_compute_backend devuelve
-// false (sin cambiar nada) si `name` no se reconoce o pide un backend no compilado en este
-// build — comprobar is_gpu_backend_available() antes de pedir "gpu" si se quiere distinguir
-// ambos casos en el mensaje al usuario.
-bool set_compute_backend(const std::string& name);
-std::string compute_backend_name();
+// `true` si el core Rust se compiló con soporte GPU (feature `gpu`, ver ENGINE_QUANT_ENABLE_GPU
+// en el CMakeLists.txt raíz) — independientemente del backend que se pida en cada llamada.
+// Usado por `ExecutionContext` para resolver `"auto"` y para rechazar `"gpu"` con un mensaje
+// claro si este build no lo soporta.
 bool is_gpu_backend_available();
+
+// NPV determinista (sin Monte Carlo) del IRS a t=0 y su derivada respecto a r0 (PLAN.md
+// §7.15: medidas "PV"/"DV01" de ENGINE.CALC, ver engine/measure.hpp). Siempre en CPU: una
+// única evaluación no se beneficia de GPU.
+double irs_hull_white_npv(
+    double a, double b, double sigma, double r0,
+    double notional, double fixed_rate, bool use_par_rate, double start,
+    const std::vector<double>& payment_times, const std::vector<double>& accruals
+);
+double irs_hull_white_npv_delta_r0(
+    double a, double b, double sigma, double r0,
+    double notional, double fixed_rate, bool use_par_rate, double start,
+    const std::vector<double>& payment_times, const std::vector<double>& accruals
+);
 
 } // namespace engine

@@ -8,10 +8,9 @@
 #include <nanobind/stl/unique_ptr.h>
 #include <nanobind/stl/vector.h>
 
-#include "engine/bootstrap.hpp"
+#include "engine/calc.hpp"
 #include "engine/calibrator.hpp"
 #include "engine/engine.hpp"
-#include "engine/market.hpp"
 
 namespace nb = nanobind;
 using namespace nb::literals;
@@ -23,7 +22,8 @@ namespace {
 // lenguaje en vez de una clase Params dedicada, para que la API se sienta "de Python"
 // (PLAN.md §4: "la API debe sentirse equivalente en Python y en Excel", no idéntica letra a
 // letra al C++ subyacente). bool se comprueba antes que double porque en Python bool es
-// subtipo de int/float.
+// subtipo de int/float. str (PLAN.md §7.15, para ExecutionContext: "backend"/"precision")
+// se comprueba antes que el resto porque nb::cast<double> no la aceptaría.
 engine::Params dict_to_params(const nb::dict& params) {
     engine::Params result;
     for (auto item : params) {
@@ -31,6 +31,8 @@ engine::Params dict_to_params(const nb::dict& params) {
         nb::handle value = item.second;
         if (nb::isinstance<nb::bool_>(value)) {
             result.emplace(std::move(key), nb::cast<bool>(value));
+        } else if (nb::isinstance<nb::str>(value)) {
+            result.emplace(std::move(key), nb::cast<std::string>(value));
         } else if (nb::isinstance<nb::list>(value) || nb::isinstance<nb::tuple>(value)) {
             result.emplace(std::move(key), nb::cast<std::vector<double>>(value));
         } else {
@@ -54,15 +56,19 @@ nb::dict params_to_dict(const engine::Params& params) {
 
 // Envuelve engine::Registries + register_builtins (PLAN.md §5.4, §7.6) en un único objeto
 // Python: se instancia una vez (register_builtins se ejecuta en el constructor) y expone
-// list_*/create_* como métodos, en vez de dejar que el cliente Python tenga que llamar a una
-// función de bootstrap suelta.
+// list_*/create_*/calc como métodos, en vez de dejar que el cliente Python tenga que llamar a
+// una función de bootstrap suelta.
 class Engine {
 public:
     Engine() { engine::register_builtins(registries_); }
 
     std::vector<std::string> list_models() const { return registries_.models.list(); }
     std::vector<std::string> list_products() const { return registries_.products.list(); }
-    std::vector<std::string> list_measures() const { return registries_.measures.list(); }
+    // Nombres de ENGINE.CALC (PLAN.md §7.15: "PV"/"DV01"/"ExpectedExposure"/"PFE95"/
+    // "UnilateralCVA"), no los nombres registrados en Registry<IMeasure> -- ese registro
+    // sigue siendo el mecanismo de extensión (PLAN.md §5.4), pero ya no se expone
+    // directamente: se consume a través de calc().
+    std::vector<std::string> list_measures() const { return engine::calc_measure_names(); }
     std::vector<std::string> list_calibrators() const { return registries_.calibrators.list(); }
 
     std::unique_ptr<engine::IModel> create_model(const std::string& name, const nb::dict& params) const {
@@ -73,59 +79,38 @@ public:
         return registries_.products.create(name, dict_to_params(params));
     }
 
-    std::unique_ptr<engine::IMeasure> create_measure(const std::string& name) const {
-        return registries_.measures.create(name);
-    }
-
     std::unique_ptr<engine::ICalibrator> create_calibrator(const std::string& name) const {
         return registries_.calibrators.create(name);
+    }
+
+    // Sustituye por completo create_measure/Measure.evaluate (PLAN.md §7.15): calcula un lote
+    // de medidas nombradas de una vez, devolviendo un dict {nombre: MeasureResult} en vez de
+    // una medida a la vez con un dict de parámetros genérico.
+    nb::dict calc(
+        const engine::IProduct& product,
+        const std::vector<std::string>& measure_names,
+        const engine::IModel& model,
+        const engine::MarketSnapshot& market,
+        const engine::PricingContext& pricing,
+        const engine::ExecutionContext& execution
+    ) const {
+        engine::CalcResult result = engine::calc(registries_, product, measure_names, model, market, pricing, execution);
+        nb::dict out;
+        for (const auto& entry : result) {
+            out[entry.measure_name.c_str()] = entry.result;
+        }
+        return out;
     }
 
 private:
     engine::Registries registries_;
 };
 
-// Gestor de contexto nativo para PLAN.md §7.12: "with engine.backend('gpu'): ...". Inspirado
-// en `decimal.localcontext()`/`torch.device()` (Python estándar/PyTorch) — recordar el
-// backend previo al entrar y restaurarlo al salir, incluso si el bloque lanza una excepción
-// — pero implementado como clase de nanobind en vez de un decorador `@contextlib.
-// contextmanager` de Python: este binding es el único módulo que se distribuye (PLAN.md
-// §7.9, `pyproject.toml`: "no hay paquete Python que auto-copiar"), así que el protocolo de
-// gestor de contexto (`__enter__`/`__exit__`, duck-typed por Python, contextlib es solo un
-// azúcar sintáctico para construirlo con un generador) vive aquí en vez de en un fichero .py
-// nuevo. `clients/python/examples/backend_selection.py` muestra el equivalente con
-// contextlib para quien prefiera construir el suyo por encima de `set_compute_backend`/
-// `get_compute_backend`.
-class BackendScope {
-public:
-    explicit BackendScope(std::string requested) : requested_(std::move(requested)) {}
-
-    std::string enter() {
-        previous_ = engine::compute_backend_name();
-        if (!engine::set_compute_backend(requested_)) {
-            throw std::invalid_argument(
-                "Backend de computo no disponible: '" + requested_ +
-                "' (gpu disponible en este build: " +
-                (engine::is_gpu_backend_available() ? "si" : "no") + ")");
-        }
-        return engine::compute_backend_name();
-    }
-
-    bool exit(nb::object, nb::object, nb::object) {
-        engine::set_compute_backend(previous_);
-        return false; // no suprime la excepcion, si la hubo
-    }
-
-private:
-    std::string requested_;
-    std::string previous_;
-};
-
 } // namespace
 
 // Fase 0: cadena de humo del pipeline de build (PLAN.md §7.1).
 // Fase 3 (PLAN.md §6): binding 1:1 (o casi) con la API pública del registry C++ de Fase 2
-// (Registries/register_builtins/Registry<T>::create/IMeasure::evaluate, PLAN.md §7.6), además
+// (Registries/register_builtins/Registry<T>::create/engine::calc, PLAN.md §7.6/§7.15), además
 // de las funciones de cadena de humo ampliada que ya se exponían desde Fase 0-1 (siguen
 // existiendo tal cual, PLAN.md §7.6).
 NB_MODULE(engine, m) {
@@ -167,7 +152,14 @@ NB_MODULE(engine, m) {
         nb::arg("seed")
     );
 
-    // --- Registry de modelos/productos/medidas (Fase 3, PLAN.md §5.4/§7.6) ---
+    m.def(
+        "is_gpu_backend_available",
+        &engine::is_gpu_backend_available,
+        "True si este build se compilo con soporte GPU (feature `gpu` de engine-core) -- "
+        "usar para decidir si pedir \"gpu\"/\"auto\" en ExecutionContext tiene sentido."
+    );
+
+    // --- Registry de modelos/productos (Fase 3, PLAN.md §5.4/§7.6) ---
 
     nb::class_<engine::IModel>(m, "Model")
         .def_prop_ro("type_name", &engine::IModel::type_name)
@@ -188,32 +180,25 @@ NB_MODULE(engine, m) {
                    " has_scalar=" + (self.has_scalar ? std::string("True") : std::string("False")) + ">";
         });
 
-    nb::class_<engine::IMeasure>(m, "Measure")
-        .def_prop_ro("type_name", &engine::IMeasure::type_name)
-        .def(
-            "evaluate",
-            [](const engine::IMeasure& self, const engine::IModel& model, const engine::IProduct& product, const nb::dict& params) {
-                return self.evaluate(model, product, dict_to_params(params));
-            },
-            nb::arg("model"),
-            nb::arg("product"),
-            nb::arg("params") = nb::dict()
-        )
-        .def("__repr__", [](const engine::IMeasure& self) { return "<Measure '" + self.type_name() + "'>"; });
-
-    // --- Market / calibración (PLAN.md §7.14) ---
+    // --- Market / PricingContext / ExecutionContext (PLAN.md §7.15) ---
 
     nb::class_<engine::MarketSnapshot>(m, "MarketSnapshot")
         .def(
-            nb::init<std::vector<double>, std::vector<double>>(),
+            nb::init<std::vector<double>, std::vector<double>, double, double>(),
             nb::arg("pillars"),
             nb::arg("zero_rates"),
+            nb::arg("hazard_rate") = 0.0,
+            nb::arg("recovery_rate") = 0.0,
             "Curva de mercado observada -- o fabricada, ver synthetic_from_hull_white -- en "
             "un instante dado: pillars (anios desde hoy, estrictamente creciente) + "
-            "zero_rates (tipos cero de capitalizacion continua, mismo largo)."
+            "zero_rates (tipos cero de capitalizacion continua, mismo largo). "
+            "hazard_rate/recovery_rate (opcionales, default 0.0) son datos de credito que "
+            "solo usa la medida 'UnilateralCVA' de Engine.calc."
         )
         .def_prop_ro("pillars", &engine::MarketSnapshot::pillars)
         .def_prop_ro("zero_rates", &engine::MarketSnapshot::zero_rates)
+        .def_prop_ro("hazard_rate", &engine::MarketSnapshot::hazard_rate)
+        .def_prop_ro("recovery_rate", &engine::MarketSnapshot::recovery_rate)
         .def("zero_rate", &engine::MarketSnapshot::zero_rate, nb::arg("t"))
         .def("discount_factor", &engine::MarketSnapshot::discount_factor, nb::arg("t"))
         .def_static(
@@ -224,6 +209,8 @@ NB_MODULE(engine, m) {
             nb::arg("sigma"),
             nb::arg("r0"),
             nb::arg("pillars"),
+            nb::arg("hazard_rate") = 0.0,
+            nb::arg("recovery_rate") = 0.0,
             "Mercado 'falso': fabrica un MarketSnapshot leyendo la propia formula cerrada de "
             "HullWhite1F en los pillars dados -- util para probar/demostrar calibrate() sin "
             "depender de datos de mercado reales."
@@ -231,6 +218,45 @@ NB_MODULE(engine, m) {
         .def("__repr__", [](const engine::MarketSnapshot& self) {
             return "<MarketSnapshot pillars=" + std::to_string(self.pillars().size()) + ">";
         });
+
+    nb::class_<engine::PricingContext>(m, "PricingContext")
+        .def(
+            "__init__",
+            [](engine::PricingContext* self, const nb::dict& params) {
+                new (self) engine::PricingContext(dict_to_params(params));
+            },
+            nb::arg("params"),
+            "Contexto de valoracion de Engine.calc (PLAN.md §7.15): dict con 'pricing_date' "
+            "(opcional, default 0.0 -- metadato, sin aritmetica de calendario todavia), "
+            "'n_paths', 'n_steps' y 'seed' (todos requeridos)."
+        )
+        .def_prop_ro("pricing_date", &engine::PricingContext::pricing_date)
+        .def_prop_ro("n_paths", &engine::PricingContext::n_paths)
+        .def_prop_ro("n_steps", &engine::PricingContext::n_steps)
+        .def_prop_ro("seed", &engine::PricingContext::seed)
+        .def("__repr__", [](const engine::PricingContext& self) {
+            return "<PricingContext n_paths=" + std::to_string(self.n_paths()) +
+                   " n_steps=" + std::to_string(self.n_steps()) + ">";
+        });
+
+    nb::class_<engine::ExecutionContext>(m, "ExecutionContext")
+        .def(
+            "__init__",
+            [](engine::ExecutionContext* self, const nb::dict& params) {
+                new (self) engine::ExecutionContext(dict_to_params(params));
+            },
+            nb::arg("params"),
+            "Como ejecutar Engine.calc (PLAN.md §7.15, sustituye el backend global de la Fase "
+            "5/§7.12): dict con 'backend' ('cpu'/'gpu'/'auto', resuelto aqui mismo) y "
+            "'precision' (opcional, default 'fp64' -- unico valor soportado hoy)."
+        )
+        .def_prop_ro("backend", &engine::ExecutionContext::backend)
+        .def_prop_ro("precision", &engine::ExecutionContext::precision)
+        .def("__repr__", [](const engine::ExecutionContext& self) {
+            return "<ExecutionContext backend='" + self.backend() + "'>";
+        });
+
+    // --- Calibración (PLAN.md §7.14) ---
 
     nb::class_<engine::CalibrationResult>(m, "CalibrationResult")
         .def_prop_ro("optimal_params", [](const engine::CalibrationResult& self) { return params_to_dict(self.optimal_params); })
@@ -265,56 +291,20 @@ NB_MODULE(engine, m) {
         .def("list_calibrators", &Engine::list_calibrators)
         .def("create_model", &Engine::create_model, nb::arg("name"), nb::arg("params") = nb::dict())
         .def("create_product", &Engine::create_product, nb::arg("name"), nb::arg("params") = nb::dict())
-        .def("create_measure", &Engine::create_measure, nb::arg("name"))
-        .def("create_calibrator", &Engine::create_calibrator, nb::arg("name"));
-
-    // --- Selección de backend de cómputo (PLAN.md §7.12) ---
-
-    m.def(
-        "set_compute_backend",
-        &engine::set_compute_backend,
-        nb::arg("name"),
-        "Selecciona el backend de computo global ('cpu'/'gpu'). Devuelve False sin cambiar "
-        "nada si el nombre no se reconoce o pide un backend no compilado en este build "
-        "(ver is_gpu_backend_available()). Afecta a todas las llamadas siguientes hasta el "
-        "proximo set_compute_backend() -- para un cambio acotado a un bloque, usar backend()."
-    );
-    m.def(
-        "get_compute_backend",
-        &engine::compute_backend_name,
-        "Backend de computo actualmente seleccionado ('cpu' o 'gpu')."
-    );
-    m.def(
-        "is_gpu_backend_available",
-        &engine::is_gpu_backend_available,
-        "True si este build se compilo con soporte GPU (feature `gpu` de engine-core), "
-        "independientemente de cual sea el backend seleccionado ahora mismo."
-    );
-
-    nb::class_<BackendScope>(m, "_BackendScope")
-        .def(nb::init<std::string>())
-        .def("__enter__", &BackendScope::enter)
-        // Python invoca __exit__(None, None, None) cuando el bloque `with` termina sin
-        // excepcion: .none() en cada argumento es obligatorio en nanobind (por defecto
-        // rechaza None incluso para un nb::object generico, ver nb_attr.h) o cada salida
-        // limpia del `with` lanzaria un TypeError en vez de restaurar el backend.
+        .def("create_calibrator", &Engine::create_calibrator, nb::arg("name"))
         .def(
-            "__exit__",
-            &BackendScope::exit,
-            nb::arg("exc_type").none(),
-            nb::arg("exc_value").none(),
-            nb::arg("traceback").none()
+            "calc",
+            &Engine::calc,
+            nb::arg("product"),
+            nb::arg("measure_names"),
+            nb::arg("model"),
+            nb::arg("market"),
+            nb::arg("pricing"),
+            nb::arg("execution"),
+            "Calcula un lote de medidas nombradas (ver list_measures()) sobre el mismo "
+            "product/model/market/pricing/execution de una vez. Devuelve un dict {nombre: "
+            "MeasureResult} en el mismo orden que measure_names.\n\n"
+            ">>> eng.calc(trade, ['PV', 'DV01', 'ExpectedExposure', 'PFE95', 'UnilateralCVA'],\n"
+            "...          model, market, pricing, execution)"
         );
-
-    m.def(
-        "backend",
-        [](const std::string& name) { return BackendScope(name); },
-        nb::arg("name"),
-        "Gestor de contexto: selecciona el backend de computo ('cpu'/'gpu') solo dentro del "
-        "bloque `with`, restaurando el anterior al salir (incluso si el bloque lanza una "
-        "excepcion) -- inspirado en decimal.localcontext()/torch.device().\n\n"
-        ">>> with engine.backend('gpu'):\n"
-        "...     medida.evaluate(modelo, producto, params)  # corre en GPU\n"
-        "... # aqui ya se ha restaurado el backend anterior"
-    );
 }

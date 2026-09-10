@@ -71,17 +71,20 @@ jobs:
       - name: Build
         run: cmake --build build
 
-      # Capas 2-3 de §5.6 sobre el registry C++ (PLAN.md §5.4, Fase 2): wiring de
-      # Registry<T>/IModel/IProduct/IMeasure, no repite la validación numérica fina que ya
-      # cubre `rust-tests`. Incluye los tests de la C ABI (PLAN.md §7.13, cpp/engine/tests/
-      # test_abi.cpp), aunque solo llaman a engine/abi.h desde C++ (GoogleTest).
-      - name: C++ tests (registry de modelos/productos/medidas + C ABI)
+      # Capas 2-3 de §5.6 sobre el registry C++ (PLAN.md §5.4, Fase 2; engine::calc en
+      # §7.15): wiring de Registry<T>/IModel/IProduct/IMeasure, no repite la validación
+      # numérica fina que ya cubre `rust-tests`. Incluye los tests de la C ABI (PLAN.md §7.13,
+      # cpp/engine/tests/test_abi.cpp) y del bridge de Excel (clients/excel/tests, PLAN.md
+      # §7.8), aunque ninguno de los dos requiere Excel/C real instalado (GoogleTest).
+      - name: C++ tests (registry de modelos/productos/medidas + C ABI + bridge Excel)
         run: ctest --test-dir build --output-on-failure -C Release
 
       # PLAN.md §7.13 (Fase 6): a diferencia del paso de arriba, esto compila y ejecuta
       # engine/abi.h desde un compilador de C de verdad (project(... LANGUAGES CXX C) en la
       # raíz) -- la única forma de confirmar que la C ABI es consumible sin C++, no solo que
-      # "parece C". Debe imprimir el mismo CVA que test_abi.cpp/test_registry.py/Excel real.
+      # "parece C". Ejercita engine_abi_calc (PLAN.md §7.15) con invariantes cualitativos
+      # (PV~0/DV01>0/PFE95>=EE>=0/CVA>0); el valor exacto de referencia vive en
+      # cpp/engine/tests/test_registry.cpp/clients/python/tests/test_calc.py.
       - name: C ABI smoke test (compilado y ejecutado como C puro)
         run: build/cpp/engine/engine_abi_c_smoke.exe
 
@@ -119,16 +122,17 @@ jobs:
 
       # Fase 3 (PLAN.md §5.4, §7.6): equivalente Python de cpp/engine/tests/test_registry.cpp,
       # confirma que el binding nanobind expone Registries/register_builtins/Registry<T>::create/
-      # IMeasure::evaluate con la misma semántica que el registry C++.
-      - name: Python registry test (Engine/Model/Product/Measure)
+      # engine::calc con la misma semántica que el registry C++.
+      - name: Python registry test (Engine/Model/Product)
         run: python clients/python/tests/test_registry.py build/clients/python
 
-      # PLAN.md §7.12: set_compute_backend/get_compute_backend/backend() -- este runner
-      # compila sin ENGINE_QUANT_ENABLE_GPU (ver paso "Configure" arriba), así que solo
-      # ejercita el contrato de la API con CpuBackend; is_gpu_backend_available() debe dar
-      # False aquí.
-      - name: Python backend-selection test (set_compute_backend/backend())
-        run: python clients/python/tests/test_backend.py build/clients/python
+      # PLAN.md §7.15: Engine.calc/MarketSnapshot/PricingContext/ExecutionContext -- este
+      # runner compila sin ENGINE_QUANT_ENABLE_GPU (ver paso "Configure" arriba), así que
+      # ExecutionContext({"backend": "auto"}) siempre resuelve a "cpu" aquí. Incluye el valor
+      # de referencia exacto (UnilateralCVA=503.64194077997536, mismo EE/PFE95 que
+      # cpp/engine/tests/test_registry.cpp).
+      - name: Python calc test (ENGINE.CALC: PV/DV01/ExpectedExposure/PFE95/UnilateralCVA)
+        run: python clients/python/tests/test_calc.py build/clients/python
 
       # PLAN.md §7.14 (Fase 7): equivalente Python de cpp/engine/tests/test_calibration.cpp,
       # incluido el round-trip MarketSnapshot -> calibrate -> Engine.create_model.

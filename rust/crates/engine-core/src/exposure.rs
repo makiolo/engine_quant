@@ -34,8 +34,12 @@ pub struct ExposureProfile {
 
 /// Calcula el perfil EE/PFE de `swap` bajo `model`, simulando el tipo corto por Monte
 /// Carlo (PLAN.md §5.2, vectorizado sobre los `n_paths` a la vez vía tensores Burn) sobre
-/// una malla fina hasta la última fecha de monitorización, y revalorando en cada una el
-/// swap *restante* (`IrSwap::remaining_from`) analíticamente vía `IrSwap::npv`.
+/// una malla de `n_steps` pasos hasta la última fecha de monitorización, y revalorando en
+/// cada una el swap *restante* (`IrSwap::remaining_from`) analíticamente vía `IrSwap::npv`.
+///
+/// `n_steps` es explícito (PLAN.md §7.15, `PricingContext::n_steps`) — antes de esa fase se
+/// calculaba internamente una malla semanal fija; ahora lo decide quien llama, para poder
+/// controlar la granularidad/coste de la simulación caso a caso.
 ///
 /// Cada fecha de `monitoring_times` debe ser una fecha de reseteo válida del swap
 /// (`swap.is_reset_date`, ver limitación documentada en `crate::products::irs`): la
@@ -46,11 +50,13 @@ pub fn expected_exposure_profile<B: Backend<FloatElem = f64>>(
     swap: &IrSwap<B>,
     r0: f64,
     monitoring_times: &[f64],
+    n_steps: usize,
     n_paths: usize,
     seed: u64,
     device: &burn::tensor::Device<B>,
 ) -> ExposureProfile {
     assert!(!monitoring_times.is_empty(), "monitoring_times vacío");
+    assert!(n_steps >= 1, "n_steps debe ser al menos 1");
     for &t in monitoring_times {
         assert!(
             swap.is_reset_date(t),
@@ -76,9 +82,7 @@ pub fn expected_exposure_profile<B: Backend<FloatElem = f64>>(
         };
     }
 
-    // Malla fina común (~1 paso/semana) para simular el tipo corto; las fechas de
-    // monitorización se muestrean al índice de grid más cercano.
-    let n_steps = ((t_max / (1.0 / 52.0)).ceil() as usize).max(monitoring_times.len());
+    // Las fechas de monitorización se muestrean al índice de grid más cercano.
     let dt = t_max / n_steps as f64;
 
     B::seed(device, seed);
@@ -171,7 +175,7 @@ mod tests {
         let r0 = 0.02;
         let swap = par_swap(r0, &model, &device);
         let times = vec![0.0, 1.0, 2.0];
-        let profile = expected_exposure_profile(&model, &swap, r0, &times, 5_000, 7, &device);
+        let profile = expected_exposure_profile(&model, &swap, r0, &times, 104, 5_000, 7, &device);
 
         for i in 0..times.len() {
             assert!(profile.ee[i] >= 0.0);
@@ -182,12 +186,13 @@ mod tests {
     #[test]
     fn exposure_at_time_zero_matches_deterministic_npv_exactly() {
         // En t=0 todas las trayectorias arrancan en r0: sin aleatoriedad, EE(0) debe
-        // coincidir exactamente (salvo redondeo) con el NPV determinista.
+        // coincidir exactamente (salvo redondeo) con el NPV determinista. n_steps es
+        // irrelevante aquí (t_max=0 devuelve antes de tocar la malla).
         let device = Device::default();
         let model = reference_model(&device);
         let r0 = 0.02;
         let swap = par_swap(r0, &model, &device);
-        let profile = expected_exposure_profile(&model, &swap, r0, &[0.0], 1_000, 11, &device);
+        let profile = expected_exposure_profile(&model, &swap, r0, &[0.0], 1, 1_000, 11, &device);
 
         let deterministic = swap.npv(scalar(r0, &device), 0.0, &model).into_scalar().max(0.0);
         assert!((profile.ee[0] - deterministic).abs() < 1e-6);
@@ -201,7 +206,7 @@ mod tests {
         let r0 = 0.02;
         let swap = par_swap(r0, &model, &device);
         let times = vec![0.0, 1.0, 2.0, 3.0];
-        let profile = expected_exposure_profile(&model, &swap, r0, &times, 5_000, 13, &device);
+        let profile = expected_exposure_profile(&model, &swap, r0, &times, 156, 5_000, 13, &device);
 
         let cva = unilateral_cva(&profile, &model, r0, 0.02, 0.4, &device);
         assert!(cva > 0.0, "CVA debería ser positivo, got {cva}");
@@ -214,7 +219,7 @@ mod tests {
         let r0 = 0.02;
         let swap = par_swap(r0, &model, &device);
         let times = vec![0.0, 1.0, 2.0];
-        let profile = expected_exposure_profile(&model, &swap, r0, &times, 2_000, 17, &device);
+        let profile = expected_exposure_profile(&model, &swap, r0, &times, 104, 2_000, 17, &device);
 
         let cva = unilateral_cva(&profile, &model, r0, 0.0, 0.4, &device);
         assert!(cva.abs() < 1e-9, "CVA con hazard=0 debería ser 0, got {cva}");

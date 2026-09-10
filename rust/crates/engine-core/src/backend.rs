@@ -26,11 +26,12 @@ pub type GpuBackend = burn::backend::Wgpu<f64>;
 /// modelos/productos con `Autodiff<CpuBackend>` en vez de `CpuBackend` a secas.
 pub type Autodiff<B> = burn::backend::Autodiff<B>;
 
-/// Selección de backend en tiempo de ejecución (PLAN.md §7.12: "los clientes deben poder
-/// elegir CPU o GPU"). Los alias de arriba son tipos — la elección real de cuál usar para
-/// una llamada concreta de `crate::api` es un valor en tiempo de ejecución, porque viene de
-/// fuera del proceso Rust (una UDF de Excel, un `with` de Python): este enum más el estado
-/// global de abajo son el puente entre ambos mundos.
+/// Selección de backend en tiempo de ejecución (PLAN.md §7.15: `ExecutionContext` en la capa
+/// C++, un parámetro explícito de cada llamada de `crate::api` — ya no un estado global de
+/// proceso, ver el historial de §7.12 para el diseño anterior). Los alias de arriba son
+/// tipos — la elección real de cuál usar para una llamada concreta es un valor en tiempo de
+/// ejecución, porque viene de fuera del proceso Rust (Excel/Python construyen un
+/// `ExecutionContext` y lo pasan a `ENGINE.CALC`): este enum es el puente entre ambos mundos.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ComputeBackend {
     Cpu,
@@ -55,55 +56,18 @@ impl ComputeBackend {
             ComputeBackend::Gpu => cfg!(feature = "gpu"),
         }
     }
-
-    fn from_code(code: u8) -> Self {
-        match code {
-            1 => ComputeBackend::Gpu,
-            _ => ComputeBackend::Cpu,
-        }
-    }
-
-    fn code(self) -> u8 {
-        match self {
-            ComputeBackend::Cpu => 0,
-            ComputeBackend::Gpu => 1,
-        }
-    }
 }
 
 /// Parsea "cpu"/"gpu" (case-insensitive, espacios al borde ignorados) — es la única forma en
-/// que `ComputeBackend` entra desde fuera de Rust (`crate::api::set_compute_backend`, cxx,
-/// nanobind, la UDF de Excel), así que vive junto al enum en vez de en cada frontera.
+/// que `ComputeBackend` entra desde fuera de Rust (un `&str` explícito en `crate::api`, que a
+/// su vez viene de `ExecutionContext::backend()` en la capa C++), así que vive junto al enum
+/// en vez de en cada frontera.
 pub fn parse_backend_name(name: &str) -> Option<ComputeBackend> {
     match name.trim().to_ascii_lowercase().as_str() {
         "cpu" => Some(ComputeBackend::Cpu),
         "gpu" => Some(ComputeBackend::Gpu),
         _ => None,
     }
-}
-
-// Estado global de proceso, no thread-local ni por-llamada: PLAN.md §7.12 trata el backend
-// como una opción de sesión de cálculo ("¿con qué calculo a partir de ahora?"), igual que
-// `decimal.localcontext()`/`torch.device()` en Python tratan la precisión/el dispositivo por
-// defecto como contexto ambiente en vez de un parámetro que hay que repetir en cada llamada.
-// `AtomicU8` (no un `Mutex`) porque el propio valor cabe en una operación atómica y no hay
-// invariante compuesta que proteger entre el `load` y el `store`.
-static CURRENT: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
-
-/// Backend de cómputo actualmente seleccionado (por defecto `Cpu`).
-pub fn current() -> ComputeBackend {
-    ComputeBackend::from_code(CURRENT.load(std::sync::atomic::Ordering::SeqCst))
-}
-
-/// Cambia el backend actual. Devuelve `false` (sin cambiar nada) si se pide un backend no
-/// disponible en este build (`ComputeBackend::is_available`) — así el llamador puede avisar
-/// en vez de fallar en silencio calculando en CPU sin que nadie lo note.
-pub fn set_current(backend: ComputeBackend) -> bool {
-    if !backend.is_available() {
-        return false;
-    }
-    CURRENT.store(backend.code(), std::sync::atomic::Ordering::SeqCst);
-    true
 }
 
 #[cfg(test)]
@@ -118,17 +82,8 @@ mod tests {
     }
 
     #[test]
-    fn set_current_rejects_unavailable_backend_without_changing_state() {
-        let before = current();
-        let requested = if cfg!(feature = "gpu") {
-            // Con la feature compilada, Gpu sí está disponible: no hay backend "no
-            // disponible" que probar aquí salvo simular el caso por separado (ver el otro
-            // branch). No tiene sentido este test con `gpu` activo; se deja un no-op.
-            return;
-        } else {
-            ComputeBackend::Gpu
-        };
-        assert!(!set_current(requested));
-        assert_eq!(current(), before);
+    fn gpu_is_available_only_with_the_gpu_feature() {
+        assert!(ComputeBackend::Cpu.is_available());
+        assert_eq!(ComputeBackend::Gpu.is_available(), cfg!(feature = "gpu"));
     }
 }

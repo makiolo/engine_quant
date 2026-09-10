@@ -152,32 +152,39 @@ TEST(TableToParams, MissingArgMeansNoParams) {
     EXPECT_TRUE(parsed.canonical.empty());
 }
 
-TEST(TableToMarket, TwoColumnRangeBecomesPillarsAndZeroRates) {
+TEST(ReadStringList, FlattensARowOfCells) {
+    std::vector<std::vector<XCHAR>> bufs;
     std::vector<XLOPER12> cells{
-        num_cell(1.0), num_cell(0.02),
-        num_cell(2.0), num_cell(0.03),
-        num_cell(5.0), num_cell(0.04),
+        str_cell(bufs, "PV"), str_cell(bufs, "DV01"), str_cell(bufs, "UnilateralCVA"),
     };
-    XLOPER12 table = make_table(cells, 3, 2);
+    XLOPER12 table = make_table(cells, 1, 3);
 
-    engine::MarketSnapshot market = xlbridge::table_to_market(table);
+    std::vector<std::string> names = xlbridge::read_string_list(table);
 
-    ASSERT_EQ(market.pillars().size(), 3u);
-    EXPECT_DOUBLE_EQ(market.pillars()[1], 2.0);
-    EXPECT_DOUBLE_EQ(market.zero_rates()[1], 0.03);
+    ASSERT_EQ(names.size(), 3u);
+    EXPECT_EQ(names[0], "PV");
+    EXPECT_EQ(names[2], "UnilateralCVA");
 }
 
-TEST(TableToMarket, BlankPillarRowIsIgnored) {
-    std::vector<XLOPER12> cells{
-        num_cell(1.0), num_cell(0.02),
-        blank_cell(), blank_cell(),
-        num_cell(5.0), num_cell(0.04),
-    };
-    XLOPER12 table = make_table(cells, 3, 2);
+TEST(ReadStringList, IgnoresBlankCells) {
+    std::vector<std::vector<XCHAR>> bufs;
+    std::vector<XLOPER12> cells{str_cell(bufs, "PV"), blank_cell(), str_cell(bufs, "DV01")};
+    XLOPER12 table = make_table(cells, 1, 3);
 
-    engine::MarketSnapshot market = xlbridge::table_to_market(table);
+    std::vector<std::string> names = xlbridge::read_string_list(table);
 
-    EXPECT_EQ(market.pillars().size(), 2u);
+    ASSERT_EQ(names.size(), 2u);
+    EXPECT_EQ(names[1], "DV01");
+}
+
+TEST(ReadStringList, SingleCellBecomesOneElementList) {
+    std::vector<std::vector<XCHAR>> bufs;
+    XLOPER12 single = str_cell(bufs, "PV");
+
+    std::vector<std::string> names = xlbridge::read_string_list(single);
+
+    ASSERT_EQ(names.size(), 1u);
+    EXPECT_EQ(names[0], "PV");
 }
 
 namespace {
@@ -203,6 +210,44 @@ XLOPER12 par_irs_5y_params_table(std::vector<std::vector<XCHAR>>& bufs, std::vec
     return make_table(cells, 3, 6);
 }
 
+// Mercado con 2 pillars (no 1: table_to_params colapsa una fila de un solo valor numérico a
+// double, no vector<double> -- una vector-valued row necesita >= 2 celdas para no ser
+// ambigua, ver table_to_params en xloper.cpp): ninguna medida del caso base usa la curva en
+// sí para descontar, solo hazard_rate/recovery_rate importan (para UnilateralCVA).
+XLOPER12 market_params_table(
+    std::vector<std::vector<XCHAR>>& bufs, std::vector<XLOPER12>& cells,
+    double hazard_rate = 0.0, double recovery_rate = 0.0
+) {
+    cells = {
+        str_cell(bufs, "pillars"), num_cell(1.0), num_cell(2.0),
+        str_cell(bufs, "zero_rates"), num_cell(0.02), num_cell(0.02),
+        str_cell(bufs, "hazard_rate"), num_cell(hazard_rate), blank_cell(),
+        str_cell(bufs, "recovery_rate"), num_cell(recovery_rate), blank_cell(),
+    };
+    return make_table(cells, 4, 3);
+}
+
+// Mismo n_steps/caso que golden_pricing en cpp/engine/tests/test_registry.cpp.
+XLOPER12 pricing_context_table(
+    std::vector<std::vector<XCHAR>>& bufs, std::vector<XLOPER12>& cells, double n_paths, double seed
+) {
+    cells = {
+        str_cell(bufs, "pricing_date"), num_cell(0.0),
+        str_cell(bufs, "n_paths"), num_cell(n_paths),
+        str_cell(bufs, "n_steps"), num_cell(208.0),
+        str_cell(bufs, "seed"), num_cell(seed),
+    };
+    return make_table(cells, 4, 2);
+}
+
+XLOPER12 cpu_execution_table(std::vector<std::vector<XCHAR>>& bufs, std::vector<XLOPER12>& cells) {
+    cells = {
+        str_cell(bufs, "backend"), str_cell(bufs, "cpu"),
+        str_cell(bufs, "precision"), str_cell(bufs, "fp64"),
+    };
+    return make_table(cells, 2, 2);
+}
+
 } // namespace
 
 TEST(HandleRegistry, RegisterBuiltinsPopulatesAllRegistries) {
@@ -213,8 +258,43 @@ TEST(HandleRegistry, RegisterBuiltinsPopulatesAllRegistries) {
     };
     EXPECT_TRUE(contains(registry.list_models(), "HullWhite1F"));
     EXPECT_TRUE(contains(registry.list_products(), "IRSwap"));
-    EXPECT_TRUE(contains(registry.list_measures(), "ExposureProfile"));
+    EXPECT_TRUE(contains(registry.list_measures(), "ExpectedExposure"));
+    EXPECT_TRUE(contains(registry.list_measures(), "PFE95"));
+    EXPECT_TRUE(contains(registry.list_measures(), "PV"));
+    EXPECT_TRUE(contains(registry.list_measures(), "DV01"));
     EXPECT_TRUE(contains(registry.list_measures(), "UnilateralCVA"));
+}
+
+TEST(HandleRegistry, CreateMarketIsMemoizedByCanonicalParams) {
+    xlbridge::HandleRegistry registry = make_registry();
+    std::vector<std::vector<XCHAR>> bufs1, bufs2;
+    std::vector<XLOPER12> cells1, cells2;
+    XLOPER12 table1 = market_params_table(bufs1, cells1, 0.02, 0.4);
+    XLOPER12 table2 = market_params_table(bufs2, cells2, 0.02, 0.4);
+
+    EXPECT_EQ(registry.create_market(table1), registry.create_market(table2));
+}
+
+TEST(HandleRegistry, CreateContextIsMemoizedByCanonicalParams) {
+    xlbridge::HandleRegistry registry = make_registry();
+    std::vector<std::vector<XCHAR>> bufs1, bufs2;
+    std::vector<XLOPER12> cells1, cells2;
+    XLOPER12 table1 = pricing_context_table(bufs1, cells1, 5000.0, 7.0);
+    XLOPER12 table2 = pricing_context_table(bufs2, cells2, 5000.0, 7.0);
+
+    EXPECT_EQ(registry.create_context(table1), registry.create_context(table2));
+}
+
+TEST(HandleRegistry, CreateExecutionAcceptsAutoBackend) {
+    // La resolución real de "auto" -> "cpu"/"gpu" la comprueba ExecutionContext directamente
+    // (cpp/engine/tests, si aplica); aquí solo se confirma que el bridge de Excel no la
+    // rechaza y produce un handle válido.
+    xlbridge::HandleRegistry registry = make_registry();
+    std::vector<std::vector<XCHAR>> bufs;
+    std::vector<XLOPER12> cells{str_cell(bufs, "backend"), str_cell(bufs, "auto")};
+    XLOPER12 table = make_table(cells, 1, 2);
+
+    EXPECT_FALSE(registry.create_execution(table).empty());
 }
 
 TEST(HandleRegistry, CreateModelIsMemoizedByCanonicalParams) {
@@ -236,73 +316,80 @@ TEST(HandleRegistry, CreateUnknownModelThrows) {
     EXPECT_THROW(registry.create_model("NoExiste", missing), std::out_of_range);
 }
 
-TEST(HandleRegistry, EvaluateUnknownHandleThrows) {
+TEST(HandleRegistry, CalcUnknownHandleThrows) {
     xlbridge::HandleRegistry registry = make_registry();
-    XLOPER12 missing = missing_arg();
-    EXPECT_THROW(registry.evaluate("measure:NoExiste", "model:NoExiste", "product:NoExiste", missing), std::out_of_range);
+    EXPECT_THROW(
+        registry.calc(
+            "product:NoExiste", {"PV"}, "model:NoExiste", "market:NoExiste", "pricing:NoExiste", "execution:NoExiste"
+        ),
+        std::out_of_range
+    );
 }
 
-// Mismos parámetros/semillas que Registry.ExposureProfileIsNonNegativeAndPfeDominatesEe
-// (cpp/engine/tests/test_registry.cpp) y test_exposure_profile_is_non_negative_and_pfe_
-// dominates_ee (clients/python/tests/test_registry.py): confirma que el bridge de Excel
-// reproduce el mismo resultado numérico que los otros dos clientes para el mismo caso base
-// (PLAN.md §5.2, §5.6 capa 4).
-TEST(HandleRegistry, ExposureProfileMatchesOtherClients) {
+TEST(HandleRegistry, CalcRejectsUnknownMeasureName) {
     xlbridge::HandleRegistry registry = make_registry();
-    std::vector<std::vector<XCHAR>> model_bufs, product_bufs, measure_bufs;
-    std::vector<XLOPER12> model_cells, product_cells, measure_cells;
+    std::vector<std::vector<XCHAR>> model_bufs, product_bufs, market_bufs, pricing_bufs, execution_bufs;
+    std::vector<XLOPER12> model_cells, product_cells, market_cells, pricing_cells, execution_cells;
 
-    XLOPER12 model_table = hull_white_params_table(model_bufs, model_cells);
-    XLOPER12 product_table = par_irs_5y_params_table(product_bufs, product_cells);
-    measure_cells = {
-        str_cell(measure_bufs, "monitoring_times"), num_cell(0.0), num_cell(1.0), num_cell(2.0),
-        str_cell(measure_bufs, "n_paths"), num_cell(5000.0), blank_cell(), blank_cell(),
-        str_cell(measure_bufs, "seed"), num_cell(7.0), blank_cell(), blank_cell(),
-    };
-    XLOPER12 measure_table = make_table(measure_cells, 3, 4);
+    std::string model = registry.create_model("HullWhite1F", hull_white_params_table(model_bufs, model_cells));
+    std::string product = registry.create_product("IRSwap", par_irs_5y_params_table(product_bufs, product_cells));
+    std::string market = registry.create_market(market_params_table(market_bufs, market_cells));
+    std::string pricing = registry.create_context(pricing_context_table(pricing_bufs, pricing_cells, 100.0, 1.0));
+    std::string execution = registry.create_execution(cpu_execution_table(execution_bufs, execution_cells));
 
-    std::string model = registry.create_model("HullWhite1F", model_table);
-    std::string product = registry.create_product("IRSwap", product_table);
-    std::string measure = registry.create_measure("ExposureProfile");
+    EXPECT_THROW(registry.calc(product, {"NoExiste"}, model, market, pricing, execution), std::invalid_argument);
+}
 
-    engine::MeasureResult result = registry.evaluate(measure, model, product, measure_table);
+// Mismos parámetros/semilla que Registry.ExposureProfileMatchesGoldenValue (cpp/engine/tests/
+// test_registry.cpp) y test_exposure_profile_matches_golden_value (clients/python/tests/
+// test_calc.py): confirma que el bridge de Excel reproduce el mismo resultado numérico que
+// los otros dos clientes para el mismo caso base (PLAN.md §5.2, §5.6 capa 4).
+TEST(HandleRegistry, ExpectedExposureAndPfe95MatchOtherClients) {
+    xlbridge::HandleRegistry registry = make_registry();
+    std::vector<std::vector<XCHAR>> model_bufs, product_bufs, market_bufs, pricing_bufs, execution_bufs;
+    std::vector<XLOPER12> model_cells, product_cells, market_cells, pricing_cells, execution_cells;
 
-    ASSERT_EQ(result.primary.size(), result.secondary.size());
-    for (std::size_t i = 0; i < result.primary.size(); ++i) {
-        EXPECT_GE(result.primary[i], 0.0);
-        EXPECT_GE(result.secondary[i], result.primary[i]);
+    std::string model = registry.create_model("HullWhite1F", hull_white_params_table(model_bufs, model_cells));
+    std::string product = registry.create_product("IRSwap", par_irs_5y_params_table(product_bufs, product_cells));
+    std::string market = registry.create_market(market_params_table(market_bufs, market_cells, 0.0, 0.0));
+    std::string pricing = registry.create_context(pricing_context_table(pricing_bufs, pricing_cells, 5000.0, 7.0));
+    std::string execution = registry.create_execution(cpu_execution_table(execution_bufs, execution_cells));
+
+    engine::CalcResult result = registry.calc(product, {"ExpectedExposure", "PFE95"}, model, market, pricing, execution);
+
+    ASSERT_EQ(result.size(), 2u);
+    const engine::MeasureResult& ee = result[0].result;
+    const engine::MeasureResult& pfe = result[1].result;
+    ASSERT_EQ(ee.primary.size(), pfe.primary.size());
+    for (std::size_t i = 0; i < ee.primary.size(); ++i) {
+        EXPECT_GE(ee.primary[i], 0.0);
+        EXPECT_GE(pfe.primary[i], ee.primary[i]);
     }
 }
 
 TEST(HandleRegistry, UnilateralCvaIsPositiveForNonzeroHazardRate) {
     xlbridge::HandleRegistry registry = make_registry();
-    std::vector<std::vector<XCHAR>> model_bufs, product_bufs, measure_bufs;
-    std::vector<XLOPER12> model_cells, product_cells, measure_cells;
+    std::vector<std::vector<XCHAR>> model_bufs, product_bufs, market_bufs, pricing_bufs, execution_bufs;
+    std::vector<XLOPER12> model_cells, product_cells, market_cells, pricing_cells, execution_cells;
 
-    XLOPER12 model_table = hull_white_params_table(model_bufs, model_cells);
-    XLOPER12 product_table = par_irs_5y_params_table(product_bufs, product_cells);
-    measure_cells = {
-        str_cell(measure_bufs, "monitoring_times"), num_cell(0.0), num_cell(1.0), num_cell(2.0), num_cell(3.0),
-        str_cell(measure_bufs, "n_paths"), num_cell(5000.0), blank_cell(), blank_cell(), blank_cell(),
-        str_cell(measure_bufs, "seed"), num_cell(13.0), blank_cell(), blank_cell(), blank_cell(),
-        str_cell(measure_bufs, "hazard_rate"), num_cell(0.02), blank_cell(), blank_cell(), blank_cell(),
-        str_cell(measure_bufs, "recovery_rate"), num_cell(0.4), blank_cell(), blank_cell(), blank_cell(),
-    };
-    XLOPER12 measure_table = make_table(measure_cells, 5, 5);
+    std::string model = registry.create_model("HullWhite1F", hull_white_params_table(model_bufs, model_cells));
+    std::string product = registry.create_product("IRSwap", par_irs_5y_params_table(product_bufs, product_cells));
+    std::string market = registry.create_market(market_params_table(market_bufs, market_cells, 0.02, 0.4));
+    std::string pricing = registry.create_context(pricing_context_table(pricing_bufs, pricing_cells, 5000.0, 7.0));
+    std::string execution = registry.create_execution(cpu_execution_table(execution_bufs, execution_cells));
 
-    std::string model = registry.create_model("HullWhite1F", model_table);
-    std::string product = registry.create_product("IRSwap", product_table);
-    std::string measure = registry.create_measure("UnilateralCVA");
+    engine::CalcResult result = registry.calc(product, {"UnilateralCVA"}, model, market, pricing, execution);
 
-    engine::MeasureResult result = registry.evaluate(measure, model, product, measure_table);
-
-    EXPECT_TRUE(result.has_scalar);
-    EXPECT_GT(result.scalar, 0.0);
+    ASSERT_EQ(result.size(), 1u);
+    EXPECT_TRUE(result[0].result.has_scalar);
+    EXPECT_GT(result[0].result.scalar, 0.0);
 }
 
 // Mismo caso/semillas que Calibrator.HullWhite1FRecoversKnownParametersFromASyntheticMarket
 // (cpp/engine/tests/test_calibration.cpp) y clients/python/tests/test_calibration.py: confirma
 // que el bridge de Excel reproduce el mismo resultado que los otros dos clientes (PLAN.md §7.14).
+// A diferencia de antes de PLAN.md §7.15, el mercado se pasa como handle (ENGINE.CREATE_MARKET),
+// no como rango inline.
 TEST(HandleRegistry, CalibrateHullWhiteRecoversKnownParameters) {
     xlbridge::HandleRegistry registry = make_registry();
 
@@ -310,12 +397,13 @@ TEST(HandleRegistry, CalibrateHullWhiteRecoversKnownParameters) {
     std::vector<double> pillars{0.5, 1.0, 2.0, 3.0, 5.0, 7.0, 10.0, 15.0, 20.0, 30.0};
     engine::MarketSnapshot synthetic = engine::MarketSnapshot::synthetic_from_hull_white(true_a, true_b, sigma, r0, pillars);
 
-    std::vector<XLOPER12> market_cells;
-    for (std::size_t i = 0; i < pillars.size(); ++i) {
-        market_cells.push_back(num_cell(synthetic.pillars()[i]));
-        market_cells.push_back(num_cell(synthetic.zero_rates()[i]));
-    }
-    XLOPER12 market_table = make_table(market_cells, static_cast<RW>(pillars.size()), 2);
+    std::vector<std::vector<XCHAR>> market_bufs;
+    std::vector<XLOPER12> market_cells{str_cell(market_bufs, "pillars")};
+    for (double p : synthetic.pillars()) market_cells.push_back(num_cell(p));
+    market_cells.push_back(str_cell(market_bufs, "zero_rates"));
+    for (double z : synthetic.zero_rates()) market_cells.push_back(num_cell(z));
+    XLOPER12 market_table = make_table(market_cells, 2, static_cast<COL>(pillars.size() + 1));
+    std::string market = registry.create_market(market_table);
 
     std::vector<std::vector<XCHAR>> guess_bufs;
     std::vector<XLOPER12> guess_cells{
@@ -327,7 +415,7 @@ TEST(HandleRegistry, CalibrateHullWhiteRecoversKnownParameters) {
     XLOPER12 guess_table = make_table(guess_cells, 4, 2);
 
     std::string calibrator = registry.create_calibrator("HullWhite1F");
-    engine::CalibrationResult result = registry.calibrate(calibrator, market_table, guess_table);
+    engine::CalibrationResult result = registry.calibrate(calibrator, market, guess_table);
 
     EXPECT_TRUE(result.converged);
     EXPECT_NEAR(std::get<double>(result.optimal_params.at("a")), true_a, 1e-4);
@@ -336,10 +424,8 @@ TEST(HandleRegistry, CalibrateHullWhiteRecoversKnownParameters) {
 
 TEST(HandleRegistry, CalibrateUnknownHandleThrows) {
     xlbridge::HandleRegistry registry = make_registry();
-    std::vector<XLOPER12> cells{num_cell(1.0), num_cell(0.02)};
-    XLOPER12 market_table = make_table(cells, 1, 2);
     XLOPER12 missing = missing_arg();
-    EXPECT_THROW(registry.calibrate("calibrator:NoExiste", market_table, missing), std::out_of_range);
+    EXPECT_THROW(registry.calibrate("calibrator:NoExiste", "market:NoExiste", missing), std::out_of_range);
 }
 
 TEST(NewCalibrationResult, IncludesOptimalParamsAndDiagnostics) {
@@ -379,5 +465,50 @@ TEST(NewMeasureResult, ProfileBecomesNx3Multi) {
     EXPECT_EQ(out->val.array.rows, 2);
     EXPECT_EQ(out->val.array.columns, 3);
     EXPECT_DOUBLE_EQ(out->val.array.lparray[1 * 3 + 2].val.num, 25.0);
+    xlbridge::free_xloper(out);
+}
+
+namespace {
+
+DWORD xl_base_type(const XLOPER12& x) { return x.xltype & ~static_cast<DWORD>(xlbitXLFree | xlbitDLLFree); }
+
+} // namespace
+
+TEST(NewCalcResult, MixesScalarAndProfileRowsInLongFormat) {
+    engine::CalcResult result;
+
+    engine::MeasureResult pv;
+    pv.has_scalar = true;
+    pv.scalar = 0.0;
+    result.push_back({"PV", pv});
+
+    engine::MeasureResult ee;
+    ee.has_scalar = false;
+    ee.times = {0.0, 1.0};
+    ee.primary = {0.0, 12862.62};
+    result.push_back({"ExpectedExposure", ee});
+
+    XLOPER12* out = xlbridge::new_calc_result(result);
+    ASSERT_EQ(xl_base_type(*out), static_cast<DWORD>(xltypeMulti));
+    EXPECT_EQ(out->val.array.columns, 3);
+    ASSERT_EQ(out->val.array.rows, 3); // 1 fila de PV (escalar) + 2 filas de ExpectedExposure
+
+    const XLOPER12* rows = out->val.array.lparray;
+    EXPECT_EQ(xlbridge::from_xl_string(rows[0 * 3 + 0].val.str + 1, rows[0 * 3 + 0].val.str[0]), "PV");
+    EXPECT_EQ(xl_base_type(rows[0 * 3 + 1]), static_cast<DWORD>(xltypeNil)); // Time en blanco
+    EXPECT_DOUBLE_EQ(rows[0 * 3 + 2].val.num, 0.0);
+
+    EXPECT_EQ(xlbridge::from_xl_string(rows[1 * 3 + 0].val.str + 1, rows[1 * 3 + 0].val.str[0]), "ExpectedExposure");
+    EXPECT_DOUBLE_EQ(rows[1 * 3 + 1].val.num, 0.0);
+    EXPECT_DOUBLE_EQ(rows[2 * 3 + 1].val.num, 1.0);
+    EXPECT_DOUBLE_EQ(rows[2 * 3 + 2].val.num, 12862.62);
+
+    xlbridge::free_xloper(out);
+}
+
+TEST(NewCalcResult, EmptyResultBecomesNaError) {
+    engine::CalcResult result;
+    XLOPER12* out = xlbridge::new_calc_result(result);
+    EXPECT_EQ(xl_base_type(*out), static_cast<DWORD>(xltypeErr));
     xlbridge::free_xloper(out);
 }

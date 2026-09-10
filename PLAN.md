@@ -1,15 +1,19 @@
 # XVA Engine — Plan de Arquitectura
 
 > Documento vivo. Se construye de forma incremental, sección a sección.
-> Estado: **v0.13 — Fase 4 completada (cliente Excel vía XLL sobre el registry C++) +
+> Estado: **v0.14 — Fase 4 completada (cliente Excel vía XLL sobre el registry C++) +
 > empaquetado/distribución (wheel Python + XLL autocontenidos, release automática en CI, §7.9)
 > + instalador Windows todo-en-uno (wizard .exe, §7.10) + Fase 5 completada (backend GPU
-> ejercitado con benchmarks reales, se mantiene opcional, §7.11; seleccionable desde Python
-> (`with engine.backend(...)`) y Excel (`ENGINE.SET_BACKEND`), §7.12) + Fase 6: API universal
-> en C ABI (`engine/abi.h`), verificada con GoogleTest y una sonda en C puro, aún sin
-> distribuirse en ninguna release (§7.13) + Fase 7: `MarketSnapshot`/`ICalibrator` — calibrar
-> `HullWhite1F` a una curva de mercado (real o fabricada) en las cinco capas (Rust/C++/C
-> ABI/Python/Excel), §7.14**
+> ejercitado con benchmarks reales, se mantiene opcional, §7.11; la selección de backend como
+> estado global de proceso descrita en §7.12 quedó sustituida por completo por
+> `ExecutionContext` en §7.15) + Fase 6: API universal en C ABI (`engine/abi.h`), verificada
+> con GoogleTest y una sonda en C puro, aún sin distribuirse en ninguna release (§7.13) + Fase
+> 7: `MarketSnapshot`/`ICalibrator` — calibrar `HullWhite1F` a una curva de mercado (real o
+> fabricada) en las cinco capas (Rust/C++/C ABI/Python/Excel), §7.14 + Fase 7.15: rediseño de
+> la API pública — `Trade`/`Model`/`Market`/`PricingContext`/`ExecutionContext` +
+> `ENGINE.CALC` (PV/DV01/ExpectedExposure/PFE95/UnilateralCVA en una sola llamada),
+> sustituyendo por completo `CREATE_MEASURE`+`EVALUATE` y el backend global de §7.12, en las
+> cinco capas**
 
 ## 1. Visión
 
@@ -229,17 +233,26 @@ añade en cuanto exista más de un cliente.
 5. **Fase 4** ✅ — Cliente Excel (XLL) sobre el registry C++ (ver §7.8).
 6. **Fase 5** ✅ — Backend GPU: alias `GpuBackend` (`burn-wgpu`) ejercitado con benchmarks reales
    sobre IRS+Hull-White; se mantiene tras feature opcional `gpu`, no por defecto (ver §7.11).
-   Seleccionable desde los clientes: `with engine.backend("gpu"):` en Python,
-   `ENGINE.SET_BACKEND("gpu")` en Excel (ver §7.12).
+   La selección de backend como estado global de proceso descrita originalmente en §7.12
+   (`with engine.backend("gpu"):` en Python, `ENGINE.SET_BACKEND("gpu")` en Excel) quedó
+   **sustituida por completo** por `ExecutionContext` en la Fase 7.15 — ver más abajo.
 7. **Fase 6** ✅ (mecanismo) — API universal en C ABI: `engine/abi.h`/`engine_abi` (SHARED),
-   misma superficie que Python/Excel (registry + selección de backend de §7.12) expresada en
-   `extern "C"` plano, verificada con GoogleTest y una sonda en C puro (ver §7.13). Pendiente
-   de decidir cómo se distribuye fuera de este repo (no forma parte de ninguna release hoy).
+   misma superficie que Python/Excel expresada en `extern "C"` plano, verificada con
+   GoogleTest y una sonda en C puro (ver §7.13; `engine_abi_calc` sustituyó a
+   `engine_abi_create_measure`/`engine_abi_evaluate` en la Fase 7.15, subiendo la versión de
+   la ABI de 1 a 2). Pendiente de decidir cómo se distribuye fuera de este repo (no forma
+   parte de ninguna release hoy).
 8. **Fase 7** ✅ — `MarketSnapshot` (curva de mercado, real o fabricada) + `ICalibrator`/
    `Registry<ICalibrator>` (nuevo cuarto registry, mismo patrón que modelos/productos/
    medidas): calibra `a`/`b` de `HullWhite1F` a una curva por mínimos cuadrados vía AAD
    (reutiliza la infraestructura de §5.3), en las cinco capas — Rust, registry C++, C ABI,
    Python (nanobind), Excel (ver §7.14).
+9. **Fase 7.15** ✅ — Rediseño de la API pública: `Trade`/`Model`/`Market`/`PricingContext`/
+   `ExecutionContext` como conceptos explícitos de primera clase y un único `ENGINE.CALC` que
+   calcula un lote de medidas (`PV`, `DV01`, `ExpectedExposure`, `PFE95`, `UnilateralCVA`) de
+   una vez, compartiendo cómputo Monte Carlo entre medidas relacionadas — sustituye por
+   completo `ENGINE.CREATE_MEASURE`+`ENGINE.EVALUATE` y el backend global de proceso de §7.12,
+   en las cinco capas (ver §7.15).
 
 ## 7. Estructura de repos/carpetas (Fase 0)
 
@@ -1256,6 +1269,180 @@ test_calibration.cpp`, incluido el *round-trip* hasta `Registry<IModel>::create`
 incluido el mismo *round-trip* hasta `Engine.create_model`) y Excel (`clients/excel/tests/
 test_xloper.cpp`, vía `HandleRegistry::calibrate`).
 
+## 7.15 Rediseño de la API pública: `Trade`/`Model`/`Market`/`PricingContext`/`ExecutionContext` + `ENGINE.CALC`
+
+### Motivación
+
+La API hasta esta fase mezclaba, sin nombre propio, en un único rango de parámetros de
+`ENGINE.EVALUATE`, dos cosas conceptualmente distintas: los parámetros de la simulación Monte
+Carlo (`monitoring_times`/`n_paths`/`seed`) y los datos de crédito (`hazard_rate`/
+`recovery_rate`). Cada medida se evaluaba una a una, sin compartir cómputo entre medidas
+relacionadas más allá de lo que `ExposureProfileMeasure`/`UnilateralCvaMeasure` ya compartían
+internamente. Y la selección de backend (CPU/GPU, §7.12) era un **estado global de proceso**
+(`ENGINE.SET_BACKEND`), con el problema documentado en `clients/excel/README.md`: Excel no
+recalcula automáticamente las celdas `EVALUATE` existentes al cambiar de backend.
+
+El usuario propuso sustituir por completo ese flujo por uno con conceptos explícitos:
+
+```
+Trade    = ENGINE.CREATE_PRODUCT("IRSwap", SwapParams)
+Model    = ENGINE.CREATE_MODEL("HullWhite1F", HullWhiteParams)
+Market   = ENGINE.CREATE_MARKET(MarketParams)
+Pricing  = ENGINE.CREATE_CONTEXT("PricingDate", DATE(2026,9,10), "Paths", 1000000, "TimeSteps", 120, "Seed", 42)
+Compute  = ENGINE.CREATE_EXECUTION("Backend", "AUTO", "Precision", "FP64")
+         = ENGINE.CALC(Trade, {"PV","DV01","ExpectedExposure","PFE95","UnilateralCVA"}, Model, Market, Pricing, Compute)
+```
+
+Decisión confirmada explícitamente: **sustituir por completo**, no coexistir, tanto
+`CREATE_MEASURE`+`EVALUATE` (sustituidos por `CALC`) como el backend global de `SET_BACKEND`/
+`GET_BACKEND` (sustituido por `ExecutionContext`) — en las **cinco capas** (Rust, registry
+C++, C ABI, Python, Excel), no solo en el cliente que primero se pensó (Excel).
+
+### Huecos del ejemplo original, resueltos como decisión de diseño
+
+- **`hazard_rate`/`recovery_rate`** no aparecían en ningún contexto del ejemplo original →
+  pasan a ser campos **opcionales** (por defecto `0.0`) de `MarketSnapshot`: son datos de
+  crédito observables, encajan igual que `pillars`/`zero_rates`.
+- **`monitoring_times`** tampoco aparecía → se **auto-derivan** de las propias fechas de
+  reseteo del `Trade` (`start()` + `payment_times()` salvo el último pago — la misma
+  definición que ya usaba `IrSwap::is_reset_date` en Rust). Elimina un parámetro entero de la
+  superficie pública.
+- **`TimeSteps`** (nuevo, `n_steps` de `PricingContext`) sustituye la malla semanal
+  auto-calculada que antes vivía dentro de `expected_exposure_profile` — ahora es explícita.
+  **Consecuencia ineludible**: al ya no depender de una malla auto-calculada, todos los
+  valores dorados de Monte Carlo de fases anteriores (`UnilateralCVA = 426.7618244093184`,
+  `EE≈[0, 12862.62, 13673.53]`) cambiaron, aunque se use la misma semilla — se recalcularon
+  ejecutando el código real (nunca adivinados) y se propagaron a
+  `cpp/engine/tests/test_registry.cpp`, `clients/python/tests/test_calc.py`,
+  `clients/excel/README.md` y `examples/abi/README.md`. Valor de referencia nuevo (mismo caso
+  base de §5.2, `n_paths=5000`, `n_steps=208`, `seed=7`, `hazard_rate=0.02`,
+  `recovery_rate=0.4`): `UnilateralCVA = 503.6419407799754`,
+  `EE=[0, 12862.61794, 13673.52975, 11957.81610, 7124.10624]`,
+  `PFE95=[0, 51009.92088, 53607.17082, 46152.44562, 27535.55727]`.
+- **`PricingDate`**: se guarda como metadato (double crudo, tal cual llega el serial de
+  Excel) — **no** se implementa aritmética de calendario/day-count en esta iteración, sigue
+  siendo trabajo pendiente (ver cierre de §7.14).
+- **`Backend: "AUTO"`**: se resuelve una única vez, en el constructor de `ExecutionContext`, a
+  `"gpu"` si `is_gpu_backend_available()`, si no a `"cpu"`.
+- **Descuento híbrido con la curva de `Market`** (usar `discount_factor()` para `PV`/`DV01` en
+  vez de la fórmula propia del modelo): fuera de alcance. `PV`/`DV01`/`ExpectedExposure`/
+  `PFE95`/`UnilateralCVA` siguen usando únicamente el modelo; `Market` solo alimenta
+  calibración y crédito.
+- **Compartir cómputo entre medidas del lote**: `ExpectedExposure`+`PFE95` comparten una sola
+  llamada (ya lo hacían internamente); `UnilateralCVA` sigue recalculando su propio perfil de
+  exposición si se pide junto a las anteriores (no se comparte). Optimización futura, no
+  bloqueante.
+
+### Diseño
+
+**Vocabulario de dos niveles para medidas** (preserva la extensibilidad de `Registry<IMeasure>`,
+§5.4): una tabla nueva en `cpp/engine/src/calc.cpp` traduce los nombres de cara al usuario de
+`ENGINE.CALC` a los nombres registrados:
+
+| Nombre en `CALC` | Medida registrada | Campo extraído |
+| --- | --- | --- |
+| `PV` | `PV` (nueva) | escalar |
+| `DV01` | `DV01` (nueva) | escalar |
+| `ExpectedExposure` | `ExposureProfile` (ya existía) | `primary` |
+| `PFE95` | `ExposureProfile` (ya existía) | `secondary` |
+| `UnilateralCVA` | `UnilateralCVA` (ya existía) | escalar |
+
+`engine::calc(registries, product, measure_names, model, market, pricing, execution)` agrupa
+los nombres pedidos por medida registrada subyacente (así `ExpectedExposure`+`PFE95` disparan
+una sola llamada a `ExposureProfileMeasure::evaluate`), evalúa cada grupo una vez
+(`unordered_map<string, MeasureResult>` como caché), y devuelve los resultados en el orden
+pedido. Es el único punto que conoce el mapeo — Python/Excel/C ABI la llaman, no la
+reimplementan. `engine::calc_measure_names()` expone los 5 nombres para
+`ENGINE.LIST_MEASURES`/`Engine.list_measures()`, que ya no devuelven los nombres registrados
+en crudo.
+
+**`IMeasure::evaluate` cambia de firma**: de `evaluate(const IModel&, const IProduct&, const
+Params&)` a `evaluate(const IModel&, const IProduct&, const MarketSnapshot&, const
+PricingContext&, const ExecutionContext&)`. `ExposureProfileMeasure` deriva
+`monitoring_times` del propio `product` (dynamic_cast a `IrSwapProduct`) en vez de leerlo de
+un `Params`; `UnilateralCvaMeasure` lee `hazard_rate`/`recovery_rate` de `market`. Nuevas
+`PresentValueMeasure` ("PV") y `Dv01Measure` ("DV01"): valoración determinista de
+`IrSwap::npv` en t=0 y su sensibilidad a `r0` vía AAD (mismo patrón que
+`hull_white_zero_coupon_bond_delta_r0`, `Autodiff<CpuBackend>`); dos funciones Rust nuevas en
+`crate::api` (`irs_hull_white_npv`, `irs_hull_white_npv_delta_r0`), su bridge `cxx`, y
+wrappers en `engine.hpp`/`.cpp`. `DV01 = delta_r0 * 0.0001`, calculado en C++, no en Rust.
+
+**`MarketSnapshot` (C++) gana `hazard_rate`/`recovery_rate`** — solo en
+`cpp/engine/include/engine/market.hpp`/`.cpp`; el `MarketSnapshot` de Rust no cambia
+(`UnilateralCvaMeasure` ya pasaba `hazard_rate`/`recovery_rate` como `double` sueltos a
+`unilateral_cva_from_exposure`, cero cambios Rust). Constructor con valores por defecto
+(`hazard_rate=0.0, recovery_rate=0.0`, no rompe llamadas existentes) más un nuevo
+`MarketSnapshot(const Params&)` (mismo patrón que `HullWhite1FModel(const Params&)`) para que
+`ENGINE.CREATE_MARKET` reutilice `table_to_params` en vez del formato especial de 2 columnas
+que usaba `ENGINE.CALIBRATE` (se elimina `table_to_market`). En Excel, `Market` pasa de
+"rango inline consumido una sola vez" a **handle memoizado** en `HandleRegistry`, igual que
+`Model`/`Product`.
+
+**`PricingContext` y `ExecutionContext`, nuevos, no polimórficos**: como `Market`, no son
+registries (`ENGINE.CREATE_CONTEXT`/`CREATE_EXECUTION` no llevan nombre de tipo). Nuevos
+ficheros `pricing_context.hpp/.cpp`, `execution_context.hpp/.cpp`, construidos desde `Params`,
+con validación en el constructor (falla rápido): `PricingContext` valida `n_paths`/`n_steps`
+> 0; `ExecutionContext` resuelve `"auto"` y rechaza cualquier `backend`/`precision` que no sea
+`"cpu"`/`"gpu"`/`"fp64"`. Ambos se exponen como handles memoizados en Excel y como clases
+nanobind normales (constructor directo desde un `dict`) en Python — a diferencia de Excel,
+Python no necesita un mecanismo de handle para pasar objetos reales.
+
+**`engine::Params`/`ParamValue` ganan `std::string`** (necesario, no anticipado en el diseño
+inicial): descubierto al implementar `ExecutionContext(const Params&)`, que necesita
+`backend`/`precision` como texto. `get_string(params, key)` sigue el mismo patrón que
+`get_double`. En Excel, `table_to_params` (`xloper.cpp`) gana una rama para celdas
+`xltypeStr` en el valor (antes solo `xltypeNum`/`xltypeBool`); en Python,
+`dict_to_params` gana una rama para `nb::isinstance<nb::str>`.
+
+**Backend: de estado global a parámetro explícito, sustituye la Fase 5/§7.12 por completo**:
+`rust/crates/engine-core/src/backend.rs` pierde `static CURRENT`/`current()`/`set_current()`
+(se mantienen `ComputeBackend`, `is_available()`, `parse_backend_name()`, útiles como
+validación pura). `crate::api::irs_hull_white_exposure_profile`/`unilateral_cva_from_exposure`
+ganan un parámetro `backend: &str` explícito; se elimina `set_compute_backend`/
+`compute_backend_name` de `api.rs`, `engine-ffi`, `engine.hpp`/`.cpp`, `engine_py_ext.cpp`
+(y con ello `BackendScope`/`engine.backend(...)`/`clients/python/tests/test_backend.py`/
+`clients/python/examples/backend_selection.py`, todos eliminados), y `engine_excel.cpp`
+(`ENGINE.SET_BACKEND`/`ENGINE.GET_BACKEND` y sus entradas en `kFunctions`). La C ABI pierde
+`engine_abi_set_compute_backend`/`engine_abi_get_compute_backend` (se mantiene
+`engine_abi_is_gpu_backend_available`). `ICalibrator::calibrate` **no** recibe
+`ExecutionContext`: sigue fija a `Autodiff<CpuBackend>` (límite de alcance documentado, igual
+que ya se documentó que `sigma` no se calibra en §7.14).
+
+**`ENGINE.CALC` en las cinco capas**: núcleo compartido en `cpp/engine/include/engine/calc.hpp`
++ `.cpp` (nuevo). Excel: `xlEngineCalc(trade, medidas, modelo, mercado, contexto, ejecucion)`
+— `medidas` es un rango/array de texto (`xlbridge::read_string_list`, nuevo), resultado en
+**formato largo** (`xlbridge::new_calc_result`, nuevo): columnas `[MeasureName, Time, Value]`
+— las medidas escalares dan 1 fila (`Time` en blanco), las de perfil una fila por fecha de
+monitorización; formato homogéneo, fácil de filtrar/dinamizar. Python:
+`Engine.calc(product, measure_names, model, market, pricing, execution) -> dict[str,
+MeasureResult]`. C ABI: `EnginePricingContext`/`EngineExecutionContext` como structs planos
+sin handle (se pasan por puntero-const directamente, igual que `EngineMarketSnapshot`, que se
+extiende con `hazard_rate`/`recovery_rate`); `EngineMeasure`/`engine_abi_create_measure`/
+`engine_abi_evaluate` se eliminan, sustituidos por `engine_abi_calc` +
+`EngineCalcResultEntry{char* measure_name; EngineMeasureResult result;}`.
+**`engine_abi_version()` sube de 1 a 2** (cambia el layout de `EngineMarketSnapshot`, se
+elimina `EngineMeasure`/`engine_abi_evaluate`/`engine_abi_set_compute_backend`/
+`engine_abi_get_compute_backend`).
+
+### Verificación
+
+Igual que el resto de fases: `cargo test --workspace` (37 tests `engine-core` + 4 tests AAD +
+0 `engine-ffi`, todos en verde) tras cada cambio Rust; `cmake --build build` completo (todos
+los targets, incluidos los 5 ejemplos de `examples/abi/`) + `ctest --test-dir build` (59
+tests, 5 suites C++: `Registry`, `Calc`, `Abi`, `Market`, `Calibrator`, más `XlStringBuffer`/
+`TableToParams`/`ReadStringList`/`HandleRegistry`/`NewCalibrationResult`/`NewMeasureResult`/
+`NewCalcResult` de Excel y `EngineExcelHarness`) tras cada cambio C++/ABI/Excel; cada script de
+`clients/python/tests/` (`test_registry.py`, `test_calc.py` nuevo, `test_calibration.py`,
+`test_smoke.py`) y `examples/abi/python/` ejecutado directamente; cada ejemplo de
+`examples/abi/{c,cpp,rust}` compilado y ejecutado — los 5 ejemplos ABI (C, C++, Rust, Python
+ctypes, Python cffi) reproducen exactamente el mismo caso de referencia
+(`UnilateralCVA=503.64194077997536`, mismo `EE`/`PFE95`) sin volver a fijarlo como valor
+dorado exacto (invariantes cualitativos, PV~0/DV01>0/PFE95>=EE>=0/CVA>0), reservando el
+valor exacto para `cpp/engine/tests/test_registry.cpp` y `clients/python/tests/test_calc.py`.
+El caso de referencia (mismo IRS 5y + Hull-White de siempre, `n_paths=5000, n_steps=208,
+seed=7, hazard_rate=0.02, recovery_rate=0.4`) da el mismo resultado en las cinco capas antes
+de dar la fase por cerrada.
+
 ---
 *Próxima iteración: confirmar en la práctica (no se pudo ejecutar GitHub Actions desde este
 entorno de desarrollo) que el job `build-installer` de `.github/workflows/release.yml` (§7.10)
@@ -1264,19 +1451,24 @@ compila y publica `engine_quant_setup.exe` en una release real, con la misma cau
 Redist con nombre distinto en un toolset de CI más nuevo) que no había aparecido en ninguna
 verificación local. En cuanto exista verificación manual de Fase 4 con Excel real
 (`clients/excel/README.md`), completar la capa 4 de test de §5.6 marcándola como verificada de
-punta a punta, no solo parcial — aprovechar esa sesión para probar también `ENGINE.SET_BACKEND`/
-`ENGINE.GET_BACKEND` (§7.12) y `ENGINE.CALIBRATE` (§7.14) con Excel real, incluida la
-advertencia de recálculo manual. Con Fase 6 (§7.13) cerrada en su mecanismo pero no en su
-distribución: `engine/abi.h`/`engine_abi` no se publican todavía en ninguna release (§7.9 solo
-empaqueta la wheel y el `.xll`) — decidir si hace falta un artefacto propio (zip con `abi.h` +
-`engine_abi.dll` + `.lib` de import) antes de considerar la interoperabilidad externa "usable"
-por alguien fuera de este repo, no solo "implementada y testeada" dentro de él. Sobre la Fase 7
-(§7.14): sigue pendiente todo lo que quedó fuera de alcance al cerrarla — bootstrapping de
-`MarketSnapshot` desde instrumentos de mercado crudos (depósitos, futuros, swaps) en vez de
-zero rates ya construidos; calibrar `sigma` contra instrumentos de volatilidad (swaptions,
-caps) en vez de dejarlo fijo; generalizar `engine_abi_calibrate_hull_white` a un
-`engine_abi_calibrate` genérico en cuanto exista un segundo `ICalibrator`; y, más en general,
-el resto de la lista de "qué faltaría para valorar un swap de verdad" (day count/calendarios/
+punta a punta, no solo parcial — aprovechar esa sesión para probar también `ENGINE.CALC` (nueva
+API de §7.15, incluida la resolución de `"AUTO"` en `ExecutionContext`) y `ENGINE.CALIBRATE`
+(§7.14, ahora con mercado como handle) con Excel real. Con Fase 6 (§7.13) cerrada en su
+mecanismo pero no en su distribución: `engine/abi.h`/`engine_abi` no se publican todavía en
+ninguna release (§7.9 solo empaqueta la wheel y el `.xll`) — decidir si hace falta un artefacto
+propio (zip con `abi.h` + `engine_abi.dll` + `.lib` de import) antes de considerar la
+interoperabilidad externa "usable" por alguien fuera de este repo, no solo "implementada y
+testeada" dentro de él. Sobre la Fase 7 (§7.14): sigue pendiente todo lo que quedó fuera de
+alcance al cerrarla — bootstrapping de `MarketSnapshot` desde instrumentos de mercado crudos
+(depósitos, futuros, swaps) en vez de zero rates ya construidos; calibrar `sigma` contra
+instrumentos de volatilidad (swaptions, caps) en vez de dejarlo fijo; generalizar
+`engine_abi_calibrate_hull_white` a un `engine_abi_calibrate` genérico en cuanto exista un
+segundo `ICalibrator`. Sobre la Fase 7.15: sigue pendiente la calibración vía `ENGINE.CALC`
+(hoy `ENGINE.CALIBRATE` es una llamada aparte, no una medida más del lote), la aritmética de
+calendario real para `PricingDate`, el descuento híbrido con la curva de `Market` para
+`PV`/`DV01`, y compartir el perfil de exposición entre `UnilateralCVA` y
+`ExpectedExposure`/`PFE95` dentro de un mismo lote de `ENGINE.CALC`. Y, más en general, el
+resto de la lista de "qué faltaría para valorar un swap de verdad" (day count/calendarios/
 generación de calendario de pagos, multi-curva descuento vs. proyección, valoración a media
 vida de un swap que ya fijó su cupón actual). CUDA (`burn-cuda`, §5.1) sigue abierto como
 backend adicional si algún día hiciera falta más rendimiento que `wgpu`.*

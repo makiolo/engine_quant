@@ -31,6 +31,9 @@ std::string format_canonical_value(const engine::ParamValue& value) {
     if (const bool* b = std::get_if<bool>(&value)) {
         return *b ? "true" : "false";
     }
+    if (const std::string* s = std::get_if<std::string>(&value)) {
+        return "\"" + *s + "\"";
+    }
     const auto& vec = std::get<std::vector<double>>(value);
     std::ostringstream oss;
     oss << '[';
@@ -114,6 +117,19 @@ std::string read_string(const XLOPER12& x) {
     return from_xl_string(x.val.str + 1, static_cast<std::size_t>(len));
 }
 
+std::vector<std::string> read_string_list(const XLOPER12& x) {
+    std::vector<std::string> out;
+    Table tbl = as_table(x);
+    for (RW r = 0; r < tbl.rows; ++r) {
+        for (COL c = 0; c < tbl.cols; ++c) {
+            const XLOPER12& cell = tbl.cell(r, c);
+            if (is_blank(cell)) continue;
+            out.push_back(read_string(cell));
+        }
+    }
+    return out;
+}
+
 Table as_table(const XLOPER12& x) {
     Table tbl;
     if (base_type(x) == xltypeMulti) {
@@ -146,6 +162,8 @@ ParsedParams table_to_params(const XLOPER12& params_arg) {
         std::vector<double> nums;
         bool have_bool = false;
         bool bool_value = false;
+        bool have_string = false;
+        std::string string_value;
         int non_blank = 0;
 
         for (COL c = 1; c < tbl.cols; ++c) {
@@ -158,6 +176,9 @@ ParsedParams table_to_params(const XLOPER12& params_arg) {
                 bool_value = read_bool(v);
             } else if (vt == xltypeNum) {
                 nums.push_back(v.val.num);
+            } else if (vt == xltypeStr) {
+                have_string = true;
+                string_value = read_string(v);
             } else {
                 throw std::invalid_argument("xlbridge: valor no soportado para la clave '" + key + "'");
             }
@@ -168,9 +189,13 @@ ParsedParams table_to_params(const XLOPER12& params_arg) {
         }
 
         engine::ParamValue value;
-        if (have_bool && nums.empty() && non_blank == 1) {
+        if (have_string && nums.empty() && !have_bool && non_blank == 1) {
+            // ExecutionContext (PLAN.md §7.15: "backend"/"precision") es el único consumidor
+            // de valores de texto en un rango de parámetros hoy.
+            value = string_value;
+        } else if (have_bool && nums.empty() && !have_string && non_blank == 1) {
             value = bool_value;
-        } else if (!nums.empty() && !have_bool) {
+        } else if (!nums.empty() && !have_bool && !have_string) {
             value = (nums.size() == 1) ? engine::ParamValue(nums[0]) : engine::ParamValue(nums);
         } else {
             throw std::invalid_argument("xlbridge: valores mixtos para la clave '" + key + "'");
@@ -188,23 +213,6 @@ ParsedParams table_to_params(const XLOPER12& params_arg) {
     }
     out.canonical = oss.str();
     return out;
-}
-
-engine::MarketSnapshot table_to_market(const XLOPER12& market_arg) {
-    Table tbl = as_table(market_arg);
-    if (tbl.cols < 2) {
-        throw std::invalid_argument("xlbridge: el rango de mercado necesita 2 columnas (pillars, zero_rates)");
-    }
-
-    std::vector<double> pillars;
-    std::vector<double> zero_rates;
-    for (RW r = 0; r < tbl.rows; ++r) {
-        const XLOPER12& pillar_cell = tbl.cell(r, 0);
-        if (is_blank(pillar_cell)) continue; // fila vacia: se ignora, igual que table_to_params
-        pillars.push_back(read_double(pillar_cell));
-        zero_rates.push_back(read_double(tbl.cell(r, 1)));
-    }
-    return engine::MarketSnapshot(std::move(pillars), std::move(zero_rates));
 }
 
 XLOPER12* new_error(int xlerr_code) {
@@ -274,6 +282,53 @@ XLOPER12* new_measure_result(const engine::MeasureResult& result) {
     XLOPER12* out = new XLOPER12{};
     out->xltype = xltypeMulti | xlbitDLLFree;
     out->val.array.rows = n;
+    out->val.array.columns = 3;
+    out->val.array.lparray = cells;
+    return out;
+}
+
+XLOPER12* new_calc_result(const engine::CalcResult& result) {
+    RW total_rows = 0;
+    for (const auto& entry : result) {
+        total_rows += entry.result.has_scalar ? 1 : static_cast<RW>(entry.result.times.size());
+    }
+    if (total_rows == 0) return new_error(xlerrNA);
+
+    XLOPER12* cells = new XLOPER12[static_cast<std::size_t>(total_rows) * 3]{};
+    RW row = 0;
+    for (const auto& entry : result) {
+        auto write_name = [&](RW r) {
+            std::vector<XCHAR> buf = to_xl_string_buffer(entry.measure_name);
+            XCHAR* owned = new XCHAR[buf.size()];
+            std::copy(buf.begin(), buf.end(), owned);
+            cells[r * 3 + 0].xltype = xltypeStr;
+            cells[r * 3 + 0].val.str = owned;
+        };
+
+        if (entry.result.has_scalar) {
+            write_name(row);
+            cells[row * 3 + 1].xltype = xltypeNil; // Time en blanco: medida escalar
+            cells[row * 3 + 2].xltype = xltypeNum;
+            cells[row * 3 + 2].val.num = entry.result.scalar;
+            ++row;
+        } else {
+            // ExpectedExposure/PFE95 (PLAN.md §7.15): calc.cpp ya copia la serie pedida
+            // (primary o secondary del origen) al campo `primary` de este resultado, así que
+            // basta con leer siempre `primary` aquí sin saber cuál era el campo de origen.
+            for (std::size_t i = 0; i < entry.result.times.size(); ++i) {
+                write_name(row);
+                cells[row * 3 + 1].xltype = xltypeNum;
+                cells[row * 3 + 1].val.num = entry.result.times[i];
+                cells[row * 3 + 2].xltype = xltypeNum;
+                cells[row * 3 + 2].val.num = entry.result.primary[i];
+                ++row;
+            }
+        }
+    }
+
+    XLOPER12* out = new XLOPER12{};
+    out->xltype = xltypeMulti | xlbitDLLFree;
+    out->val.array.rows = total_rows;
     out->val.array.columns = 3;
     out->val.array.lparray = cells;
     return out;

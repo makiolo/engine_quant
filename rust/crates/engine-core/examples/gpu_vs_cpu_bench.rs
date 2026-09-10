@@ -47,9 +47,10 @@ fn bench_one<B: burn::tensor::backend::Backend<FloatElem = f64>>(
         accruals,
     };
     let monitoring_times = vec![0.0, 1.0, 2.0, 3.0, 4.0];
+    let n_steps = 260; // ~1 paso/semana sobre 5 años, mismo orden que la malla que usaba Fase 5
 
     let start = Instant::now();
-    let profile = expected_exposure_profile(&model, &swap, r0, &monitoring_times, n_paths, 42, device);
+    let profile = expected_exposure_profile(&model, &swap, r0, &monitoring_times, n_steps, n_paths, 42, device);
     std::hint::black_box(&profile);
     start.elapsed()
 }

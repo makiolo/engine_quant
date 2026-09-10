@@ -31,6 +31,10 @@
 
 #include "XLCALL.H"
 #include "engine/bootstrap.hpp"
+#include "engine/calc.hpp"
+#include "engine/execution_context.hpp"
+#include "engine/market.hpp"
+#include "engine/pricing_context.hpp"
 
 namespace xlbridge {
 
@@ -40,28 +44,42 @@ public:
 
     std::vector<std::string> list_models() const;
     std::vector<std::string> list_products() const;
+    // Nombres de ENGINE.CALC (PLAN.md §7.15: "PV"/"DV01"/"ExpectedExposure"/"PFE95"/
+    // "UnilateralCVA"), no los nombres registrados en Registry<IMeasure> -- ver
+    // engine::calc_measure_names().
     std::vector<std::string> list_measures() const;
     std::vector<std::string> list_calibrators() const;
 
     std::string create_model(const std::string& name, const XLOPER12& params_arg);
     std::string create_product(const std::string& name, const XLOPER12& params_arg);
-    std::string create_measure(const std::string& name);
+    // Market/PricingContext/ExecutionContext (PLAN.md §7.15) no llevan nombre de tipo -- una
+    // sola forma concreta cada uno, a diferencia de create_model/create_product -- así que se
+    // memoizan solo por sus parámetros (mismo patrón de clave canónica que table_to_params ya
+    // usaba para model/product).
+    std::string create_market(const XLOPER12& params_arg);
+    std::string create_context(const XLOPER12& params_arg);
+    std::string create_execution(const XLOPER12& params_arg);
     // Sin parámetros que memoizar (a diferencia de create_model/create_product): un
     // ICalibrator no tiene estado propio, ver engine::HullWhite1FCalibrator -- el handle se
     // memoiza solo por `name`.
     std::string create_calibrator(const std::string& name);
 
-    engine::MeasureResult evaluate(
-        const std::string& measure_handle,
-        const std::string& model_handle,
+    // Sustituye por completo create_measure/evaluate (PLAN.md §7.15): calcula un lote de
+    // medidas nombradas de una vez sobre el mismo product/model/market/pricing/execution.
+    engine::CalcResult calc(
         const std::string& product_handle,
-        const XLOPER12& params_arg
+        const std::vector<std::string>& measure_names,
+        const std::string& model_handle,
+        const std::string& market_handle,
+        const std::string& pricing_handle,
+        const std::string& execution_handle
     ) const;
 
-    // market_arg: rango de 2 columnas (pillars, zero_rates), ver xlbridge::table_to_market.
+    // market_handle: handle devuelto por create_market (ya no un rango inline -- un
+    // MarketSnapshot no polimórfico se memoiza igual que Model/Product, PLAN.md §7.15).
     // initial_guess_arg: mismo formato clave/valor que params_arg en el resto de create_*.
     engine::CalibrationResult calibrate(
-        const std::string& calibrator_handle, const XLOPER12& market_arg, const XLOPER12& initial_guess_arg
+        const std::string& calibrator_handle, const std::string& market_handle, const XLOPER12& initial_guess_arg
     ) const;
 
     // Libera todas las instancias memoizadas (xlAutoClose, engine_excel.cpp).
@@ -71,7 +89,9 @@ private:
     engine::Registries registries_;
     std::unordered_map<std::string, std::unique_ptr<engine::IModel>> models_;
     std::unordered_map<std::string, std::unique_ptr<engine::IProduct>> products_;
-    std::unordered_map<std::string, std::unique_ptr<engine::IMeasure>> measures_;
+    std::unordered_map<std::string, engine::MarketSnapshot> markets_;
+    std::unordered_map<std::string, engine::PricingContext> pricing_contexts_;
+    std::unordered_map<std::string, engine::ExecutionContext> execution_contexts_;
     std::unordered_map<std::string, std::unique_ptr<engine::ICalibrator>> calibrators_;
 };
 

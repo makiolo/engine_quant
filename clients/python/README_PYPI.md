@@ -18,15 +18,12 @@ product = eng.create_product("IRSwap", {
     "payment_times": [1.0, 2.0, 3.0, 4.0, 5.0],
     "accruals": [1.0, 1.0, 1.0, 1.0, 1.0],
 })
-measure = eng.create_measure("UnilateralCVA")
-result = measure.evaluate(model, product, {
-    "monitoring_times": [0.0, 1.0, 2.0, 3.0],
-    "n_paths": 5000.0,
-    "seed": 13.0,
-    "hazard_rate": 0.02,
-    "recovery_rate": 0.4,
-})
-print(result.scalar)  # CVA unilateral
+market = engine.MarketSnapshot(pillars=[1.0, 2.0], zero_rates=[0.02, 0.02], hazard_rate=0.02, recovery_rate=0.4)
+pricing = engine.PricingContext({"pricing_date": 0.0, "n_paths": 5000.0, "n_steps": 208.0, "seed": 7.0})
+execution = engine.ExecutionContext({"backend": "auto", "precision": "FP64"})
+
+result = eng.calc(product, ["PV", "DV01", "ExpectedExposure", "PFE95", "UnilateralCVA"], model, market, pricing, execution)
+print(result["UnilateralCVA"].scalar)  # CVA unilateral
 ```
 
 El paquete se llama `engine-quant` pero el módulo importable es `engine` (extensión nativa

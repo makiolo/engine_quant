@@ -5,6 +5,9 @@ add_library(engine STATIC
     src/product.cpp
     src/measure.cpp
     src/market.cpp
+    src/pricing_context.cpp
+    src/execution_context.cpp
+    src/calc.cpp
     src/calibrator.cpp
     src/bootstrap.cpp
 )

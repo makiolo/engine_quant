@@ -1,13 +1,12 @@
-// Tests de la API universal en C ABI (PLAN.md Fase 6, §5.5, engine/abi.h). A diferencia de
+// Tests de la API universal en C ABI (PLAN.md §7.15, engine/abi.h). A diferencia de
 // test_registry.cpp (que enlaza directamente contra los tipos C++ del registry), este fichero
 // solo usa la superficie extern "C" de abi.h -- las mismas funciones que vería un consumidor
 // en Julia/.NET/Go -- para confirmar que la traducción a structs planos/punteros+longitud
 // funciona de punta a punta, sin reimplementar la validación numérica fina que ya cubre Rust
-// (PLAN.md §5.6 capa 2). Los valores de referencia de UnilateralCVA/ExposureProfile son los
-// mismos "caso dorado" que documenta clients/excel/README.md (verificación manual de Excel
-// real) y que test_registry.py fija con tolerancia laxa -- aquí, al ser el mismo cálculo por
-// debajo, se comprueban con tolerancia estrecha (PLAN.md §5.6 capa 4: equivalencia entre
-// TODOS los clientes, C ABI incluida desde esta fase).
+// (PLAN.md §5.6 capa 2). El valor de referencia exacto de UnilateralCVA vive en
+// test_registry.cpp (mismo caso, comprobado allí bit a bit) -- aquí basta con invariantes
+// (no negatividad, PFE95>=EE, etc.), ya que esta suite verifica el mecanismo de la ABI, no
+// vuelve a fijar el número.
 
 #include <cmath>
 #include <cstring>
@@ -55,13 +54,17 @@ struct ProductHandle {
     EngineProduct* ptr;
     ~ProductHandle() { engine_abi_free_product(ptr); }
 };
-struct MeasureHandle {
-    EngineMeasure* ptr;
-    ~MeasureHandle() { engine_abi_free_measure(ptr); }
-};
-struct ResultHandle {
-    EngineMeasureResult value{};
-    ~ResultHandle() { engine_abi_free_measure_result(&value); }
+struct CalcResultsHandle {
+    EngineCalcResultEntry* entries = nullptr;
+    std::size_t count = 0;
+    ~CalcResultsHandle() { engine_abi_free_calc_results(entries, count); }
+
+    const EngineCalcResultEntry* find(const char* name) const {
+        for (std::size_t i = 0; i < count; ++i) {
+            if (std::strcmp(entries[i].measure_name, name) == 0) return &entries[i];
+        }
+        return nullptr;
+    }
 };
 
 ModelHandle create_hull_white() {
@@ -92,8 +95,10 @@ struct ParIrs5y {
 
 } // namespace
 
-TEST(Abi, VersionIsPositive) {
-    EXPECT_GT(engine_abi_version(), 0);
+TEST(Abi, VersionIsAtLeastTwo) {
+    // Version 2 (PLAN.md §7.15): engine_abi_calc sustituye a engine_abi_create_measure/
+    // engine_abi_evaluate, EngineMarketSnapshot gana hazard_rate/recovery_rate.
+    EXPECT_GE(engine_abi_version(), 2);
 }
 
 TEST(Abi, ListModelsIncludesHullWhite1F) {
@@ -109,89 +114,129 @@ TEST(Abi, ListModelsIncludesHullWhite1F) {
     engine_abi_free_string_list(names, count);
 }
 
+TEST(Abi, ListMeasuresIncludesTheFiveCalcNames) {
+    const char** names = nullptr;
+    std::size_t count = engine_abi_list_measures(&names);
+    ASSERT_GT(count, 0u);
+
+    auto contains = [&](const char* target) {
+        for (std::size_t i = 0; i < count; ++i) {
+            if (std::strcmp(names[i], target) == 0) return true;
+        }
+        return false;
+    };
+    EXPECT_TRUE(contains("PV"));
+    EXPECT_TRUE(contains("DV01"));
+    EXPECT_TRUE(contains("ExpectedExposure"));
+    EXPECT_TRUE(contains("PFE95"));
+    EXPECT_TRUE(contains("UnilateralCVA"));
+    engine_abi_free_string_list(names, count);
+}
+
 TEST(Abi, CreateUnknownModelReturnsNullAndSetsLastError) {
     EngineModel* model = engine_abi_create_model("NoExiste", nullptr, 0);
     EXPECT_EQ(model, nullptr);
     EXPECT_FALSE(last_error().empty());
 }
 
-TEST(Abi, EvaluateRejectsNullHandles) {
-    EngineMeasureResult result{};
-    int rc = engine_abi_evaluate(nullptr, nullptr, nullptr, nullptr, 0, &result);
+TEST(Abi, CalcRejectsNullHandles) {
+    const char* names[] = {"PV"};
+    EngineCalcResultEntry* entries = nullptr;
+    std::size_t count = 0;
+    int rc = engine_abi_calc(nullptr, names, 1, nullptr, nullptr, nullptr, nullptr, &entries, &count);
     EXPECT_NE(rc, 0);
-    EXPECT_EQ(result.len, 0u);
+    EXPECT_EQ(entries, nullptr);
+    EXPECT_EQ(count, 0u);
     EXPECT_FALSE(last_error().empty());
 }
 
-TEST(Abi, ExposureProfileMatchesGoldenCaseFromOtherClients) {
+TEST(Abi, CalcRejectsUnknownMeasureName) {
     ModelHandle model = create_hull_white();
     ParIrs5y irs;
     ProductHandle product = irs.create();
-    MeasureHandle measure{engine_abi_create_measure("ExposureProfile")};
-    ASSERT_NE(model.ptr, nullptr);
-    ASSERT_NE(product.ptr, nullptr);
-    ASSERT_NE(measure.ptr, nullptr);
 
-    std::vector<double> monitoring_times{0.0, 1.0, 2.0};
-    EngineParam params[] = {
-        vector_param("monitoring_times", monitoring_times),
-        scalar_param("n_paths", 5000.0),
-        scalar_param("seed", 7.0),
-    };
+    double pillar = 1.0, rate = 0.02;
+    EngineMarketSnapshot market{};
+    market.pillars = &pillar;
+    market.zero_rates = &rate;
+    market.count = 1;
 
-    ResultHandle result;
-    int rc = engine_abi_evaluate(measure.ptr, model.ptr, product.ptr, params, 3, &result.value);
-    ASSERT_EQ(rc, 0) << last_error();
+    EnginePricingContext pricing{};
+    pricing.n_paths = 1000;
+    pricing.n_steps = 52;
+    pricing.seed = 1;
 
-    ASSERT_EQ(result.value.len, 3u);
-    // Mismo caso/semilla que clients/excel/README.md ("Verificación manual", ExposureProfile):
-    // EE≈[0, 12862.62, 13673.53], PFE95≈[0, 51009.92, 53607.17].
-    EXPECT_NEAR(result.value.primary[0], 0.0, 1e-6);
-    EXPECT_NEAR(result.value.primary[1], 12862.62, 1.0);
-    EXPECT_NEAR(result.value.primary[2], 13673.53, 1.0);
-    EXPECT_NEAR(result.value.secondary[0], 0.0, 1e-6);
-    EXPECT_NEAR(result.value.secondary[1], 51009.92, 1.0);
-    EXPECT_NEAR(result.value.secondary[2], 53607.17, 1.0);
-    EXPECT_EQ(result.value.has_scalar, 0);
+    EngineExecutionContext execution{};
+    execution.backend = "cpu";
+    execution.precision = "FP64";
+
+    const char* names[] = {"NoExiste"};
+    EngineCalcResultEntry* entries = nullptr;
+    std::size_t count = 0;
+    int rc = engine_abi_calc(
+        product.ptr, names, 1, model.ptr, &market, &pricing, &execution, &entries, &count);
+    EXPECT_NE(rc, 0);
+    EXPECT_EQ(entries, nullptr);
+    EXPECT_FALSE(last_error().empty());
 }
 
-TEST(Abi, UnilateralCvaMatchesGoldenCaseFromOtherClients) {
+TEST(Abi, CalcComputesAllFiveMeasuresInOneBatch) {
     ModelHandle model = create_hull_white();
     ParIrs5y irs;
     ProductHandle product = irs.create();
-    MeasureHandle measure{engine_abi_create_measure("UnilateralCVA")};
-    ASSERT_NE(model.ptr, nullptr);
-    ASSERT_NE(product.ptr, nullptr);
-    ASSERT_NE(measure.ptr, nullptr);
 
-    std::vector<double> monitoring_times{0.0, 1.0, 2.0, 3.0};
-    EngineParam params[] = {
-        vector_param("monitoring_times", monitoring_times),
-        scalar_param("n_paths", 5000.0),
-        scalar_param("seed", 13.0),
-        scalar_param("hazard_rate", 0.02),
-        scalar_param("recovery_rate", 0.4),
-    };
+    double pillar = 1.0, rate = 0.02;
+    EngineMarketSnapshot market{};
+    market.pillars = &pillar;
+    market.zero_rates = &rate;
+    market.count = 1;
+    market.hazard_rate = 0.02;
+    market.recovery_rate = 0.4;
 
-    ResultHandle result;
-    int rc = engine_abi_evaluate(measure.ptr, model.ptr, product.ptr, params, 5, &result.value);
+    EnginePricingContext pricing{};
+    pricing.pricing_date = 0.0;
+    pricing.n_paths = 5000;
+    pricing.n_steps = 208; // ~1 paso/semana sobre los 4 años hasta la última fecha de reseteo
+    pricing.seed = 7;
+
+    EngineExecutionContext execution{};
+    execution.backend = "cpu";
+    execution.precision = "FP64";
+
+    const char* names[] = {"PV", "DV01", "ExpectedExposure", "PFE95", "UnilateralCVA"};
+    CalcResultsHandle results;
+    int rc = engine_abi_calc(
+        product.ptr, names, 5, model.ptr, &market, &pricing, &execution, &results.entries, &results.count);
     ASSERT_EQ(rc, 0) << last_error();
+    ASSERT_EQ(results.count, 5u);
 
-    // Mismo caso/semilla que clients/excel/README.md: CVA = 426.7618244093184.
-    EXPECT_TRUE(result.value.has_scalar);
-    EXPECT_NEAR(result.value.scalar, 426.7618244093184, 1e-6);
-}
+    const EngineCalcResultEntry* pv = results.find("PV");
+    ASSERT_NE(pv, nullptr);
+    EXPECT_TRUE(pv->result.has_scalar);
+    EXPECT_NEAR(pv->result.scalar, 0.0, 1e-6); // swap a la par: NPV ~ 0 en start
 
-TEST(Abi, ComputeBackendDefaultsToCpuAndRejectsUnknownName) {
-    char buffer[16] = {};
-    std::size_t len = engine_abi_get_compute_backend(buffer, sizeof(buffer));
-    EXPECT_EQ(std::string(buffer, len), "cpu");
+    const EngineCalcResultEntry* dv01 = results.find("DV01");
+    ASSERT_NE(dv01, nullptr);
+    EXPECT_TRUE(dv01->result.has_scalar);
+    EXPECT_GT(dv01->result.scalar, 0.0); // swap pagador: sube de valor cuando suben los tipos
 
-    EXPECT_EQ(engine_abi_set_compute_backend("tpu"), 0);
-    len = engine_abi_get_compute_backend(buffer, sizeof(buffer));
-    EXPECT_EQ(std::string(buffer, len), "cpu"); // sin cambios tras el nombre invalido
+    // ExpectedExposure/PFE95 comparten una sola simulación (PLAN.md §7.15): 5 fechas de
+    // reseteo auto-derivadas del swap (0,1,2,3,4), no una lista pedida a mano.
+    const EngineCalcResultEntry* ee = results.find("ExpectedExposure");
+    ASSERT_NE(ee, nullptr);
+    ASSERT_EQ(ee->result.len, 5u);
+    const EngineCalcResultEntry* pfe = results.find("PFE95");
+    ASSERT_NE(pfe, nullptr);
+    ASSERT_EQ(pfe->result.len, 5u);
+    for (std::size_t i = 0; i < ee->result.len; ++i) {
+        EXPECT_GE(ee->result.primary[i], 0.0);
+        EXPECT_GE(pfe->result.primary[i], ee->result.primary[i]);
+    }
 
-    EXPECT_EQ(engine_abi_set_compute_backend("cpu"), 1); // no-op valido, ver PLAN.md §7.12
+    const EngineCalcResultEntry* cva = results.find("UnilateralCVA");
+    ASSERT_NE(cva, nullptr);
+    EXPECT_TRUE(cva->result.has_scalar);
+    EXPECT_GT(cva->result.scalar, 0.0);
 }
 
 TEST(Abi, IsGpuBackendAvailableIsBoolLike) {
@@ -210,7 +255,10 @@ TEST(Abi, CalibrateHullWhiteRecoversKnownParametersFromASyntheticMarket) {
         double price = engine::hull_white_zero_coupon_bond(true_a, true_b, sigma, r0, 0.0, pillars[i]);
         zero_rates[i] = -std::log(price) / pillars[i];
     }
-    EngineMarketSnapshot market{pillars, zero_rates, 10};
+    EngineMarketSnapshot market{};
+    market.pillars = pillars;
+    market.zero_rates = zero_rates;
+    market.count = 10;
 
     EngineHullWhiteCalibration result{};
     int rc = engine_abi_calibrate_hull_white(&market, 0.3, 0.01, sigma, r0, &result);

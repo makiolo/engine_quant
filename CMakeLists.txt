@@ -19,7 +19,8 @@ option(ENGINE_QUANT_BUILD_EXCEL "Compilar el cliente Excel (XLL)" ON)
 # PLAN.md §5.1/§7.11: GpuBackend (burn-wgpu) no se compila por defecto (árbol de dependencias
 # y tiempo de compilación considerables, sin GPU garantizada en CI). Activar esta opción
 # compila engine-ffi con la feature `gpu` de engine-core, dejando GpuBackend realmente
-# disponible tras engine::set_compute_backend("gpu") en C++/Python/Excel (PLAN.md §7.12).
+# disponible al pasar backend="gpu"/"auto" a un ExecutionContext en C++/Python/Excel
+# (PLAN.md §7.15, sustituye el estado global de §7.12).
 option(ENGINE_QUANT_ENABLE_GPU "Compila el backend GPU (burn-wgpu) en el core Rust" OFF)
 
 # Corrosion: importa el workspace de Cargo (rust/) como targets CMake nativos (PLAN.md §5, §7.3).

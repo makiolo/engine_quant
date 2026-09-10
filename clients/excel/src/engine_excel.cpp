@@ -17,8 +17,6 @@
 #include "xloper.hpp"
 #include "handles.hpp"
 
-#include "engine/engine.hpp"
-
 #include <vector>
 
 namespace {
@@ -55,9 +53,9 @@ struct FnSpec {
 
 } // namespace
 
-// --- UDFs (PLAN.md §7.8: mismo modelo mental que engine.Engine en Python -- list_models/
-// list_products/list_measures/create_model/create_product/create_measure/Measure.evaluate,
-// PLAN.md §7.7 -- via los mismos Registries/Registry<T>::create/IMeasure::evaluate).
+// --- UDFs (PLAN.md §7.8/§7.15: mismo modelo mental que engine.Engine en Python -- list_models/
+// list_products/list_measures/create_model/create_product/create_market/create_context/
+// create_execution/Engine.calc -- via los mismos Registries/Registry<T>::create/engine::calc).
 // xlbridge::guarded (xloper.hpp) centraliza el try/catch -> #VALUE!: ninguna excepcion de
 // C++ puede cruzar la frontera con Excel.
 
@@ -91,57 +89,48 @@ extern "C" __declspec(dllexport) LPXLOPER12 WINAPI xlEngineCreateProduct(LPXLOPE
     });
 }
 
-extern "C" __declspec(dllexport) LPXLOPER12 WINAPI xlEngineCreateMeasure(LPXLOPER12 name) {
+// Market/PricingContext/ExecutionContext (PLAN.md §7.15): igual patrón de handle memoizado
+// que create_model/create_product, pero sin nombre de tipo (una sola forma concreta cada
+// uno) -- ver xlbridge::HandleRegistry::create_market/create_context/create_execution.
+
+extern "C" __declspec(dllexport) LPXLOPER12 WINAPI xlEngineCreateMarket(LPXLOPER12 params) {
     return xlbridge::guarded([&] {
-        return xlbridge::new_str(xlbridge::shared().create_measure(xlbridge::read_string(*name)));
+        return xlbridge::new_str(xlbridge::shared().create_market(*params));
     });
 }
 
-extern "C" __declspec(dllexport) LPXLOPER12 WINAPI xlEngineEvaluate(
-    LPXLOPER12 measure, LPXLOPER12 model, LPXLOPER12 product, LPXLOPER12 params
+extern "C" __declspec(dllexport) LPXLOPER12 WINAPI xlEngineCreateContext(LPXLOPER12 params) {
+    return xlbridge::guarded([&] {
+        return xlbridge::new_str(xlbridge::shared().create_context(*params));
+    });
+}
+
+extern "C" __declspec(dllexport) LPXLOPER12 WINAPI xlEngineCreateExecution(LPXLOPER12 params) {
+    return xlbridge::guarded([&] {
+        return xlbridge::new_str(xlbridge::shared().create_execution(*params));
+    });
+}
+
+// Sustituye por completo ENGINE.CREATE_MEASURE + ENGINE.EVALUATE (PLAN.md §7.15): calcula un
+// lote de medidas nombradas de una vez. measure_names es un rango/array de celdas de texto
+// (xlbridge::read_string_list); el resultado es una tabla en formato largo [MeasureName,
+// Time, Value] (xlbridge::new_calc_result).
+extern "C" __declspec(dllexport) LPXLOPER12 WINAPI xlEngineCalc(
+    LPXLOPER12 trade, LPXLOPER12 measure_names, LPXLOPER12 model, LPXLOPER12 market,
+    LPXLOPER12 pricing, LPXLOPER12 execution
 ) {
     return xlbridge::guarded([&] {
-        return xlbridge::new_measure_result(xlbridge::shared().evaluate(
-            xlbridge::read_string(*measure), xlbridge::read_string(*model),
-            xlbridge::read_string(*product), *params));
+        return xlbridge::new_calc_result(xlbridge::shared().calc(
+            xlbridge::read_string(*trade), xlbridge::read_string_list(*measure_names),
+            xlbridge::read_string(*model), xlbridge::read_string(*market),
+            xlbridge::read_string(*pricing), xlbridge::read_string(*execution)));
     });
 }
 
-// Selección de backend de cómputo (PLAN.md §7.12): a diferencia de Python (un `with` acota
-// el cambio a un bloque), una hoja de Excel no tiene un equivalente de "bloque" -- por eso
-// aquí es, como anticipaba el propio PLAN.md, una UDF que cambia un estado global de proceso
-// que leen las llamadas siguientes a ENGINE.EVALUATE, no un argumento más de esa función.
-//
-// Importante para quien la use: ENGINE.EVALUATE no *depende* de la celda donde está
-// ENGINE.SET_BACKEND (Excel solo recalcula una fórmula cuando cambia algo de lo que depende
-// explícitamente), así que cambiar de backend y volver a pulsar Intro en la celda de
-// SET_BACKEND no recalcula por sí solo las celdas EVALUATE ya existentes -- hace falta un
-// recálculo manual (Ctrl+Alt+Intro) después de cambiar de backend para que reflejen el nuevo
-// backend. Alternativa para quien quiera recálculo automático: hacer que ENGINE.SET_BACKEND
-// devuelva el nombre del backend y meter esa celda como argumento extra (sin usarlo) de las
-// fórmulas EVALUATE relevantes, para que Excel las trate como dependientes.
-extern "C" __declspec(dllexport) LPXLOPER12 WINAPI xlEngineSetBackend(LPXLOPER12 name) {
-    return xlbridge::guarded([&] {
-        std::string requested = xlbridge::read_string(*name);
-        if (!engine::set_compute_backend(requested)) {
-            throw std::invalid_argument(
-                "Backend de computo no disponible: '" + requested + "'");
-        }
-        return xlbridge::new_str(engine::compute_backend_name());
-    });
-}
-
-extern "C" __declspec(dllexport) LPXLOPER12 WINAPI xlEngineGetBackend() {
-    return xlbridge::guarded([] {
-        return xlbridge::new_str(engine::compute_backend_name());
-    });
-}
-
-// Market/calibración (PLAN.md §7.14): mismo modelo mental que list_models/create_model, pero
-// ENGINE.CALIBRATE toma el mercado directamente como rango (no como handle -- un
-// MarketSnapshot no necesita memoizarse, se consume una sola vez por llamada) y el resultado
-// es una tabla clave/valor pensada para poder pasarse tal cual a ENGINE.CREATE_MODEL (ver
-// xlbridge::new_calibration_result).
+// Calibración (PLAN.md §7.14): mismo modelo mental que list_models/create_model. El mercado
+// se pasa como handle (ENGINE.CREATE_MARKET, PLAN.md §7.15) en vez de un rango inline; el
+// resultado es una tabla clave/valor pensada para poder pasarse tal cual a
+// ENGINE.CREATE_MODEL (ver xlbridge::new_calibration_result).
 
 extern "C" __declspec(dllexport) LPXLOPER12 WINAPI xlEngineListCalibrators() {
     return xlbridge::guarded([] {
@@ -159,8 +148,8 @@ extern "C" __declspec(dllexport) LPXLOPER12 WINAPI xlEngineCalibrate(
     LPXLOPER12 calibrator, LPXLOPER12 market, LPXLOPER12 initial_guess
 ) {
     return xlbridge::guarded([&] {
-        return xlbridge::new_calibration_result(
-            xlbridge::shared().calibrate(xlbridge::read_string(*calibrator), *market, *initial_guess));
+        return xlbridge::new_calibration_result(xlbridge::shared().calibrate(
+            xlbridge::read_string(*calibrator), xlbridge::read_string(*market), *initial_guess));
     });
 }
 
@@ -179,23 +168,31 @@ constexpr FnSpec kFunctions[] = {
                       L"Crea un modelo (params: rango clave/valor) y devuelve su handle."),
     ENGINE_XLL_ENTRY(xlEngineCreateProduct, L"UQQ", L"ENGINE.CREATE_PRODUCT", L"nombre,params",
                       L"Crea un producto (params: rango clave/valor) y devuelve su handle."),
-    ENGINE_XLL_ENTRY(xlEngineCreateMeasure, L"UQ", L"ENGINE.CREATE_MEASURE", L"nombre",
-                      L"Crea una medida y devuelve su handle."),
-    ENGINE_XLL_ENTRY(xlEngineEvaluate, L"UQQQQ", L"ENGINE.EVALUATE", L"medida,modelo,producto,params",
-                      L"Evalua una medida sobre un modelo y un producto (params: rango clave/valor)."),
-    ENGINE_XLL_ENTRY(xlEngineSetBackend, L"UQ", L"ENGINE.SET_BACKEND", L"nombre",
-                      L"Selecciona el backend de computo global ('cpu'/'gpu'). Requiere recalculo "
-                      L"manual (Ctrl+Alt+Intro) de las celdas EVALUATE existentes."),
-    ENGINE_XLL_ENTRY(xlEngineGetBackend, L"U", L"ENGINE.GET_BACKEND", L"",
-                      L"Backend de computo actualmente seleccionado ('cpu' o 'gpu')."),
+    ENGINE_XLL_ENTRY(xlEngineCreateMarket, L"UQ", L"ENGINE.CREATE_MARKET", L"params",
+                      L"Crea un mercado (params: rango clave/valor -- pillars, zero_rates, "
+                      L"hazard_rate opcional, recovery_rate opcional) y devuelve su handle."),
+    ENGINE_XLL_ENTRY(xlEngineCreateContext, L"UQ", L"ENGINE.CREATE_CONTEXT", L"params",
+                      L"Crea un contexto de valoracion (params: pricing_date, n_paths, n_steps, "
+                      L"seed) y devuelve su handle."),
+    ENGINE_XLL_ENTRY(xlEngineCreateExecution, L"UQ", L"ENGINE.CREATE_EXECUTION", L"params",
+                      L"Crea un contexto de ejecucion (params: backend 'cpu'/'gpu'/'auto', "
+                      L"precision opcional) y devuelve su handle."),
+    ENGINE_XLL_ENTRY(
+        xlEngineCalc, L"UQQQQQQ", L"ENGINE.CALC", L"trade,medidas,modelo,mercado,contexto,ejecucion",
+        L"Calcula un lote de medidas (PV, DV01, ExpectedExposure, PFE95, UnilateralCVA) sobre "
+        L"un trade/modelo/mercado/contexto de valoracion/contexto de ejecucion. Resultado en "
+        L"formato largo: [MeasureName, Time, Value]."
+    ),
     ENGINE_XLL_ENTRY(xlEngineListCalibrators, L"U", L"ENGINE.LIST_CALIBRATORS", L"",
                       L"Lista los calibradores registrados en el motor."),
     ENGINE_XLL_ENTRY(xlEngineCreateCalibrator, L"UQ", L"ENGINE.CREATE_CALIBRATOR", L"nombre",
                       L"Crea un calibrador y devuelve su handle."),
-    ENGINE_XLL_ENTRY(xlEngineCalibrate, L"UQQQ", L"ENGINE.CALIBRATE", L"calibrador,mercado,estimacion_inicial",
-                      L"Calibra un modelo a un mercado (rango de 2 columnas: pillars, zero_rates) "
-                      L"partiendo de una estimacion inicial (rango clave/valor); el resultado se "
-                      L"puede pasar tal cual a ENGINE.CREATE_MODEL."),
+    ENGINE_XLL_ENTRY(
+        xlEngineCalibrate, L"UQQQ", L"ENGINE.CALIBRATE", L"calibrador,mercado,estimacion_inicial",
+        L"Calibra un modelo a un mercado (handle de ENGINE.CREATE_MARKET) partiendo de una "
+        L"estimacion inicial (rango clave/valor); el resultado se puede pasar tal cual a "
+        L"ENGINE.CREATE_MODEL."
+    ),
 };
 } // namespace
 
