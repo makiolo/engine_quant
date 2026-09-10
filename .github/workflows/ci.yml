@@ -85,6 +85,28 @@ jobs:
       - name: C ABI smoke test (compilado y ejecutado como C puro)
         run: build/cpp/engine/engine_abi_c_smoke.exe
 
+      # PLAN.md §7.13 (Fase 6, ejemplos multi-lenguaje): C++ idiomático (RAII + excepciones)
+      # sobre la misma engine/abi.h, ver examples/abi/README.md.
+      - name: C++ ABI example (RAII + excepciones sobre engine/abi.h)
+        run: build/cpp/engine/engine_abi_cpp_example.exe
+
+      # examples/abi/rust: crate independiente (no es miembro de rust/Cargo.toml), FFI manual
+      # a engine_abi -- demuestra que incluso Rust podría consumir el motor como un lenguaje
+      # externo cualquiera. El .dll debe copiarse junto al .exe para que Windows lo encuentre
+      # en tiempo de ejecución (el .lib de import ya basta para enlazar, ver build.rs).
+      - name: Rust ABI example (FFI manual a engine_abi, fuera del workspace de Cargo)
+        shell: bash
+        working-directory: examples/abi/rust
+        run: |
+          cargo build
+          cp ../../../build/cpp/engine/engine_abi.dll target/debug/
+          ./target/debug/engine_abi_example.exe
+
+      # examples/abi/python: ctypes (solo librería estándar), no el .pyd de nanobind de
+      # clients/python -- la demostración más directa de qué significa "universal" en §5.5.
+      - name: Python ABI example (ctypes, sin nanobind)
+        run: python examples/abi/python/abi_example.py
+
       - name: Python smoke test (ping + Hull-White/IRS/CVA sobre Burn)
         run: python clients/python/tests/test_smoke.py build/clients/python
 

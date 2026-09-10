@@ -32,3 +32,14 @@ add_custom_command(
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         $<TARGET_FILE:engine_abi> $<TARGET_FILE_DIR:engine_abi_c_smoke>
 )
+
+# Ejemplo de C++ idiomático (RAII + excepciones) sobre la misma C ABI, vive en examples/abi/
+# (PLAN.md §7.13) porque -- a diferencia de engine_abi_c_smoke, que verifica el mecanismo -- su
+# propósito es documentar cómo se consume, junto a sus equivalentes de Rust/Python.
+add_executable(engine_abi_cpp_example ${CMAKE_SOURCE_DIR}/examples/abi/cpp/main.cpp)
+target_link_libraries(engine_abi_cpp_example PRIVATE engine_abi)
+add_custom_command(
+    TARGET engine_abi_cpp_example POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        $<TARGET_FILE:engine_abi> $<TARGET_FILE_DIR:engine_abi_cpp_example>
+)

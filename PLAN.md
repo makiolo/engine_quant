@@ -1121,6 +1121,32 @@ sigue construyendo solo `engine_py_ext` (wheel) y `release.yml` solo empaqueta
 `engine_excel.xll` (§7.9) — `engine_abi`/`engine_abi_c_smoke` existen únicamente dentro del
 árbol de build de desarrollo/CI, sin afectar a ningún artefacto publicado hoy.
 
+**Ejemplos multi-lenguaje** (`examples/abi/`, además de `cpp/engine/examples/abi_c_smoke.c`):
+cuatro versiones del mismo recorrido (listar modelos, IRS 5y+Hull-White, `ExposureProfile`/
+`UnilateralCVA`, backend de §7.12, un error controlado) consumiendo *solo* `engine/abi.h`, para
+documentar cómo se ve de verdad consumir el motor desde fuera de este repo:
+
+- **C++** (`examples/abi/cpp/main.cpp`, target `engine_abi_cpp_example`): envuelve los handles
+  opacos con `std::unique_ptr` + deleters y traduce `NULL`/`!= 0` + `engine_abi_last_error()`
+  a excepciones — la ABI en sí no puede permitirse eso (C puro), pero un consumidor en C++ sí.
+- **Rust** (`examples/abi/rust/`): crate independiente, deliberadamente **no** miembro de
+  `rust/Cargo.toml` ni dependiente de `engine-core`/`engine-ffi` (ese workspace habla con la
+  capa C++ vía `cxx`, un mecanismo interno distinto) — declara a mano las firmas `extern "C"`
+  de `abi.h` (lo que generaría `bindgen`) para demostrar que incluso Rust podría consumir el
+  motor como cualquier lenguaje externo. Cero dependencias: `cargo build` no toca la red.
+- **Python** (`examples/abi/python/abi_example.py`): `ctypes` (solo librería estándar), no el
+  `.pyd` de nanobind de `clients/python` — sin compilar nada específico de Python, la
+  demostración más directa de "universal" (§5.5): cualquier intérprete con `ctypes` sirve.
+
+Los cuatro (C incluido) dieron exactamente los mismos números en verificación manual —
+`ExposureProfile EE ≈ [0, 12862.62, 13673.53]`, `UnilateralCVA = 426.7618244093184` (Rust y
+Python, con más decimales de precisión de imprenta, dieron `426.76182440931836`, el mismo
+valor que ya documentaba `clients/excel/README.md` bit a bit) — confirmando que la traducción
+C ABI ↔ `engine::Registries`/`IMeasure` es correcta independientemente del lenguaje que la
+consuma. CI (`ci.yml`) construye y ejecuta los cuatro en cada push (el C++ y el C comparten el
+build de CMake; Rust y Python se compilan/ejecutan aparte, con el mismo `engine_abi.dll` ya
+generado).
+
 ---
 *Próxima iteración: confirmar en la práctica (no se pudo ejecutar GitHub Actions desde este
 entorno de desarrollo) que el job `build-installer` de `.github/workflows/release.yml` (§7.10)

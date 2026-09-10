@@ -214,8 +214,9 @@ The project plan in `PLAN.md` outlines a progressive roadmap:
 - phase 6: universal API as a flat, versioned C ABI (`cpp/engine/include/engine/abi.h`) —
   the same registry/backend-selection surface Python/Excel already consume, for languages
   with C FFI (Julia, .NET, Go, ...) without going through `cxx`/nanobind. Verified with
-  GoogleTest and a pure-C smoke program; not yet published as its own release artifact
-  (`PLAN.md` §7.13)
+  GoogleTest and a pure-C smoke program, plus standalone C++/Rust/Python examples under
+  `examples/abi/` that all produce the same numbers; not yet published as its own release
+  artifact (`PLAN.md` §7.13)
 - future phases: broader XVA metrics, more products
 
 ## Why this might get attention

@@ -1,0 +1,10 @@
+[package]
+name = "engine-abi-example"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Ejemplo de Rust consumiendo engine/abi.h vía FFI directa a C (PLAN.md Fase 6, §7.13)."
+
+[[bin]]
+name = "engine_abi_example"
+path = "src/main.rs"
