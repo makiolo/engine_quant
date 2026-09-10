@@ -207,7 +207,10 @@ The project plan in `PLAN.md` outlines a progressive roadmap:
 - phase 2: C++ registry and measures
 - phase 3: Python client
 - phase 4: Excel XLL client
-- future phases: broader XVA metrics, more products, GPU support, and a stable universal ABI
+- phase 5: GPU backend (`burn-wgpu`) benchmarked on the IRS+Hull-White case; kept opt-in
+  behind the `gpu` feature (see `PLAN.md` §7.11) rather than default, since it only pays off
+  above ~100k Monte Carlo paths
+- future phases: broader XVA metrics, more products, and a stable universal ABI
 
 ## Why this might get attention
 
