@@ -109,4 +109,68 @@ double irs_hull_white_npv_delta_r0(
     );
 }
 
+ExposureProfile irs_hull_white_2f_exposure_profile(
+    const std::string& backend,
+    double a, double b, double sigma, double eta, double rho, double r0,
+    double notional, double fixed_rate, bool use_par_rate,
+    double start,
+    const std::vector<double>& payment_times,
+    const std::vector<double>& accruals,
+    const std::vector<double>& monitoring_times,
+    std::uint64_t n_steps, std::uint64_t n_paths, std::uint64_t seed
+) {
+    ffi::ExposureProfileResult result = ffi::irs_hull_white_2f_exposure_profile(
+        backend,
+        a, b, sigma, eta, rho, r0,
+        notional, fixed_rate, use_par_rate,
+        start,
+        to_rust_vec(payment_times),
+        to_rust_vec(accruals),
+        to_rust_vec(monitoring_times),
+        n_steps, n_paths, seed
+    );
+
+    return ExposureProfile{
+        std::vector<double>(result.times.begin(), result.times.end()),
+        std::vector<double>(result.ee.begin(), result.ee.end()),
+        std::vector<double>(result.pfe_95.begin(), result.pfe_95.end())
+    };
+}
+
+double unilateral_cva_from_exposure_2f(
+    const std::string& backend,
+    double a, double b, double sigma, double eta, double rho, double r0,
+    const std::vector<double>& times, const std::vector<double>& ee,
+    double hazard_rate, double recovery_rate
+) {
+    return ffi::unilateral_cva_from_exposure_2f(
+        backend,
+        a, b, sigma, eta, rho, r0,
+        to_rust_vec(times), to_rust_vec(ee),
+        hazard_rate, recovery_rate
+    );
+}
+
+double irs_hull_white_2f_npv(
+    double a, double b, double sigma, double eta, double rho, double r0,
+    double notional, double fixed_rate, bool use_par_rate, double start,
+    const std::vector<double>& payment_times, const std::vector<double>& accruals
+) {
+    return ffi::irs_hull_white_2f_npv(
+        a, b, sigma, eta, rho, r0, notional, fixed_rate, use_par_rate, start,
+        to_rust_vec(payment_times), to_rust_vec(accruals)
+    );
+}
+
+double irs_hull_white_2f_npv_delta_r0(
+    double a, double b, double sigma, double eta, double rho, double r0,
+    double notional, double fixed_rate, bool use_par_rate, double start,
+    const std::vector<double>& payment_times, const std::vector<double>& accruals
+) {
+    return ffi::irs_hull_white_2f_npv_delta_r0(
+        a, b, sigma, eta, rho, r0, notional, fixed_rate, use_par_rate, start,
+        to_rust_vec(payment_times), to_rust_vec(accruals)
+    );
+}
+
 } // namespace engine

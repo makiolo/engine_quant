@@ -120,6 +120,74 @@ mod ffi {
             accruals: Vec<f64>,
         ) -> f64;
 
+        // Segundo modelo del motor, Hull-White 2 factores (PLAN.md §7.16, G2++): mismas seis
+        // funciones que su equivalente de 1 factor arriba, mismo shape de resultado
+        // (`ExposureProfileResult`) -- la capa C++ (`engine/measure.hpp`) las consume con el
+        // mismo código de medida, solo cambiando qué wrapper llama según el modelo recibido.
+        fn irs_hull_white_2f_exposure_profile(
+            backend: String,
+            a: f64,
+            b: f64,
+            sigma: f64,
+            eta: f64,
+            rho: f64,
+            r0: f64,
+            notional: f64,
+            fixed_rate: f64,
+            use_par_rate: bool,
+            start: f64,
+            payment_times: Vec<f64>,
+            accruals: Vec<f64>,
+            monitoring_times: Vec<f64>,
+            n_steps: u64,
+            n_paths: u64,
+            seed: u64,
+        ) -> ExposureProfileResult;
+
+        fn unilateral_cva_from_exposure_2f(
+            backend: String,
+            a: f64,
+            b: f64,
+            sigma: f64,
+            eta: f64,
+            rho: f64,
+            r0: f64,
+            times: Vec<f64>,
+            ee: Vec<f64>,
+            hazard_rate: f64,
+            recovery_rate: f64,
+        ) -> f64;
+
+        fn irs_hull_white_2f_npv(
+            a: f64,
+            b: f64,
+            sigma: f64,
+            eta: f64,
+            rho: f64,
+            r0: f64,
+            notional: f64,
+            fixed_rate: f64,
+            use_par_rate: bool,
+            start: f64,
+            payment_times: Vec<f64>,
+            accruals: Vec<f64>,
+        ) -> f64;
+
+        fn irs_hull_white_2f_npv_delta_r0(
+            a: f64,
+            b: f64,
+            sigma: f64,
+            eta: f64,
+            rho: f64,
+            r0: f64,
+            notional: f64,
+            fixed_rate: f64,
+            use_par_rate: bool,
+            start: f64,
+            payment_times: Vec<f64>,
+            accruals: Vec<f64>,
+        ) -> f64;
+
         // Calibración de mercado (PLAN.md §7.14): pillars/zero_rates es el MarketSnapshot en
         // su forma más plana (dos vectores paralelos, PLAN.md §5.5), ver
         // `engine_core::market`/`engine_core::calibration`.
@@ -261,6 +329,107 @@ fn irs_hull_white_npv_delta_r0(
 ) -> f64 {
     engine_core::api::irs_hull_white_npv_delta_r0(
         a, b, sigma, r0, notional, fixed_rate, use_par_rate, start, payment_times, accruals,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn irs_hull_white_2f_exposure_profile(
+    backend: String,
+    a: f64,
+    b: f64,
+    sigma: f64,
+    eta: f64,
+    rho: f64,
+    r0: f64,
+    notional: f64,
+    fixed_rate: f64,
+    use_par_rate: bool,
+    start: f64,
+    payment_times: Vec<f64>,
+    accruals: Vec<f64>,
+    monitoring_times: Vec<f64>,
+    n_steps: u64,
+    n_paths: u64,
+    seed: u64,
+) -> ffi::ExposureProfileResult {
+    let profile = engine_core::api::irs_hull_white_2f_exposure_profile(
+        &backend,
+        a,
+        b,
+        sigma,
+        eta,
+        rho,
+        r0,
+        notional,
+        fixed_rate,
+        use_par_rate,
+        start,
+        payment_times,
+        accruals,
+        &monitoring_times,
+        n_steps as usize,
+        n_paths as usize,
+        seed,
+    );
+    ffi::ExposureProfileResult {
+        times: profile.times,
+        ee: profile.ee,
+        pfe_95: profile.pfe_95,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn unilateral_cva_from_exposure_2f(
+    backend: String,
+    a: f64,
+    b: f64,
+    sigma: f64,
+    eta: f64,
+    rho: f64,
+    r0: f64,
+    times: Vec<f64>,
+    ee: Vec<f64>,
+    hazard_rate: f64,
+    recovery_rate: f64,
+) -> f64 {
+    engine_core::api::unilateral_cva_from_exposure_2f(&backend, a, b, sigma, eta, rho, r0, times, ee, hazard_rate, recovery_rate)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn irs_hull_white_2f_npv(
+    a: f64,
+    b: f64,
+    sigma: f64,
+    eta: f64,
+    rho: f64,
+    r0: f64,
+    notional: f64,
+    fixed_rate: f64,
+    use_par_rate: bool,
+    start: f64,
+    payment_times: Vec<f64>,
+    accruals: Vec<f64>,
+) -> f64 {
+    engine_core::api::irs_hull_white_2f_npv(a, b, sigma, eta, rho, r0, notional, fixed_rate, use_par_rate, start, payment_times, accruals)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn irs_hull_white_2f_npv_delta_r0(
+    a: f64,
+    b: f64,
+    sigma: f64,
+    eta: f64,
+    rho: f64,
+    r0: f64,
+    notional: f64,
+    fixed_rate: f64,
+    use_par_rate: bool,
+    start: f64,
+    payment_times: Vec<f64>,
+    accruals: Vec<f64>,
+) -> f64 {
+    engine_core::api::irs_hull_white_2f_npv_delta_r0(
+        a, b, sigma, eta, rho, r0, notional, fixed_rate, use_par_rate, start, payment_times, accruals,
     )
 }
 

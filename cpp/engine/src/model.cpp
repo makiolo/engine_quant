@@ -13,4 +13,19 @@ double HullWhite1FModel::b() const { return b_; }
 double HullWhite1FModel::sigma() const { return sigma_; }
 double HullWhite1FModel::r0() const { return r0_; }
 
+HullWhite2FModel::HullWhite2FModel(const Params& params)
+    : a_(get_double(params, "a")),
+      b_(get_double(params, "b")),
+      sigma_(get_double(params, "sigma")),
+      eta_(get_double(params, "eta")),
+      rho_(get_double(params, "rho")),
+      r0_(get_double(params, "r0")) {}
+
+double HullWhite2FModel::a() const { return a_; }
+double HullWhite2FModel::b() const { return b_; }
+double HullWhite2FModel::sigma() const { return sigma_; }
+double HullWhite2FModel::eta() const { return eta_; }
+double HullWhite2FModel::rho() const { return rho_; }
+double HullWhite2FModel::r0() const { return r0_; }
+
 } // namespace engine

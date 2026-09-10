@@ -130,11 +130,17 @@ int main() {
     if (models) {
         ok &= check(base_type(*models) == xltypeMulti, "xlEngineListModels devuelve xltypeMulti");
         if (base_type(*models) == xltypeMulti) {
-            bool found = false;
+            bool found_1f = false, found_2f = false;
             for (int i = 0; i < models->val.array.rows; ++i) {
-                if (narrow(&models->val.array.lparray[i]) == "HullWhite1F") found = true;
+                const std::string name = narrow(&models->val.array.lparray[i]);
+                if (name == "HullWhite1F") found_1f = true;
+                if (name == "HullWhite2F") found_2f = true;
             }
-            ok &= check(found, "\"HullWhite1F\" aparece en xlEngineListModels()");
+            ok &= check(found_1f, "\"HullWhite1F\" aparece en xlEngineListModels()");
+            // Segundo modelo del motor (PLAN.md §7.16): registrado en engine::bootstrap, debe
+            // aparecer aquí sin ningún cambio en engine_excel.cpp (xlEngineListModels delega
+            // en Registry<IModel>::list(), no enumera modelos a mano).
+            ok &= check(found_2f, "\"HullWhite2F\" aparece en xlEngineListModels()");
         }
         auto_free(models);
     }

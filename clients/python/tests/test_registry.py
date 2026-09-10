@@ -22,6 +22,12 @@ def _hull_white_params():
     return {"a": 0.1, "b": 0.03, "sigma": 0.01, "r0": 0.02}
 
 
+def _hull_white_2f_params():
+    # Segundo modelo del motor (PLAN.md §7.16, G2++): mismos parámetros de referencia que
+    # cpp/engine/tests/test_registry.cpp::hull_white_2f_params().
+    return {"a": 0.1, "b": 0.2, "sigma": 0.01, "eta": 0.012, "rho": -0.7, "r0": 0.03}
+
+
 def _par_irs_5y_params():
     return {
         "notional": 1_000_000.0,
@@ -45,6 +51,7 @@ def _cpu_execution():
 def test_register_builtins_populates_all_registries():
     eng = engine.Engine()
     assert "HullWhite1F" in eng.list_models()
+    assert "HullWhite2F" in eng.list_models()
     assert "IRSwap" in eng.list_products()
     assert set(eng.list_measures()) == {"PV", "DV01", "ExpectedExposure", "PFE95", "UnilateralCVA"}
 
@@ -104,6 +111,52 @@ def test_unilateral_cva_is_zero_when_hazard_rate_is_zero():
     assert abs(cva.scalar) < 1e-9
 
 
+def test_exposure_profile_2f_is_non_negative_and_pfe_dominates_ee():
+    # Interfaz homogénea (PLAN.md §7.16): mismo Engine.calc, mismas medidas, solo cambia el
+    # nombre/params pasados a create_model -- HullWhite2F en vez de HullWhite1F.
+    eng = engine.Engine()
+    model = eng.create_model("HullWhite2F", _hull_white_2f_params())
+    product = eng.create_product("IRSwap", _par_irs_5y_params())
+
+    result = eng.calc(
+        product, ["ExpectedExposure", "PFE95"], model, _market_with_credit(), _golden_pricing(), _cpu_execution()
+    )
+
+    ee = result["ExpectedExposure"]
+    pfe = result["PFE95"]
+    assert len(ee.primary) == len(pfe.primary)
+    for ee_i, pfe_i in zip(ee.primary, pfe.primary):
+        assert ee_i >= 0.0
+        assert pfe_i >= ee_i
+
+
+def test_unilateral_cva_2f_is_positive_for_nonzero_hazard_rate():
+    eng = engine.Engine()
+    model = eng.create_model("HullWhite2F", _hull_white_2f_params())
+    product = eng.create_product("IRSwap", _par_irs_5y_params())
+
+    result = eng.calc(
+        product, ["UnilateralCVA"], model, _market_with_credit(0.02, 0.4), _golden_pricing(), _cpu_execution()
+    )
+
+    cva = result["UnilateralCVA"]
+    assert cva.has_scalar
+    assert cva.scalar > 0.0
+
+
+def test_pv_and_dv01_2f_of_a_par_swap():
+    eng = engine.Engine()
+    model = eng.create_model("HullWhite2F", _hull_white_2f_params())
+    product = eng.create_product("IRSwap", _par_irs_5y_params())
+
+    result = eng.calc(
+        product, ["PV", "DV01"], model, _market_with_credit(), _golden_pricing(1, 1), _cpu_execution()
+    )
+
+    assert abs(result["PV"].scalar) < 1e-6
+    assert result["DV01"].scalar > 0.0
+
+
 def test_calc_rejects_unknown_measure_name():
     eng = engine.Engine()
     model = eng.create_model("HullWhite1F", _hull_white_params())
@@ -138,6 +191,9 @@ if __name__ == "__main__":
     test_exposure_profile_is_non_negative_and_pfe_dominates_ee()
     test_unilateral_cva_is_positive_for_nonzero_hazard_rate()
     test_unilateral_cva_is_zero_when_hazard_rate_is_zero()
+    test_exposure_profile_2f_is_non_negative_and_pfe_dominates_ee()
+    test_unilateral_cva_2f_is_positive_for_nonzero_hazard_rate()
+    test_pv_and_dv01_2f_of_a_par_swap()
     test_calc_rejects_unknown_measure_name()
     test_calc_rejects_swapped_model_and_product()
     print("OK: tests del registry Python (equivalente a test_registry.cpp) pasaron")

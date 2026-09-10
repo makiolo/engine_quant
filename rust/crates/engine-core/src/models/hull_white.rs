@@ -24,6 +24,7 @@
 //! este módulo lo sepa (PLAN.md §5.1).
 
 use crate::kernel::euler_maruyama_step;
+use crate::models::ShortRateModel;
 use burn::tensor::backend::Backend;
 use burn::tensor::Tensor;
 
@@ -93,6 +94,16 @@ impl<B: Backend> HullWhite1F<B> {
             path.push(r.clone());
         }
         path
+    }
+}
+
+/// Implementación de la interfaz homogénea `ShortRateModel` (PLAN.md §7.16): el estado de
+/// `HullWhite1F` es directamente el tipo corto `r_t`.
+impl<B: Backend> ShortRateModel<B> for HullWhite1F<B> {
+    type State = Tensor<B, 1>;
+
+    fn zero_coupon_bond(&self, state: Self::State, t: f64, maturity: f64) -> Tensor<B, 1> {
+        HullWhite1F::zero_coupon_bond(self, state, t, maturity)
     }
 }
 

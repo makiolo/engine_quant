@@ -201,6 +201,20 @@ XLOPER12 hull_white_params_table(std::vector<std::vector<XCHAR>>& bufs, std::vec
     return make_table(cells, 4, 2);
 }
 
+// Segundo modelo del motor (PLAN.md §7.16, G2++): mismos parámetros de referencia que
+// cpp/engine/tests/test_registry.cpp::hull_white_2f_params().
+XLOPER12 hull_white_2f_params_table(std::vector<std::vector<XCHAR>>& bufs, std::vector<XLOPER12>& cells) {
+    cells = {
+        str_cell(bufs, "a"), num_cell(0.1),
+        str_cell(bufs, "b"), num_cell(0.2),
+        str_cell(bufs, "sigma"), num_cell(0.01),
+        str_cell(bufs, "eta"), num_cell(0.012),
+        str_cell(bufs, "rho"), num_cell(-0.7),
+        str_cell(bufs, "r0"), num_cell(0.03),
+    };
+    return make_table(cells, 6, 2);
+}
+
 XLOPER12 par_irs_5y_params_table(std::vector<std::vector<XCHAR>>& bufs, std::vector<XLOPER12>& cells) {
     cells = {
         str_cell(bufs, "notional"), num_cell(1'000'000.0), blank_cell(), blank_cell(), blank_cell(), blank_cell(),
@@ -257,6 +271,7 @@ TEST(HandleRegistry, RegisterBuiltinsPopulatesAllRegistries) {
         return false;
     };
     EXPECT_TRUE(contains(registry.list_models(), "HullWhite1F"));
+    EXPECT_TRUE(contains(registry.list_models(), "HullWhite2F"));
     EXPECT_TRUE(contains(registry.list_products(), "IRSwap"));
     EXPECT_TRUE(contains(registry.list_measures(), "ExpectedExposure"));
     EXPECT_TRUE(contains(registry.list_measures(), "PFE95"));
@@ -373,6 +388,50 @@ TEST(HandleRegistry, UnilateralCvaIsPositiveForNonzeroHazardRate) {
     std::vector<XLOPER12> model_cells, product_cells, market_cells, pricing_cells, execution_cells;
 
     std::string model = registry.create_model("HullWhite1F", hull_white_params_table(model_bufs, model_cells));
+    std::string product = registry.create_product("IRSwap", par_irs_5y_params_table(product_bufs, product_cells));
+    std::string market = registry.create_market(market_params_table(market_bufs, market_cells, 0.02, 0.4));
+    std::string pricing = registry.create_context(pricing_context_table(pricing_bufs, pricing_cells, 5000.0, 7.0));
+    std::string execution = registry.create_execution(cpu_execution_table(execution_bufs, execution_cells));
+
+    engine::CalcResult result = registry.calc(product, {"UnilateralCVA"}, model, market, pricing, execution);
+
+    ASSERT_EQ(result.size(), 1u);
+    EXPECT_TRUE(result[0].result.has_scalar);
+    EXPECT_GT(result[0].result.scalar, 0.0);
+}
+
+// Interfaz homogénea (PLAN.md §7.16): mismo HandleRegistry::calc, mismos nombres de medida,
+// solo cambia el nombre de modelo/params pasados a create_model -- confirma que el bridge de
+// Excel no necesita saber que existen dos modelos de tipo corto distintos.
+TEST(HandleRegistry, ExpectedExposureAndPfe95MatchOtherClientsUnderHullWhite2F) {
+    xlbridge::HandleRegistry registry = make_registry();
+    std::vector<std::vector<XCHAR>> model_bufs, product_bufs, market_bufs, pricing_bufs, execution_bufs;
+    std::vector<XLOPER12> model_cells, product_cells, market_cells, pricing_cells, execution_cells;
+
+    std::string model = registry.create_model("HullWhite2F", hull_white_2f_params_table(model_bufs, model_cells));
+    std::string product = registry.create_product("IRSwap", par_irs_5y_params_table(product_bufs, product_cells));
+    std::string market = registry.create_market(market_params_table(market_bufs, market_cells, 0.0, 0.0));
+    std::string pricing = registry.create_context(pricing_context_table(pricing_bufs, pricing_cells, 5000.0, 7.0));
+    std::string execution = registry.create_execution(cpu_execution_table(execution_bufs, execution_cells));
+
+    engine::CalcResult result = registry.calc(product, {"ExpectedExposure", "PFE95"}, model, market, pricing, execution);
+
+    ASSERT_EQ(result.size(), 2u);
+    const engine::MeasureResult& ee = result[0].result;
+    const engine::MeasureResult& pfe = result[1].result;
+    ASSERT_EQ(ee.primary.size(), pfe.primary.size());
+    for (std::size_t i = 0; i < ee.primary.size(); ++i) {
+        EXPECT_GE(ee.primary[i], 0.0);
+        EXPECT_GE(pfe.primary[i], ee.primary[i]);
+    }
+}
+
+TEST(HandleRegistry, UnilateralCvaIsPositiveForNonzeroHazardRateUnderHullWhite2F) {
+    xlbridge::HandleRegistry registry = make_registry();
+    std::vector<std::vector<XCHAR>> model_bufs, product_bufs, market_bufs, pricing_bufs, execution_bufs;
+    std::vector<XLOPER12> model_cells, product_cells, market_cells, pricing_cells, execution_cells;
+
+    std::string model = registry.create_model("HullWhite2F", hull_white_2f_params_table(model_bufs, model_cells));
     std::string product = registry.create_product("IRSwap", par_irs_5y_params_table(product_bufs, product_cells));
     std::string market = registry.create_market(market_params_table(market_bufs, market_cells, 0.02, 0.4));
     std::string pricing = registry.create_context(pricing_context_table(pricing_bufs, pricing_cells, 5000.0, 7.0));

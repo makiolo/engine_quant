@@ -77,6 +77,20 @@ ModelHandle create_hull_white() {
     return ModelHandle{engine_abi_create_model("HullWhite1F", params, 4)};
 }
 
+// Segundo modelo del motor, Hull-White 2 factores (PLAN.md §7.16): mismos parámetros de
+// referencia que cpp/engine/tests/test_registry.cpp::hull_white_2f_params().
+ModelHandle create_hull_white_2f() {
+    EngineParam params[] = {
+        scalar_param("a", 0.1),
+        scalar_param("b", 0.2),
+        scalar_param("sigma", 0.01),
+        scalar_param("eta", 0.012),
+        scalar_param("rho", -0.7),
+        scalar_param("r0", 0.03),
+    };
+    return ModelHandle{engine_abi_create_model("HullWhite2F", params, 6)};
+}
+
 // Vive fuera de la función para que payment_times/accruals sigan vivos mientras el
 // EngineParam (que solo apunta a ellos, no los copia) se usa en engine_abi_create_product.
 struct ParIrs5y {
@@ -109,6 +123,19 @@ TEST(Abi, ListModelsIncludesHullWhite1F) {
     bool found = false;
     for (std::size_t i = 0; i < count; ++i) {
         if (std::strcmp(names[i], "HullWhite1F") == 0) found = true;
+    }
+    EXPECT_TRUE(found);
+    engine_abi_free_string_list(names, count);
+}
+
+TEST(Abi, ListModelsIncludesHullWhite2F) {
+    const char** names = nullptr;
+    std::size_t count = engine_abi_list_models(&names);
+    ASSERT_GT(count, 0u);
+
+    bool found = false;
+    for (std::size_t i = 0; i < count; ++i) {
+        if (std::strcmp(names[i], "HullWhite2F") == 0) found = true;
     }
     EXPECT_TRUE(found);
     engine_abi_free_string_list(names, count);
@@ -222,6 +249,67 @@ TEST(Abi, CalcComputesAllFiveMeasuresInOneBatch) {
 
     // ExpectedExposure/PFE95 comparten una sola simulación (PLAN.md §7.15): 5 fechas de
     // reseteo auto-derivadas del swap (0,1,2,3,4), no una lista pedida a mano.
+    const EngineCalcResultEntry* ee = results.find("ExpectedExposure");
+    ASSERT_NE(ee, nullptr);
+    ASSERT_EQ(ee->result.len, 5u);
+    const EngineCalcResultEntry* pfe = results.find("PFE95");
+    ASSERT_NE(pfe, nullptr);
+    ASSERT_EQ(pfe->result.len, 5u);
+    for (std::size_t i = 0; i < ee->result.len; ++i) {
+        EXPECT_GE(ee->result.primary[i], 0.0);
+        EXPECT_GE(pfe->result.primary[i], ee->result.primary[i]);
+    }
+
+    const EngineCalcResultEntry* cva = results.find("UnilateralCVA");
+    ASSERT_NE(cva, nullptr);
+    EXPECT_TRUE(cva->result.has_scalar);
+    EXPECT_GT(cva->result.scalar, 0.0);
+}
+
+// Interfaz homogénea (PLAN.md §7.16) llevada hasta la ABI en C: mismo engine_abi_calc, mismo
+// EngineModel* opaco, solo cambia el nombre pasado a engine_abi_create_model -- ni un
+// consumidor en Julia/.NET/Go tendría que distinguir HullWhite1F de HullWhite2F salvo por el
+// nombre y los parámetros.
+TEST(Abi, CalcComputesAllFiveMeasuresInOneBatchUnderHullWhite2F) {
+    ModelHandle model = create_hull_white_2f();
+    ParIrs5y irs;
+    ProductHandle product = irs.create();
+
+    double pillar = 1.0, rate = 0.02;
+    EngineMarketSnapshot market{};
+    market.pillars = &pillar;
+    market.zero_rates = &rate;
+    market.count = 1;
+    market.hazard_rate = 0.02;
+    market.recovery_rate = 0.4;
+
+    EnginePricingContext pricing{};
+    pricing.pricing_date = 0.0;
+    pricing.n_paths = 5000;
+    pricing.n_steps = 208;
+    pricing.seed = 7;
+
+    EngineExecutionContext execution{};
+    execution.backend = "cpu";
+    execution.precision = "FP64";
+
+    const char* names[] = {"PV", "DV01", "ExpectedExposure", "PFE95", "UnilateralCVA"};
+    CalcResultsHandle results;
+    int rc = engine_abi_calc(
+        product.ptr, names, 5, model.ptr, &market, &pricing, &execution, &results.entries, &results.count);
+    ASSERT_EQ(rc, 0) << last_error();
+    ASSERT_EQ(results.count, 5u);
+
+    const EngineCalcResultEntry* pv = results.find("PV");
+    ASSERT_NE(pv, nullptr);
+    EXPECT_TRUE(pv->result.has_scalar);
+    EXPECT_NEAR(pv->result.scalar, 0.0, 1e-6);
+
+    const EngineCalcResultEntry* dv01 = results.find("DV01");
+    ASSERT_NE(dv01, nullptr);
+    EXPECT_TRUE(dv01->result.has_scalar);
+    EXPECT_GT(dv01->result.scalar, 0.0);
+
     const EngineCalcResultEntry* ee = results.find("ExpectedExposure");
     ASSERT_NE(ee, nullptr);
     ASSERT_EQ(ee->result.len, 5u);

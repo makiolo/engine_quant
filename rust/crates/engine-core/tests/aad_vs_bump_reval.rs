@@ -15,6 +15,7 @@ use burn::tensor::backend::Backend;
 use burn::tensor::{Tensor, TensorData};
 use engine_core::backend::CpuBackend;
 use engine_core::models::hull_white::HullWhite1F;
+use engine_core::models::hull_white_2f::HullWhite2F;
 use engine_core::products::irs::IrSwap;
 
 type ADBackend = Autodiff<CpuBackend>;
@@ -173,5 +174,69 @@ fn aad_delta_of_irs_npv_wrt_r0_matches_bump_and_reval() {
     assert!(
         (aad_delta - bump_delta).abs() < notional * TOLERANCE,
         "delta NPV IRS AAD={aad_delta} vs bump-and-reval={bump_delta}"
+    );
+}
+
+/// Mismo contraste AAD vs bump-and-reval que `aad_delta_of_irs_npv_wrt_r0_matches_bump_and_
+/// reval`, esta vez bajo `HullWhite2F` (PLAN.md §7.16): a diferencia del modelo de 1 factor,
+/// `r0` es aquí un parámetro del modelo (`HullWhite2F::r0`, el desplazamiento `phi0`), no el
+/// estado que se pasa a `IrSwap::npv` (el estado, `(x_0, y_0) = (0, 0)`, es constante) --
+/// confirma que diferenciar a través de `zero_coupon_bond` cuando el parámetro entra por el
+/// modelo en vez de por el estado también reproduce la sensibilidad correcta.
+#[test]
+fn aad_delta_of_irs_npv_wrt_r0_matches_bump_and_reval_under_hull_white_2f() {
+    let (a, b, sigma, eta, rho, r0) = (0.1, 0.2, 0.01, 0.012, -0.7, 0.03);
+    let payment_times = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+    let accruals = vec![1.0, 1.0, 1.0, 1.0, 1.0];
+    let notional = 1_000_000.0;
+    let device = Device::default();
+    let state0_f64 = (scalar::<CpuBackend>(0.0, &device), scalar::<CpuBackend>(0.0, &device));
+
+    let model_f64: HullWhite2F<CpuBackend> = HullWhite2F::new(
+        scalar(a, &device), scalar(b, &device), scalar(sigma, &device), scalar(eta, &device), rho, scalar(r0, &device),
+    );
+    let fixed_rate_tensor =
+        IrSwap::par_rate(state0_f64.clone(), 0.0, &payment_times, &accruals, &model_f64);
+    let fixed_rate = to_f64(fixed_rate_tensor.clone());
+
+    let swap_f64 = IrSwap {
+        notional: scalar(notional, &device),
+        fixed_rate: fixed_rate_tensor,
+        start: 0.0,
+        payment_times: payment_times.clone(),
+        accruals: accruals.clone(),
+    };
+
+    let swap_ad = IrSwap {
+        notional: scalar(notional, &device),
+        fixed_rate: scalar(fixed_rate, &device),
+        start: 0.0,
+        payment_times: payment_times.clone(),
+        accruals: accruals.clone(),
+    };
+
+    let r0_var: Tensor<ADBackend, 1> = scalar(r0, &device).require_grad();
+    let model_ad: HullWhite2F<ADBackend> = HullWhite2F::new(
+        scalar(a, &device), scalar(b, &device), scalar(sigma, &device), scalar(eta, &device), rho, r0_var.clone(),
+    );
+    let state0_ad = (scalar::<ADBackend>(0.0, &device), scalar::<ADBackend>(0.0, &device));
+    let npv = swap_ad.npv(state0_ad, 0.0, &model_ad);
+    let grads = npv.backward();
+    let aad_delta = to_f64(r0_var.grad(&grads).unwrap());
+
+    let bump_delta = central_diff(
+        |r| {
+            let bumped_model = HullWhite2F::<CpuBackend>::new(
+                scalar(a, &device), scalar(b, &device), scalar(sigma, &device), scalar(eta, &device), rho, scalar(r, &device),
+            );
+            to_f64(swap_f64.npv(state0_f64.clone(), 0.0, &bumped_model))
+        },
+        r0,
+        BUMP_H,
+    );
+
+    assert!(
+        (aad_delta - bump_delta).abs() < notional * TOLERANCE,
+        "delta NPV IRS (Hull-White 2F) AAD={aad_delta} vs bump-and-reval={bump_delta}"
     );
 }

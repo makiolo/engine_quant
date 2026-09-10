@@ -15,7 +15,7 @@
 //! requiere llevar el último fixing como estado adicional — se deja para cuando haga
 //! falta (Fase 2+), no es necesario para el perfil de exposición del prototipo.
 
-use crate::models::hull_white::HullWhite1F;
+use crate::models::ShortRateModel;
 use burn::tensor::backend::Backend;
 use burn::tensor::Tensor;
 
@@ -37,19 +37,20 @@ pub struct IrSwap<B: Backend> {
 }
 
 impl<B: Backend> IrSwap<B> {
-    /// NPV del swap pagador (paga fijo, recibe flotante) visto desde `t`, dado el tipo
-    /// corto `r_t` observado en `t` (forma `[n_paths]`, o `[1]` para un único nodo) y el
-    /// modelo que descuenta/proyecta.
+    /// NPV del swap pagador (paga fijo, recibe flotante) visto desde `t`, dado el estado del
+    /// modelo en `t` (`state`, PLAN.md §7.16: el tipo corto para `HullWhite1F`, el par de
+    /// factores latentes para `HullWhite2F` -- lo único que esta función necesita de `model`
+    /// es descontar vía `ShortRateModel::zero_coupon_bond`, genérico sobre cuál sea).
     ///
     /// Requiere `t <= self.start` (ver limitación documentada arriba).
-    pub fn npv(&self, r_t: Tensor<B, 1>, t: f64, model: &HullWhite1F<B>) -> Tensor<B, 1> {
+    pub fn npv<M: ShortRateModel<B>>(&self, state: M::State, t: f64, model: &M) -> Tensor<B, 1> {
         debug_assert!(
             t <= self.start + 1e-9,
             "IrSwap::npv requiere t <= start en esta primera versión"
         );
 
-        let p_start = model.zero_coupon_bond(r_t.clone(), t, self.start);
-        let p_end = model.zero_coupon_bond(r_t.clone(), t, *self.payment_times.last().unwrap());
+        let p_start = model.zero_coupon_bond(state.clone(), t, self.start);
+        let p_end = model.zero_coupon_bond(state.clone(), t, *self.payment_times.last().unwrap());
         let floating_leg = self.notional.clone() * (p_start - p_end);
 
         let fixed_leg = self
@@ -57,7 +58,7 @@ impl<B: Backend> IrSwap<B> {
             .iter()
             .zip(self.accruals.iter())
             .map(|(&ti, &tau)| {
-                let p_i = model.zero_coupon_bond(r_t.clone(), t, ti);
+                let p_i = model.zero_coupon_bond(state.clone(), t, ti);
                 self.notional.clone() * self.fixed_rate.clone() * p_i.mul_scalar(tau)
             })
             .reduce(|acc, leg| acc + leg)
@@ -66,24 +67,24 @@ impl<B: Backend> IrSwap<B> {
         floating_leg - fixed_leg
     }
 
-    /// Tipo fijo a mercado (`NPV = 0`) visto desde `t = self.start`, dado `r_t` en esa
-    /// fecha. Útil para construir swaps "a la par" en tests y en la fecha de arranque de
-    /// un perfil de exposición.
-    pub fn par_rate(
-        r_start: Tensor<B, 1>,
+    /// Tipo fijo a mercado (`NPV = 0`) visto desde `t = self.start`, dado el estado del
+    /// modelo en esa fecha. Útil para construir swaps "a la par" en tests y en la fecha de
+    /// arranque de un perfil de exposición.
+    pub fn par_rate<M: ShortRateModel<B>>(
+        state: M::State,
         start: f64,
         payment_times: &[f64],
         accruals: &[f64],
-        model: &HullWhite1F<B>,
+        model: &M,
     ) -> Tensor<B, 1> {
-        let p_start = model.zero_coupon_bond(r_start.clone(), start, start);
-        let p_end = model.zero_coupon_bond(r_start.clone(), start, *payment_times.last().unwrap());
+        let p_start = model.zero_coupon_bond(state.clone(), start, start);
+        let p_end = model.zero_coupon_bond(state.clone(), start, *payment_times.last().unwrap());
         let numerator = p_start - p_end;
 
         let denominator = payment_times
             .iter()
             .zip(accruals.iter())
-            .map(|(&ti, &tau)| model.zero_coupon_bond(r_start.clone(), start, ti).mul_scalar(tau))
+            .map(|(&ti, &tau)| model.zero_coupon_bond(state.clone(), start, ti).mul_scalar(tau))
             .reduce(|acc, leg| acc + leg)
             .expect("un swap necesita al menos un periodo");
 
@@ -137,6 +138,7 @@ impl<B: Backend> IrSwap<B> {
 mod tests {
     use super::*;
     use crate::backend::CpuBackend;
+    use crate::models::hull_white::HullWhite1F;
     use burn::tensor::TensorData;
 
     type Device = burn::tensor::Device<CpuBackend>;
@@ -221,5 +223,26 @@ mod tests {
         assert!(swap.is_reset_date(2.0));
         assert!(!swap.is_reset_date(5.0)); // pago final, no hay reseteo posterior
         assert!(!swap.is_reset_date(1.5));
+    }
+
+    /// Interfaz homogénea (PLAN.md §7.16): exactamente el mismo `IrSwap::npv`/`par_rate` que
+    /// las pruebas de arriba usan con `HullWhite1F`, aquí instanciado con `HullWhite2F` -- sin
+    /// tocar una sola línea de `IrSwap`, solo cambia `M`/`state` (un par de tensores en vez de
+    /// uno) y el modelo concreto.
+    #[test]
+    fn par_swap_has_zero_npv_at_start_under_hull_white_2f() {
+        use crate::models::hull_white_2f::HullWhite2F;
+
+        let model = HullWhite2F::new(scalar(0.1), scalar(0.2), scalar(0.01), scalar(0.012), -0.7, scalar(0.03));
+        let state = (scalar(0.0), scalar(0.0));
+        let swap = annual_5y_swap(0.0);
+
+        let k = IrSwap::par_rate(state.clone(), swap.start, &swap.payment_times, &swap.accruals, &model);
+        let par_swap = IrSwap { fixed_rate: k, ..swap };
+        let npv = to_f64(par_swap.npv(state, 0.0, &model));
+        assert!(
+            npv.abs() < 1e-6,
+            "NPV del swap a la par debería ser ~0, got {npv}"
+        );
     }
 }

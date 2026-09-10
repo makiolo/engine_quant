@@ -87,4 +87,40 @@ double irs_hull_white_npv_delta_r0(
     const std::vector<double>& payment_times, const std::vector<double>& accruals
 );
 
+// Segundo modelo del motor, Hull-White 2 factores (PLAN.md §7.16, G2++): mismas cuatro
+// funciones que su equivalente de 1 factor arriba (perfil de exposición, CVA a partir de un
+// perfil, NPV determinista y su sensibilidad a r0), con dos parámetros adicionales (`eta`,
+// `rho`) y sin `HullWhite1FModel::b` como "nivel de reversión" -- aquí `b` es la velocidad de
+// reversión del segundo factor. Mismo shape de resultado (`ExposureProfile`) y misma
+// interfaz de `backend` explícito: `engine/measure.hpp` las consume con el mismo código de
+// medida que las de 1 factor, solo cambiando cuál de las dos llama según el modelo recibido.
+ExposureProfile irs_hull_white_2f_exposure_profile(
+    const std::string& backend,
+    double a, double b, double sigma, double eta, double rho, double r0,
+    double notional, double fixed_rate, bool use_par_rate,
+    double start,
+    const std::vector<double>& payment_times,
+    const std::vector<double>& accruals,
+    const std::vector<double>& monitoring_times,
+    std::uint64_t n_steps, std::uint64_t n_paths, std::uint64_t seed
+);
+
+double unilateral_cva_from_exposure_2f(
+    const std::string& backend,
+    double a, double b, double sigma, double eta, double rho, double r0,
+    const std::vector<double>& times, const std::vector<double>& ee,
+    double hazard_rate, double recovery_rate
+);
+
+double irs_hull_white_2f_npv(
+    double a, double b, double sigma, double eta, double rho, double r0,
+    double notional, double fixed_rate, bool use_par_rate, double start,
+    const std::vector<double>& payment_times, const std::vector<double>& accruals
+);
+double irs_hull_white_2f_npv_delta_r0(
+    double a, double b, double sigma, double eta, double rho, double r0,
+    double notional, double fixed_rate, bool use_par_rate, double start,
+    const std::vector<double>& payment_times, const std::vector<double>& accruals
+);
+
 } // namespace engine

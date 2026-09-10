@@ -1443,6 +1443,185 @@ El caso de referencia (mismo IRS 5y + Hull-White de siempre, `n_paths=5000, n_st
 seed=7, hazard_rate=0.02, recovery_rate=0.4`) da el mismo resultado en las cinco capas antes
 de dar la fase por cerrada.
 
+## 7.16 Segundo modelo del motor: Hull-White de 2 factores (G2++)
+
+### Motivación
+
+Hasta esta fase el motor solo sabía valorar bajo un único modelo de tipo corto
+(`HullWhite1F`, PLAN.md §7.5): la genericidad del registry (§5.4) estaba declarada pero nunca
+ejercida por un segundo modelo real. Hull-White de 2 factores (G2++, Brigo-Mercurio "Interest
+Rate Models" cap. 4) es el candidato natural: añade un segundo factor latente correlacionado
+que permite decorrelar el nivel de tipos a corto y a largo plazo, limitación conocida y
+documentada del modelo de 1 factor. El objetivo explícito de esta fase, además de añadir el
+modelo, era demostrar que `ENGINE.CREATE_MODEL`/`ENGINE.CALC` (§7.15) son ya una interfaz
+homogénea de verdad: el mismo `IMeasure`/`ENGINE.CALC` debe servir a ambos modelos sin que
+Python/Excel/la ABI en C tengan que distinguirlos, y el cálculo pesado (simulación Monte
+Carlo, fórmula cerrada del bono, AAD) debe vivir en Rust, igual que el de 1 factor.
+
+### Diseño
+
+**Dinámica** (`rust/crates/engine-core/src/models/hull_white_2f.rs`, nuevo): mismo tipo de
+simplificación deliberada que `HullWhite1F` (constante en vez de curva calibrada) --
+`dx_t = -a x_t dt + sigma dW1_t`, `dy_t = -b y_t dt + eta dW2_t`, `dW1 dW2 = rho dt`,
+`r_t = x_t + y_t + phi0` con `x_0 = y_0 = 0` (así `phi0` coincide con el tipo corto inicial,
+de ahí que el parámetro se siga llamando `r0`). Fórmula cerrada del bono cero-cupón
+(Brigo-Mercurio ec. 4.10-4.11, sin ajuste a curva de mercado) implementada con las mismas
+primitivas tensoriales Burn que `HullWhite1F` (`Tensor::exp/div/powf_scalar`, vectorizado
+sobre paths); la simulación reutiliza tal cual `crate::kernel::euler_maruyama_step` para cada
+factor, correlacionando los shocks dentro de `HullWhite2F::simulate_path` (Cholesky de una
+matriz 2x2). Un test (`zero_coupon_bond_matches_one_factor_when_second_factor_is_degenerate`)
+verifica algebraicamente que, con el segundo factor extinguido (`eta=0`, `rho=0`, `b` grande),
+el precio de G2++ coincide con el de `HullWhite1F` con los mismos `a`/`sigma`/`r0` -- deriva
+cerrada verificada a mano y confirmada en el propio test, no solo "converge por Monte Carlo".
+
+**Interfaz homogénea en Rust**: `crate::models::ShortRateModel<B>` (nuevo, en
+`models/mod.rs`), un trait mínimo con un tipo asociado `State` (`Tensor<B,1>` para
+`HullWhite1F`, `(Tensor<B,1>, Tensor<B,1>)` para `HullWhite2F`) y un único método,
+`zero_coupon_bond(state, t, maturity)`. `crate::products::irs::IrSwap::npv`/`par_rate` pasan a
+ser genéricos sobre `M: ShortRateModel<B>` en vez de estar atados a `HullWhite1F` -- ni una
+línea de la lógica de valoración del swap (réplica en bonos, swap restante, tipo a la par) se
+duplica para el segundo modelo, solo cambia qué modelo/estado se le pasa. La agregación
+estadística EE/PFE95 (`exposure::ee_pfe`) y el núcleo del CVA unilateral
+(`exposure::unilateral_cva_with_discount`) se extrajeron igual de la versión de 1 factor para
+que `expected_exposure_profile_2f`/`unilateral_cva_2f` (nuevas) los reutilicen -- lo único que
+de verdad difiere entre los dos modelos (número de factores a simular, forma de correlacionar
+sus shocks) permanece en cada módulo de modelo, no en `exposure.rs`.
+
+**Frontera `f64` (`crate::api`) y bridge `cxx` (`engine-ffi`)**: cuatro funciones nuevas en
+paralelo exacto a las de `HullWhite1F` (`irs_hull_white_2f_exposure_profile`,
+`unilateral_cva_from_exposure_2f`, `irs_hull_white_2f_npv`, `irs_hull_white_2f_npv_delta_r0`),
+mismo patrón de selección de `backend` explícito, mismo tipo de resultado
+(`ExposureProfile`/`ffi::ExposureProfileResult`) -- duplicadas a este nivel a propósito, seguín
+la misma convención que ya usa `irs_hull_white_exposure_profile`/`unilateral_cva_from_exposure`
+(frontera intencionadamente no genérica, PLAN.md §5.5). Única sutileza de `irs_hull_white_2f_
+npv_delta_r0`: a diferencia de `HullWhite1F` (donde `r0` es el *estado* que recibe
+`IrSwap::npv`), en `HullWhite2F` `r0` es un *parámetro del modelo* (`phi0`) -- la sensibilidad
+vía AAD usa dos instancias del modelo, una plana (sin gradiente, para construir el swap y su
+cupón fijo) y otra con `r0.require_grad()` (solo para el NPV cuya derivada se pide), mismo
+motivo por el que el cupón fijo no debe depender de un shock instantáneo a `r0` documentado ya
+en `build_irs_swap`.
+
+**Interfaz homogénea en C++**: `HullWhite2FModel` (`cpp/engine/include/engine/model.hpp`/
+`.cpp`) es una clase más de `IModel`, registrada en `bootstrap.cpp` junto a `HullWhite1FModel`
+(`registries.models.register_type<HullWhite2FModel>("HullWhite2F")`) -- sin tocar
+`Registry<T>` ni ningún otro registry. `measure.cpp` (refactorizado) concentra en cuatro
+funciones libres (`compute_exposure_profile`/`compute_cva_from_exposure`/`compute_npv`/
+`compute_npv_delta_r0`) el único punto de esta capa que conoce ambos modelos a la vez: cada
+`IMeasure::evaluate` sigue siendo idéntico en estructura a como era antes de esta fase (valida
+el tipo de producto, delega, empaqueta `MeasureResult`), y esas cuatro funciones despachan por
+`dynamic_cast` a `HullWhite1FModel`/`HullWhite2FModel` -- añadir un tercer modelo de tipo corto
+implica una rama más ahí, cero cambios en `ExposureProfileMeasure`/`UnilateralCvaMeasure`/
+`PresentValueMeasure`/`Dv01Measure`.
+
+**Cero cambios en Python/Excel/la ABI en C**: al ser `engine_abi_create_model`/
+`Engine.create_model`/`ENGINE.CREATE_MODEL` ya genéricos por nombre+`Params` desde la Fase 2
+(§5.4) -- ni hardcodeados a `HullWhite1F` en ningún sitio --, `HullWhite2F` quedó disponible en
+las tres capas en cuanto se registró en `bootstrap.cpp`, sin tocar `engine_py_ext.cpp` ni
+`engine_excel.cpp` ni `engine/abi.h` (`engine_abi_version()` se mantiene en 2: no cambia
+ningún layout de struct ni firma ya publicada). Confirma en la práctica la promesa de diseño
+de §5.4/§7.15: la interfaz pública (`create_model`/`ENGINE.CALC`) es homogénea de verdad, no
+solo de nombre.
+
+**Fuera de alcance, igual que ya se documentó para `HullWhite1F`**: no existe
+`ICalibrator` para `HullWhite2F` (`ENGINE.CALIBRATE` sigue siendo solo Hull-White 1F) --
+calibrar 6 parámetros (`a`/`b`/`sigma`/`eta`/`rho`/`r0`) contra una única curva de descuento
+está aún peor identificado que calibrar los 2 de la versión de 1 factor (§7.14 ya documentó
+por qué `sigma` no se calibra ahí); necesitaría instrumentos de volatilidad (swaptions), fuera
+de alcance de esta fase. Tampoco se fija un valor dorado exacto para un caso de referencia de
+`HullWhite2F` (a diferencia de `UnilateralCVA=503.6419407799754` para `HullWhite1F`, propagado
+a las cinco capas) -- los tests de todas las capas usan invariantes cualitativos (EE/PFE95 no
+negativos, PFE95>=EE, PV~0/DV01>0 para un swap a la par, CVA>0 con hazard_rate>0), consistente
+con cómo ya se probaron los 5 ejemplos de `examples/abi/` en §7.15; fijar un valor exacto
+queda para cuando `HullWhite2F` tenga un caso de uso con valores de mercado reales detrás.
+
+### Verificación
+
+`cargo test --workspace` (51 tests `engine-core`, 9 nuevos sobre los 42 de §7.15, incluida la
+reducción algebraica al modelo de 1 factor y la convergencia Monte Carlo vs. fórmula cerrada
+de G2++; 5 tests AAD vs. bump-and-reval, 1 nuevo verificando `d(NPV)/d(r0)` cuando `r0` es un
+parámetro del modelo en vez de su estado) en verde tras cada cambio Rust; `cmake --build build`
+completo + `ctest`/`engine_tests.exe` (39 tests C++, 8 nuevos: `Registry`/`Calc`/`Abi` con
+`HullWhite2F` a través de `ENGINE.CALC`/`engine_abi_calc`) en verde; `clients/python/tests/
+test_registry.py` (3 tests nuevos) y el resto de la suite Python sin cambios necesarios más
+allá de los tests añadidos; `engine_excel_bridge_tests.exe` (29 tests, 2 nuevos vía
+`HandleRegistry::calc`) y `engine_excel_harness_test.exe` (confirma que `HullWhite2F` aparece
+en `xlEngineListModels()` del `.xll` real compilado) en verde. Los 5 ejemplos de
+`examples/abi/` (sin cambios, no forman parte de esta fase) se recompilaron y ejecutaron para
+confirmar que `HullWhite1F`/`UnilateralCVA=503.6419407799754` siguen intactos --
+`engine_abi_version()` no subió, no hay regresión de compatibilidad binaria.
+
+## 7.17 Tres niveles de API de cálculo: scalar / heterogeneous vector / homogeneous batch
+
+### Motivación
+
+El usuario planteó cómo debería escalar `ENGINE.CALC` (§7.15, hoy estrictamente 1 trade -> N
+medidas) el día en que el motor tenga que valorar carteras completas: mezclar en una misma
+llamada "un trade" y "una lista de trades" complicaría la API pública (¿qué forma tiene el
+resultado si `Trade` es a veces un handle y a veces una lista?) y, peor, esconde una decisión
+de rendimiento real -- vectorizar de verdad (SIMD/GPU) exige que el motor opere sobre
+tensores homogéneos (mismo tipo de producto, mismo calendario), no sobre una lista arbitraria
+de objetos heterogéneos. Se adopta el vocabulario de tres niveles propuesto:
+
+1. **Scalar API** -- `ENGINE.CALC(Trade, measures, Model, Market, Pricing, Execution)`, ya
+   implementada en §7.15, estrictamente 1 trade -> N medidas. No cambia en esta fase.
+2. **Heterogeneous vector API** -- de cara al usuario, una lista de trades de tipos
+   potencialmente distintos (`[irs1, fxOption1, irs2, ...]`); el motor los agrupa por tipo de
+   producto registrado antes de tocar Rust.
+3. **Homogeneous batch API** -- el motor interno, por tipo de producto (`IrSwapBatch`,
+   `FXOptionBatch`, ...): N trades del mismo tipo con el mismo calendario, valorados en una
+   única llamada vectorizada, sin bucle escalar.
+
+### Alcance de esta fase (deliberadamente parcial)
+
+Con un único producto real en el motor (`IrSwap`), el nivel 2 (agrupar una lista heterogénea
+por tipo de producto) no tiene nada que demostrar todavía -- agruparía siempre en un único
+grupo. Queda documentado como diseño (más abajo) pero **no implementado** hasta que exista un
+segundo producto real (`HullWhite2F`, §7.16, es un segundo *modelo*, no un segundo *producto*
+-- sigue faltando, por ejemplo, `FxOption`/`Swaption`; el usuario confirmó que habrá más
+productos además de `IrSwap`). Esta fase ejecuta solo el nivel 3, en la capa donde de verdad
+vive el beneficio de vectorizar (Rust/Burn, no C++/Python/Excel): demuestra con un test real
+(no solo argumentado) que el motor ya puede valorar un lote homogéneo de IRS con la misma
+fórmula que un swap suelto, sin bucle.
+
+### Diseño
+
+**Nivel 3 (implementado): `irs_hull_white_npv_batch`
+(`rust/crates/engine-core/src/api.rs`)** -- descubrimiento clave: `products::irs::IrSwap::npv`
+**ya vectorizaba sobre un lote sin saberlo**. `notional`/`fixed_rate` son `Tensor<B,1>` de
+forma `[1]` que Burn difunde contra el estado del modelo (forma `[n_paths]`, ver docs de
+`products::irs`); si en vez de forma `[1]` se les da forma `[n_swaps]`, la misma difusión
+produce un NPV por swap en una sola pasada, porque `IrSwap::npv` nunca asumió una forma
+concreta, solo que las formas fueran compatibles por difusión. `irs_hull_white_npv_batch(a, b,
+sigma, r0, notionals, fixed_rates, start, payment_times, accruals) -> Vec<f64>` construye ese
+`IrSwap` con tensores `[n_swaps]` y reutiliza `IrSwap::npv` tal cual -- cero código nuevo de
+valoración, solo una frontera `f64` nueva análoga a `irs_hull_white_npv`. Restricción
+explícita de esta primera versión: todos los swaps del lote comparten `start`/
+`payment_times`/`accruals` (mismo calendario) y el mismo `r0`/modelo (mismo instante de
+mercado) -- varían solo `notional`/`fixed_rate`. A diferencia de `irs_hull_white_npv`, no
+ofrece atajo `use_par_rate`: no tiene sentido para un lote, cada swap ya trae su propio
+`fixed_rate`. Verificado con un test
+(`irs_hull_white_npv_batch_matches_a_loop_of_scalar_calls`) que compara, swap a swap, el
+resultado del lote contra llamar a `irs_hull_white_npv` (escalar) una vez por swap.
+
+**Nivel 2 (solo diseño, no implementado)**: en la capa C++, `engine::calc` (§7.15) tomaría una
+lista de `Trade` en vez de uno solo; agruparía por el nombre registrado del producto
+(`Registry<IProduct>`, ya existente) en un `map<string, vector<Trade>>`, y por cada grupo
+llamaría a la función de lote correspondiente (`irs_hull_white_npv_batch` para el grupo
+"IRSwap", análoga para cada producto nuevo). El resultado se recompondría en el orden original
+de la lista de entrada -- mismo patrón "agrupar, evaluar una vez por grupo, devolver en orden
+pedido" que ya usa `engine::calc` para agrupar medidas (§7.15). Requiere, como mínimo, que
+exista un calendario compartido entre trades de distinto tenor dentro del mismo tipo de
+producto (hoy el nivel 3 exige calendario idéntico) -- generalizarlo a calendarios distintos
+dentro de un mismo lote (rejilla común + máscara, mismo mecanismo que ya usa la malla de Monte
+Carlo de la exposición) queda pendiente para cuando haga falta de verdad, no se ha
+implementado sin un caso de uso real que lo exija.
+
+### Verificación
+
+`cargo test --workspace` (52 tests `engine-core`, 1 nuevo sobre los 51 de §7.16) en verde.
+Cambio limitado a Rust: no se ha tocado C++/C ABI/Python/Excel en esta fase (ver "Alcance de
+esta fase" arriba) -- `cmake --build`/`ctest`/tests Python/Excel no aplican todavía.
+
 ---
 *Próxima iteración: confirmar en la práctica (no se pudo ejecutar GitHub Actions desde este
 entorno de desarrollo) que el job `build-installer` de `.github/workflows/release.yml` (§7.10)
@@ -1471,4 +1650,24 @@ calendario real para `PricingDate`, el descuento híbrido con la curva de `Marke
 resto de la lista de "qué faltaría para valorar un swap de verdad" (day count/calendarios/
 generación de calendario de pagos, multi-curva descuento vs. proyección, valoración a media
 vida de un swap que ya fijó su cupón actual). CUDA (`burn-cuda`, §5.1) sigue abierto como
-backend adicional si algún día hiciera falta más rendimiento que `wgpu`.*
+backend adicional si algún día hiciera falta más rendimiento que `wgpu`. Sobre la Fase 7.16
+(segundo modelo, Hull-White 2F/G2++): sigue pendiente un `ICalibrator` para `HullWhite2F`
+(hoy `ENGINE.CALIBRATE` sigue siendo solo Hull-White 1F, ver limitación documentada al cerrar
+la fase), fijar un caso de referencia con valor dorado exacto una vez `HullWhite2F` tenga
+parámetros calibrados a mercado real en vez de solo la referencia de literatura usada en los
+tests, y decidir si vale la pena generalizar `ShortRateModel` (hoy solo expone
+`zero_coupon_bond`) para que `expected_exposure_profile`/`unilateral_cva` dejen de estar
+duplicadas por modelo en `exposure.rs` -- la extracción de `ee_pfe`/`unilateral_cva_with_
+discount` en esta fase ya redujo esa duplicación a la parte que de verdad difiere (simulación
+de 1 vs. 2 factores correlacionados). Sobre la Fase 7.17 (tres niveles de API de cálculo):
+sigue pendiente todo el nivel 2 (agrupar una lista heterogénea de trades por tipo de producto
+en `engine::calc`) y su exposición en las cinco capas (`ENGINE.CALC` aceptando un rango de
+trades en Excel, `Engine.calc` aceptando una lista en Python, `engine_abi_calc` aceptando un
+array de trades en la ABI) -- bloqueado, a propósito, hasta que exista un segundo producto
+real (no solo un segundo modelo) que obligue a decidir la forma exacta del despacho por tipo;
+generalizar el nivel 3 a lotes con calendarios distintos dentro de un mismo tipo de producto
+(rejilla común + máscara); un `Dv01Measure` de lote (hoy solo hay `PV` vectorizado, la
+sensibilidad vía AAD de un lote completo en una sola pasada backward queda sin probar); y
+medir si vectorizar de verdad compensa en la práctica (benchmark lote vs. bucle escalar,
+mismo espíritu que el benchmark CPU/GPU de §7.11) en vez de asumirlo solo por argumento de
+diseño.*

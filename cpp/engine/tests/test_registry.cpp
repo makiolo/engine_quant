@@ -36,6 +36,20 @@ Params hull_white_params() {
     };
 }
 
+// Hull-White 2 factores (PLAN.md §7.16, G2++): mismos parámetros de referencia de literatura
+// que `rust/crates/engine-core/src/models/hull_white_2f.rs::tests::reference_model` -- no
+// calibrados a mercado real, solo un punto de referencia razonable.
+Params hull_white_2f_params() {
+    return Params{
+        {"a", 0.1},
+        {"b", 0.2},
+        {"sigma", 0.01},
+        {"eta", 0.012},
+        {"rho", -0.7},
+        {"r0", 0.03},
+    };
+}
+
 Params par_irs_5y_params() {
     return Params{
         {"notional", 1'000'000.0},
@@ -78,6 +92,7 @@ TEST(Registry, RegisterBuiltinsPopulatesAllRegistries) {
     register_builtins(registries);
 
     EXPECT_TRUE(registries.models.contains("HullWhite1F"));
+    EXPECT_TRUE(registries.models.contains("HullWhite2F"));
     EXPECT_TRUE(registries.products.contains("IRSwap"));
     EXPECT_TRUE(registries.measures.contains("ExposureProfile"));
     EXPECT_TRUE(registries.measures.contains("UnilateralCVA"));
@@ -231,6 +246,132 @@ TEST(Registry, Dv01OfAPayerSwapIsPositive) {
 
     EXPECT_TRUE(result.has_scalar);
     EXPECT_GT(result.scalar, 0.0);
+}
+
+// Interfaz homogénea (PLAN.md §7.16): exactamente los mismos IMeasure (ExposureProfile/
+// UnilateralCVA/PV/DV01, ni una línea distinta) evaluados sobre HullWhite2F en vez de
+// HullWhite1F -- measure.cpp despacha internamente al modelo correcto, sin que este test (ni
+// ENGINE.CALC en Python/Excel) necesite saber que existen dos implementaciones.
+TEST(Registry, ExposureProfile2FIsNonNegativeAndPfeDominatesEe) {
+    Registries registries;
+    register_builtins(registries);
+
+    auto model = registries.models.create("HullWhite2F", hull_white_2f_params());
+    auto product = registries.products.create("IRSwap", par_irs_5y_params());
+    auto measure = registries.measures.create("ExposureProfile");
+
+    MarketSnapshot market = market_with_credit(0.0, 0.0);
+    PricingContext pricing = golden_pricing(5000, 7);
+    ExecutionContext execution = cpu_execution();
+
+    engine::MeasureResult result = measure->evaluate(*model, *product, market, pricing, execution);
+
+    ASSERT_EQ(result.primary.size(), result.secondary.size());
+    ASSERT_EQ(result.primary.size(), 5u); // fechas de reseteo auto-derivadas: 0,1,2,3,4
+    for (std::size_t i = 0; i < result.primary.size(); ++i) {
+        EXPECT_GE(result.primary[i], 0.0);
+        EXPECT_GE(result.secondary[i], result.primary[i]);
+    }
+}
+
+TEST(Registry, UnilateralCva2FIsPositiveForNonzeroHazardRate) {
+    Registries registries;
+    register_builtins(registries);
+
+    auto model = registries.models.create("HullWhite2F", hull_white_2f_params());
+    auto product = registries.products.create("IRSwap", par_irs_5y_params());
+    auto measure = registries.measures.create("UnilateralCVA");
+
+    MarketSnapshot market = market_with_credit(0.02, 0.4);
+    PricingContext pricing = golden_pricing(5000, 7);
+    ExecutionContext execution = cpu_execution();
+
+    engine::MeasureResult result = measure->evaluate(*model, *product, market, pricing, execution);
+
+    EXPECT_TRUE(result.has_scalar);
+    EXPECT_GT(result.scalar, 0.0);
+}
+
+TEST(Registry, UnilateralCva2FIsZeroWhenHazardRateIsZero) {
+    Registries registries;
+    register_builtins(registries);
+
+    auto model = registries.models.create("HullWhite2F", hull_white_2f_params());
+    auto product = registries.products.create("IRSwap", par_irs_5y_params());
+    auto measure = registries.measures.create("UnilateralCVA");
+
+    MarketSnapshot market = market_with_credit(0.0, 0.4);
+    PricingContext pricing = golden_pricing(5000, 7);
+    ExecutionContext execution = cpu_execution();
+
+    engine::MeasureResult result = measure->evaluate(*model, *product, market, pricing, execution);
+
+    EXPECT_TRUE(result.has_scalar);
+    EXPECT_LT(std::abs(result.scalar), 1e-9);
+}
+
+TEST(Registry, PresentValue2FOfAParSwapIsNearZero) {
+    Registries registries;
+    register_builtins(registries);
+
+    auto model = registries.models.create("HullWhite2F", hull_white_2f_params());
+    auto product = registries.products.create("IRSwap", par_irs_5y_params());
+    auto measure = registries.measures.create("PV");
+
+    MarketSnapshot market = market_with_credit(0.0, 0.0);
+    PricingContext pricing = golden_pricing(1, 1); // PV es determinista, n_paths/seed no importan
+    ExecutionContext execution = cpu_execution();
+
+    engine::MeasureResult result = measure->evaluate(*model, *product, market, pricing, execution);
+
+    EXPECT_TRUE(result.has_scalar);
+    EXPECT_NEAR(result.scalar, 0.0, 1e-6);
+}
+
+TEST(Registry, Dv01OfAPayerSwap2FIsPositive) {
+    Registries registries;
+    register_builtins(registries);
+
+    auto model = registries.models.create("HullWhite2F", hull_white_2f_params());
+    auto product = registries.products.create("IRSwap", par_irs_5y_params());
+    auto measure = registries.measures.create("DV01");
+
+    MarketSnapshot market = market_with_credit(0.0, 0.0);
+    PricingContext pricing = golden_pricing(1, 1);
+    ExecutionContext execution = cpu_execution();
+
+    engine::MeasureResult result = measure->evaluate(*model, *product, market, pricing, execution);
+
+    EXPECT_TRUE(result.has_scalar);
+    EXPECT_GT(result.scalar, 0.0);
+}
+
+TEST(Calc, ComputesTheFullBatchInOneCallUnderHullWhite2F) {
+    Registries registries;
+    register_builtins(registries);
+
+    auto model = registries.models.create("HullWhite2F", hull_white_2f_params());
+    auto product = registries.products.create("IRSwap", par_irs_5y_params());
+    MarketSnapshot market = market_with_credit(0.02, 0.4);
+    PricingContext pricing = golden_pricing(5000, 7);
+    ExecutionContext execution = cpu_execution();
+
+    engine::CalcResult result = engine::calc(
+        registries, *product, {"PV", "DV01", "ExpectedExposure", "PFE95", "UnilateralCVA"},
+        *model, market, pricing, execution
+    );
+
+    ASSERT_EQ(result.size(), 5u);
+    EXPECT_EQ(result[0].measure_name, "PV");
+    EXPECT_EQ(result[2].measure_name, "ExpectedExposure");
+    EXPECT_EQ(result[3].measure_name, "PFE95");
+    ASSERT_EQ(result[2].result.primary.size(), 5u); // fechas de reseteo: 0,1,2,3,4
+    ASSERT_EQ(result[3].result.primary.size(), 5u);
+    for (std::size_t i = 0; i < 5; ++i) {
+        EXPECT_GE(result[3].result.primary[i], result[2].result.primary[i]); // PFE95 >= EE
+    }
+    EXPECT_TRUE(result[4].result.has_scalar);
+    EXPECT_GT(result[4].result.scalar, 0.0); // UnilateralCVA > 0 con hazard_rate > 0
 }
 
 TEST(Registry, MeasureRejectsWrongProductType) {
