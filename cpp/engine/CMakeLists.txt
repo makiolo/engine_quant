@@ -10,3 +10,25 @@ add_library(engine STATIC
 target_include_directories(engine PUBLIC include)
 
 target_link_libraries(engine PUBLIC engine-ffi-cxx)
+
+# API universal en C ABI (PLAN.md Fase 6, §5.5): shared library (.dll/.so) que expone
+# engine/abi.h -- consumible desde cualquier lenguaje con FFI a C (Julia, .NET, Go, ...) sin
+# pasar por cxx/nanobind/el bridge de Excel. ENGINE_ABI_BUILD activa dllexport en Windows (ver
+# abi.h); un consumidor externo que incluya abi.h sin definirlo obtiene dllimport.
+add_library(engine_abi SHARED
+    src/abi.cpp
+)
+target_include_directories(engine_abi PUBLIC include)
+target_link_libraries(engine_abi PRIVATE engine)
+target_compile_definitions(engine_abi PRIVATE ENGINE_ABI_BUILD)
+
+# Sonda en C puro de engine/abi.h (PLAN.md §5.5): demuestra que la ABI de arriba se puede
+# consumir sin compilador de C++, lo mas parecido a un consumidor externo real (Julia/.NET/Go)
+# que se puede verificar en este árbol.
+add_executable(engine_abi_c_smoke examples/abi_c_smoke.c)
+target_link_libraries(engine_abi_c_smoke PRIVATE engine_abi)
+add_custom_command(
+    TARGET engine_abi_c_smoke POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        $<TARGET_FILE:engine_abi> $<TARGET_FILE_DIR:engine_abi_c_smoke>
+)

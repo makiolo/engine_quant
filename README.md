@@ -211,7 +211,12 @@ The project plan in `PLAN.md` outlines a progressive roadmap:
   behind the `gpu` feature (see `PLAN.md` §7.11) rather than default, since it only pays off
   above ~100k Monte Carlo paths. Selectable from clients: `with engine.backend("gpu"):` in
   Python, `ENGINE.SET_BACKEND("gpu")` in Excel (`PLAN.md` §7.12)
-- future phases: broader XVA metrics, more products, and a stable universal ABI
+- phase 6: universal API as a flat, versioned C ABI (`cpp/engine/include/engine/abi.h`) —
+  the same registry/backend-selection surface Python/Excel already consume, for languages
+  with C FFI (Julia, .NET, Go, ...) without going through `cxx`/nanobind. Verified with
+  GoogleTest and a pure-C smoke program; not yet published as its own release artifact
+  (`PLAN.md` §7.13)
+- future phases: broader XVA metrics, more products
 
 ## Why this might get attention
 

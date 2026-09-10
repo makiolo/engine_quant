@@ -73,9 +73,17 @@ jobs:
 
       # Capas 2-3 de §5.6 sobre el registry C++ (PLAN.md §5.4, Fase 2): wiring de
       # Registry<T>/IModel/IProduct/IMeasure, no repite la validación numérica fina que ya
-      # cubre `rust-tests`.
-      - name: C++ tests (registry de modelos/productos/medidas)
+      # cubre `rust-tests`. Incluye los tests de la C ABI (PLAN.md §7.13, cpp/engine/tests/
+      # test_abi.cpp), aunque solo llaman a engine/abi.h desde C++ (GoogleTest).
+      - name: C++ tests (registry de modelos/productos/medidas + C ABI)
         run: ctest --test-dir build --output-on-failure -C Release
+
+      # PLAN.md §7.13 (Fase 6): a diferencia del paso de arriba, esto compila y ejecuta
+      # engine/abi.h desde un compilador de C de verdad (project(... LANGUAGES CXX C) en la
+      # raíz) -- la única forma de confirmar que la C ABI es consumible sin C++, no solo que
+      # "parece C". Debe imprimir el mismo CVA que test_abi.cpp/test_registry.py/Excel real.
+      - name: C ABI smoke test (compilado y ejecutado como C puro)
+        run: build/cpp/engine/engine_abi_c_smoke.exe
 
       - name: Python smoke test (ping + Hull-White/IRS/CVA sobre Burn)
         run: python clients/python/tests/test_smoke.py build/clients/python

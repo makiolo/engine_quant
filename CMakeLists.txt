@@ -1,5 +1,8 @@
 cmake_minimum_required(VERSION 3.24)
-project(engine_quant LANGUAGES CXX)
+# C además de CXX: engine/abi.h (PLAN.md Fase 6, §5.5) se compila también como C puro en
+# cpp/engine/examples/abi_c_smoke.c, para demostrar/verificar que es una C ABI de verdad y no
+# solo "C++ que se parece a C" -- ningún otro target de este árbol necesita un compilador de C.
+project(engine_quant LANGUAGES CXX C)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)

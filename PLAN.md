@@ -1,11 +1,13 @@
 # XVA Engine — Plan de Arquitectura
 
 > Documento vivo. Se construye de forma incremental, sección a sección.
-> Estado: **v0.11 — Fase 4 completada (cliente Excel vía XLL sobre el registry C++) +
+> Estado: **v0.12 — Fase 4 completada (cliente Excel vía XLL sobre el registry C++) +
 > empaquetado/distribución (wheel Python + XLL autocontenidos, release automática en CI, §7.9)
 > + instalador Windows todo-en-uno (wizard .exe, §7.10) + Fase 5 completada (backend GPU
 > ejercitado con benchmarks reales, se mantiene opcional, §7.11; seleccionable desde Python
-> (`with engine.backend(...)`) y Excel (`ENGINE.SET_BACKEND`), §7.12)**
+> (`with engine.backend(...)`) y Excel (`ENGINE.SET_BACKEND`), §7.12) + Fase 6: API universal
+> en C ABI (`engine/abi.h`), verificada con GoogleTest y una sonda en C puro, aún sin
+> distribuirse en ninguna release (§7.13)**
 
 ## 1. Visión
 
@@ -227,7 +229,10 @@ añade en cuanto exista más de un cliente.
    sobre IRS+Hull-White; se mantiene tras feature opcional `gpu`, no por defecto (ver §7.11).
    Seleccionable desde los clientes: `with engine.backend("gpu"):` en Python,
    `ENGINE.SET_BACKEND("gpu")` en Excel (ver §7.12).
-7. **Fase 6** — API universal / interoperabilidad externa.
+7. **Fase 6** ✅ (mecanismo) — API universal en C ABI: `engine/abi.h`/`engine_abi` (SHARED),
+   misma superficie que Python/Excel (registry + selección de backend de §7.12) expresada en
+   `extern "C"` plano, verificada con GoogleTest y una sonda en C puro (ver §7.13). Pendiente
+   de decidir cómo se distribuye fuera de este repo (no forma parte de ninguna release hoy).
 
 ## 7. Estructura de repos/carpetas (Fase 0)
 
@@ -1054,6 +1059,68 @@ rechaza `None` por defecto para *cualquier* tipo de argumento, incluido el gené
 contexto nativo lanzaba `TypeError` en cuanto el bloque `with` terminaba sin excepción — el
 caso más común, así que habría fallado inmediatamente en cuanto alguien lo probara.
 
+### 7.13 Fase 6 — API universal en C ABI (`engine/abi.h`)
+
+Objetivo (§5.5): exponer la misma superficie que ya consumen Python/Excel (`Registries`/
+`register_builtins`/`Registry<T>::create`/`IMeasure::evaluate`, más la selección de backend de
+§7.12) como una interfaz `extern "C"` plana, para que un lenguaje sin binding dedicado (Julia
+vía `ccall`, .NET vía P/Invoke, Go vía `cgo`) pueda consumir el motor sin pasar por `cxx` ni
+por nanobind — nueva puerta de entrada, no una reimplementación: `engine/abi.h` es una
+traducción de la capa C++ ya existente, igual que lo son `clients/python/src/engine_py_ext.cpp`
+y `clients/excel/src/engine_excel.cpp`.
+
+**`engine/abi.h` + `engine/src/abi.cpp`, nuevo target `engine_abi` (SHARED)**: el resto de
+`cpp/engine` (target `engine`) es una `STATIC` library pensada para enlazarse dentro del mismo
+árbol de CMake — no exporta símbolos ni tiene sentido como `.dll`/`.so` suelto. La C ABI sí
+necesita serlo (un consumidor externo no compila este repo, enlaza contra un binario ya
+compilado), así que es un target nuevo, no una opción del existente:
+
+- **Handles opacos con ownership explícito** (`EngineModel*`/`EngineProduct*`/`EngineMeasure*`,
+  cada uno envolviendo el mismo `std::unique_ptr<IModel/IProduct/IMeasure>` que ya devuelve
+  `Registry<T>::create`): un `engine_abi_create_*` por cada `engine_abi_free_*`, sin recolector
+  de basura ni memoización por parámetros al otro lado (a diferencia del `HandleRegistry` de
+  Excel, §7.8 — ahí la memoización era un workaround específico al modelo de recálculo de
+  Excel; un consumidor de C ABI gestiona su propio ciclo de vida, como con cualquier librería
+  C: `sqlite3_close`, `curl_easy_cleanup`, etc.).
+- **Parámetros como struct plano + longitud** (`EngineParam { key, kind, scalar, values,
+  count }`, un array de estos en vez de `engine::Params`): mismo bag de datos (double / vector
+  de double / bool) que ya consumen `dict_to_params` (Python) y `table_to_params` (Excel), sin
+  `std::variant`/`std::unordered_map` en la frontera — PLAN.md §5.5 ("structs planos / punteros
+  + longitud, evitando dependencias de serialización de terceros").
+- **Ninguna excepción de C++ cruza la frontera** (comportamiento indefinido en C): cada función
+  que puede fallar atrapa `std::exception` y devuelve un centinela (`NULL`, o `!= 0` para
+  `engine_abi_evaluate`), dejando el detalle en `engine_abi_last_error()` (mensaje del último
+  fallo de ese hilo, `thread_local` — mismo propósito que el `#VALUE!` de Excel o la excepción
+  Python que traduce nanobind, pero explícito en vez de solo un código de error opaco).
+- **Versionado explícito** (§5.5): `engine_abi_version()` devuelve un entero que solo sube
+  cuando cambia el layout de un struct ya publicado o la firma de una función ya publicada —
+  nunca al añadir algo nuevo al final. Empieza en `1`.
+- **`ENGINE_ABI_API`** (`__declspec(dllexport)`/`dllimport` en Windows vía la macro
+  `ENGINE_ABI_BUILD`, visibilidad por defecto en GCC/Clang): mismo header sirve para compilar
+  la librería y para que un consumidor la incluya, sin macro propia que definir en el lado del
+  consumidor.
+
+**Verificado con dos niveles de test, ninguno delegado a "confiar en que compila"**:
+
+1. `cpp/engine/tests/test_abi.cpp` (GoogleTest, como el resto de `cpp/engine/tests`) — pero
+   llamando *solo* a la superficie `extern "C"` de `abi.h`, no a los tipos C++ del registry
+   directamente, para probar exactamente lo que vería un consumidor externo. Reutiliza el
+   mismo caso dorado que documenta `clients/excel/README.md` (IRS 5y+Hull-White,
+   `seed=13`/`hazard_rate=0.02`/`recovery_rate=0.4` → `CVA=426.7618244093184`,
+   `seed=7` → `EE≈[0, 12862.62, 13673.53]`) con tolerancia estrecha en vez de solo "no
+   negativo": extiende la capa 4 de test de §5.6 ("equivalencia entre clientes") a la C ABI
+   además de Python/Excel/C++ directo — los cuatro dan el mismo número.
+2. `cpp/engine/examples/abi_c_smoke.c`, compilado como **C puro** (`project(engine_quant
+   LANGUAGES CXX C)` en la raíz, nuevo — antes solo `CXX`): la única forma de comprobar de
+   verdad que el header no es solo "C++ que se parece a C" es compilarlo con un compilador de
+   C. Ejercita el mismo caso dorado y confirma en tiempo de ejecución que
+   `engine_abi_c_smoke.exe` imprime el mismo `426.7618244093184`.
+
+Ninguno de los dos se distribuye (ni el `.dll`, ni el `.exe` de la sonda): `pyproject.toml`
+sigue construyendo solo `engine_py_ext` (wheel) y `release.yml` solo empaqueta
+`engine_excel.xll` (§7.9) — `engine_abi`/`engine_abi_c_smoke` existen únicamente dentro del
+árbol de build de desarrollo/CI, sin afectar a ningún artefacto publicado hoy.
+
 ---
 *Próxima iteración: confirmar en la práctica (no se pudo ejecutar GitHub Actions desde este
 entorno de desarrollo) que el job `build-installer` de `.github/workflows/release.yml` (§7.10)
@@ -1064,5 +1131,9 @@ verificación local. En cuanto exista verificación manual de Fase 4 con Excel r
 (`clients/excel/README.md`), completar la capa 4 de test de §5.6 marcándola como verificada de
 punta a punta, no solo parcial — aprovechar esa sesión para probar también `ENGINE.SET_BACKEND`/
 `ENGINE.GET_BACKEND` (§7.12) con Excel real, incluida la advertencia de recálculo manual. Con
-Fase 5 (§7.11-§7.12) cerrada, arrancar Fase 6 — API universal / interoperabilidad externa
-(§5.5): C ABI plana y versionada sobre la capa C++.*
+Fase 6 (§7.13) cerrada en su mecanismo pero no en su distribución: `engine/abi.h`/`engine_abi`
+no se publican todavía en ninguna release (§7.9 solo empaqueta la wheel y el `.xll`) — decidir
+si hace falta un artefacto propio (zip con `abi.h` + `engine_abi.dll` + `.lib` de import) antes
+de considerar la interoperabilidad externa "usable" por alguien fuera de este repo, no solo
+"implementada y testeada" dentro de él. CUDA (`burn-cuda`, §5.1) sigue abierto como backend
+adicional si algún día hiciera falta más rendimiento que `wgpu`.*
