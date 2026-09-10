@@ -27,13 +27,19 @@
     Carpeta estable donde se copian engine_excel.xll y sus DLL antes de registrarlo (Excel
     resuelve las DLL de un XLL buscando primero en la carpeta del propio XLL). Por defecto,
     %LOCALAPPDATA%\engine_quant\excel.
+.PARAMETER Optional
+    Si no se detecta Excel instalado, termina con exito (codigo 0) en vez de lanzar un error.
+    Pensado para un instalador que ofrece el complemento de Excel como un componente opcional
+    (p.ej. el instalador .exe, ver installer/EngineQuantSetup.iss) y no debe fallar solo
+    porque la maquina no tenga Excel.
 .EXAMPLE
     .\Install-EngineExcelAddin.ps1
 #>
 [CmdletBinding()]
 param(
     [string]$SourceDir,
-    [string]$InstallDir
+    [string]$InstallDir,
+    [switch]$Optional
 )
 
 $ErrorActionPreference = "Stop"
@@ -70,7 +76,35 @@ $optionsKeys = Get-ChildItem "HKCU:\Software\Microsoft\Office" -ErrorAction Sile
     Where-Object { Test-Path $_ }
 
 if (-not $optionsKeys) {
-    throw "No se encontro ninguna clave HKCU\Software\Microsoft\Office\<version>\Excel\Options. ¿Esta Excel instalado y se ha ejecutado al menos una vez en esta cuenta?"
+    # La clave HKCU\...\Excel\Options se crea la primera vez que Excel arranca en esta
+    # cuenta: si Excel esta instalado pero nunca se ha abierto, esa clave HKCU aun no existe.
+    # Se detecta la version instalada via HKLM\...\Office\<version>\Excel\InstallRoot (nativo
+    # y WOW6432Node, por si es un Office de 32 bits en un Windows de 64) y se crea la clave
+    # Options correspondiente para poder registrar el complemento igualmente.
+    $installedVersions = @(
+        "HKLM:\SOFTWARE\Microsoft\Office",
+        "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Office"
+    ) | Where-Object { Test-Path $_ } | ForEach-Object {
+        Get-ChildItem $_ -ErrorAction SilentlyContinue |
+            Where-Object { Test-Path (Join-Path $_.PSPath "Excel\InstallRoot") } |
+            ForEach-Object { $_.PSChildName }
+    } | Select-Object -Unique
+
+    if ($installedVersions) {
+        $optionsKeys = $installedVersions | ForEach-Object {
+            $key = "HKCU:\Software\Microsoft\Office\$_\Excel\Options"
+            New-Item -Path $key -Force | Out-Null
+            $key
+        }
+    }
+}
+
+if (-not $optionsKeys) {
+    if ($Optional) {
+        Write-Host "No se ha detectado Microsoft Excel instalado; se omite el registro del complemento."
+        exit 0
+    }
+    throw "No se encontro Excel instalado: ni HKCU\Software\Microsoft\Office\<version>\Excel\Options (Excel nunca se ha ejecutado en esta cuenta) ni HKLM\...\Excel\InstallRoot (Excel no esta instalado) para ninguna version de Office."
 }
 
 $registered = $false
