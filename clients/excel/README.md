@@ -31,6 +31,9 @@ El resultado es `build/clients/excel/engine_excel.xll`. Solo se construye en Win
 | `ENGINE.EVALUATE(medida, modelo, producto, params)` | `Measure.evaluate(modelo, producto, params)` |
 | `ENGINE.SET_BACKEND(nombre)` | `engine.set_compute_backend(nombre)` / `with engine.backend(nombre):` |
 | `ENGINE.GET_BACKEND()` | `engine.get_compute_backend()` |
+| `ENGINE.LIST_CALIBRATORS()` | `Engine().list_calibrators()` |
+| `ENGINE.CREATE_CALIBRATOR(nombre)` | `Engine().create_calibrator(nombre)` |
+| `ENGINE.CALIBRATE(calibrador, mercado, estimacion_inicial)` | `Calibrator.calibrate(market, initial_guess)` |
 
 `params` es un rango de Excel de 2 o más columnas: columna A = nombre del parámetro,
 columnas siguientes = su valor. Un parámetro escalar (`a`, `notional`, ...) solo rellena la
@@ -84,6 +87,33 @@ backend de Burn implementa su propio generador de números aleatorios, así que 
 el perfil de exposición Monte Carlo difiere en ruido estadístico (variación típica sub-2%
 en el caso de §5.2), no en la lógica de valoración. No usar el mismo `seed` en ambos backends
 como prueba de reproducibilidad exacta.
+
+## Market y calibración (PLAN.md §7.14)
+
+`ENGINE.CALIBRATE` no toma un mercado como handle (a diferencia de modelo/producto/medida): un
+`MarketSnapshot` no tiene estado que memoizar, se consume una sola vez por llamada, así que se
+pasa directamente como rango — **2 columnas, sin clave por fila** (columna A = pillar en años,
+columna B = tipo cero continuo), a diferencia de los rangos `params` de arriba:
+
+```
+=ENGINE.CREATE_CALIBRATOR("HullWhite1F")                          -> handle del calibrador
+=ENGINE.CALIBRATE(<handle>, <rango mercado 2 cols>, <estimacion inicial>)
+```
+
+`estimacion_inicial` es un rango clave/valor normal (`a`, `b`, `sigma`, `r0`) — mismo formato
+que `CREATE_MODEL`. Solo `a`/`b` se calibran (`sigma`/`r0` se devuelven tal cual se pasaron,
+ver `rust/crates/engine-core/src/calibration.rs` para el porqué: `sigma` solo entra en el
+precio del bono cero-cupón como un efecto de segundo orden, mal identificado contra
+únicamente una curva de descuento — en la práctica se calibra con swaptions/caps, fuera de
+alcance de esta fase). El resultado "derrama" una tabla clave/valor (`a`, `b`, `sigma`, `r0`,
+`rmse`, `iterations`, `converged`) que **se puede pasar tal cual como el `params` de
+`ENGINE.CREATE_MODEL`**: las claves de diagnóstico (`rmse`/`iterations`/`converged`) se
+ignoran, cerrando el círculo Mercado → calibrar → Modelo calibrado en dos fórmulas:
+
+```
+=ENGINE.CALIBRATE(<calibrador>, <mercado>, <estimacion inicial>)   -> celda A1, "derrama" hacia abajo
+=ENGINE.CREATE_MODEL("HullWhite1F", A1#)                            -> el mismo rango derramado, referenciado con #
+```
 
 ## Verificación manual (PLAN.md §5.6, capa 4: equivalencia entre clientes)
 

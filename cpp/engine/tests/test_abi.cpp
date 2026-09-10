@@ -17,6 +17,7 @@
 #include <gtest/gtest.h>
 
 #include "engine/abi.h"
+#include "engine/engine.hpp"
 
 namespace {
 
@@ -196,4 +197,35 @@ TEST(Abi, ComputeBackendDefaultsToCpuAndRejectsUnknownName) {
 TEST(Abi, IsGpuBackendAvailableIsBoolLike) {
     int available = engine_abi_is_gpu_backend_available();
     EXPECT_TRUE(available == 0 || available == 1);
+}
+
+TEST(Abi, CalibrateHullWhiteRecoversKnownParametersFromASyntheticMarket) {
+    // Mercado "falso" (PLAN.md §7.14) fabricado a mano aquí (no via
+    // MarketSnapshot::synthetic_from_hull_white, que es C++ interno, no parte de esta ABI):
+    // valores calculados con hull_white_zero_coupon_bond del propio motor.
+    double pillars[] = {0.5, 1.0, 2.0, 3.0, 5.0, 7.0, 10.0, 15.0, 20.0, 30.0};
+    double true_a = 0.15, true_b = 0.025, sigma = 0.008, r0 = 0.02;
+    double zero_rates[10];
+    for (int i = 0; i < 10; ++i) {
+        double price = engine::hull_white_zero_coupon_bond(true_a, true_b, sigma, r0, 0.0, pillars[i]);
+        zero_rates[i] = -std::log(price) / pillars[i];
+    }
+    EngineMarketSnapshot market{pillars, zero_rates, 10};
+
+    EngineHullWhiteCalibration result{};
+    int rc = engine_abi_calibrate_hull_white(&market, 0.3, 0.01, sigma, r0, &result);
+    ASSERT_EQ(rc, 0) << last_error();
+
+    EXPECT_TRUE(result.converged);
+    EXPECT_NEAR(result.a, true_a, 1e-4);
+    EXPECT_NEAR(result.b, true_b, 1e-4);
+    EXPECT_EQ(result.sigma, sigma);
+    EXPECT_EQ(result.r0, r0);
+}
+
+TEST(Abi, CalibrateHullWhiteRejectsNullMarket) {
+    EngineHullWhiteCalibration result{};
+    int rc = engine_abi_calibrate_hull_white(nullptr, 0.1, 0.03, 0.01, 0.02, &result);
+    EXPECT_NE(rc, 0);
+    EXPECT_FALSE(last_error().empty());
 }

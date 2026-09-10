@@ -217,6 +217,10 @@ The project plan in `PLAN.md` outlines a progressive roadmap:
   GoogleTest and a pure-C smoke program, plus standalone C++/Rust/Python examples under
   `examples/abi/` that all produce the same numbers; not yet published as its own release
   artifact (`PLAN.md` §7.13)
+- phase 7: `MarketSnapshot` (a market curve, real or fabricated) and a new `ICalibrator`
+  registry — calibrates `HullWhite1F`'s `a`/`b` to a curve by damped Gauss-Newton using the
+  autodiff already built for sensitivities (§5.3), across all five layers: Rust, the C++
+  registry, the C ABI, Python, and Excel (`PLAN.md` §7.14)
 - future phases: broader XVA metrics, more products
 
 ## Why this might get attention

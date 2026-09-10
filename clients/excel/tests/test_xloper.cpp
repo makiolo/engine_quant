@@ -152,6 +152,34 @@ TEST(TableToParams, MissingArgMeansNoParams) {
     EXPECT_TRUE(parsed.canonical.empty());
 }
 
+TEST(TableToMarket, TwoColumnRangeBecomesPillarsAndZeroRates) {
+    std::vector<XLOPER12> cells{
+        num_cell(1.0), num_cell(0.02),
+        num_cell(2.0), num_cell(0.03),
+        num_cell(5.0), num_cell(0.04),
+    };
+    XLOPER12 table = make_table(cells, 3, 2);
+
+    engine::MarketSnapshot market = xlbridge::table_to_market(table);
+
+    ASSERT_EQ(market.pillars().size(), 3u);
+    EXPECT_DOUBLE_EQ(market.pillars()[1], 2.0);
+    EXPECT_DOUBLE_EQ(market.zero_rates()[1], 0.03);
+}
+
+TEST(TableToMarket, BlankPillarRowIsIgnored) {
+    std::vector<XLOPER12> cells{
+        num_cell(1.0), num_cell(0.02),
+        blank_cell(), blank_cell(),
+        num_cell(5.0), num_cell(0.04),
+    };
+    XLOPER12 table = make_table(cells, 3, 2);
+
+    engine::MarketSnapshot market = xlbridge::table_to_market(table);
+
+    EXPECT_EQ(market.pillars().size(), 2u);
+}
+
 namespace {
 
 xlbridge::HandleRegistry make_registry() { return xlbridge::HandleRegistry(); }
@@ -270,6 +298,62 @@ TEST(HandleRegistry, UnilateralCvaIsPositiveForNonzeroHazardRate) {
 
     EXPECT_TRUE(result.has_scalar);
     EXPECT_GT(result.scalar, 0.0);
+}
+
+// Mismo caso/semillas que Calibrator.HullWhite1FRecoversKnownParametersFromASyntheticMarket
+// (cpp/engine/tests/test_calibration.cpp) y clients/python/tests/test_calibration.py: confirma
+// que el bridge de Excel reproduce el mismo resultado que los otros dos clientes (PLAN.md §7.14).
+TEST(HandleRegistry, CalibrateHullWhiteRecoversKnownParameters) {
+    xlbridge::HandleRegistry registry = make_registry();
+
+    double true_a = 0.15, true_b = 0.025, sigma = 0.008, r0 = 0.02;
+    std::vector<double> pillars{0.5, 1.0, 2.0, 3.0, 5.0, 7.0, 10.0, 15.0, 20.0, 30.0};
+    engine::MarketSnapshot synthetic = engine::MarketSnapshot::synthetic_from_hull_white(true_a, true_b, sigma, r0, pillars);
+
+    std::vector<XLOPER12> market_cells;
+    for (std::size_t i = 0; i < pillars.size(); ++i) {
+        market_cells.push_back(num_cell(synthetic.pillars()[i]));
+        market_cells.push_back(num_cell(synthetic.zero_rates()[i]));
+    }
+    XLOPER12 market_table = make_table(market_cells, static_cast<RW>(pillars.size()), 2);
+
+    std::vector<std::vector<XCHAR>> guess_bufs;
+    std::vector<XLOPER12> guess_cells{
+        str_cell(guess_bufs, "a"), num_cell(0.3),
+        str_cell(guess_bufs, "b"), num_cell(0.01),
+        str_cell(guess_bufs, "sigma"), num_cell(sigma),
+        str_cell(guess_bufs, "r0"), num_cell(r0),
+    };
+    XLOPER12 guess_table = make_table(guess_cells, 4, 2);
+
+    std::string calibrator = registry.create_calibrator("HullWhite1F");
+    engine::CalibrationResult result = registry.calibrate(calibrator, market_table, guess_table);
+
+    EXPECT_TRUE(result.converged);
+    EXPECT_NEAR(std::get<double>(result.optimal_params.at("a")), true_a, 1e-4);
+    EXPECT_NEAR(std::get<double>(result.optimal_params.at("b")), true_b, 1e-4);
+}
+
+TEST(HandleRegistry, CalibrateUnknownHandleThrows) {
+    xlbridge::HandleRegistry registry = make_registry();
+    std::vector<XLOPER12> cells{num_cell(1.0), num_cell(0.02)};
+    XLOPER12 market_table = make_table(cells, 1, 2);
+    XLOPER12 missing = missing_arg();
+    EXPECT_THROW(registry.calibrate("calibrator:NoExiste", market_table, missing), std::out_of_range);
+}
+
+TEST(NewCalibrationResult, IncludesOptimalParamsAndDiagnostics) {
+    engine::CalibrationResult r;
+    r.optimal_params = engine::Params{{"a", 0.15}, {"b", 0.025}};
+    r.rmse = 1e-9;
+    r.iterations = 12;
+    r.converged = true;
+
+    XLOPER12* out = xlbridge::new_calibration_result(r);
+    ASSERT_EQ(out->xltype & ~static_cast<DWORD>(xlbitDLLFree), static_cast<DWORD>(xltypeMulti));
+    EXPECT_EQ(out->val.array.columns, 2);
+    EXPECT_EQ(out->val.array.rows, 5); // a, b, rmse, iterations, converged
+    xlbridge::free_xloper(out);
 }
 
 TEST(NewMeasureResult, ScalarBecomes1x1Num) {

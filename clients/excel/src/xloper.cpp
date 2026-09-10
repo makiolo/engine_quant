@@ -190,6 +190,23 @@ ParsedParams table_to_params(const XLOPER12& params_arg) {
     return out;
 }
 
+engine::MarketSnapshot table_to_market(const XLOPER12& market_arg) {
+    Table tbl = as_table(market_arg);
+    if (tbl.cols < 2) {
+        throw std::invalid_argument("xlbridge: el rango de mercado necesita 2 columnas (pillars, zero_rates)");
+    }
+
+    std::vector<double> pillars;
+    std::vector<double> zero_rates;
+    for (RW r = 0; r < tbl.rows; ++r) {
+        const XLOPER12& pillar_cell = tbl.cell(r, 0);
+        if (is_blank(pillar_cell)) continue; // fila vacia: se ignora, igual que table_to_params
+        pillars.push_back(read_double(pillar_cell));
+        zero_rates.push_back(read_double(tbl.cell(r, 1)));
+    }
+    return engine::MarketSnapshot(std::move(pillars), std::move(zero_rates));
+}
+
 XLOPER12* new_error(int xlerr_code) {
     XLOPER12* out = new XLOPER12{};
     out->xltype = xltypeErr | xlbitDLLFree;
@@ -258,6 +275,44 @@ XLOPER12* new_measure_result(const engine::MeasureResult& result) {
     out->xltype = xltypeMulti | xlbitDLLFree;
     out->val.array.rows = n;
     out->val.array.columns = 3;
+    out->val.array.lparray = cells;
+    return out;
+}
+
+XLOPER12* new_calibration_result(const engine::CalibrationResult& result) {
+    engine::Params rows = result.optimal_params;
+    rows.emplace("rmse", result.rmse);
+    rows.emplace("iterations", static_cast<double>(result.iterations));
+    rows.emplace("converged", result.converged);
+
+    RW n = static_cast<RW>(rows.size());
+    if (n == 0) return new_error(xlerrNA);
+
+    XLOPER12* cells = new XLOPER12[static_cast<std::size_t>(n) * 2]{};
+    RW row = 0;
+    for (const auto& [key, value] : rows) {
+        std::vector<XCHAR> key_buf = to_xl_string_buffer(key);
+        XCHAR* key_owned = new XCHAR[key_buf.size()];
+        std::copy(key_buf.begin(), key_buf.end(), key_owned);
+        cells[row * 2 + 0].xltype = xltypeStr;
+        cells[row * 2 + 0].val.str = key_owned;
+
+        if (const double* d = std::get_if<double>(&value)) {
+            cells[row * 2 + 1].xltype = xltypeNum;
+            cells[row * 2 + 1].val.num = *d;
+        } else {
+            // El único otro caso posible aquí es "converged" (bool) -- optimal_params de
+            // HullWhite1FCalibrator solo produce doubles (a/b/sigma/r0), ver calibrator.hpp.
+            cells[row * 2 + 1].xltype = xltypeBool;
+            cells[row * 2 + 1].val.xbool = std::get<bool>(value) ? 1 : 0;
+        }
+        ++row;
+    }
+
+    XLOPER12* out = new XLOPER12{};
+    out->xltype = xltypeMulti | xlbitDLLFree;
+    out->val.array.rows = n;
+    out->val.array.columns = 2;
     out->val.array.lparray = cells;
     return out;
 }

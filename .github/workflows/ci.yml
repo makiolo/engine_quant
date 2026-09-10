@@ -129,3 +129,8 @@ jobs:
       # False aquí.
       - name: Python backend-selection test (set_compute_backend/backend())
         run: python clients/python/tests/test_backend.py build/clients/python
+
+      # PLAN.md §7.14 (Fase 7): equivalente Python de cpp/engine/tests/test_calibration.cpp,
+      # incluido el round-trip MarketSnapshot -> calibrate -> Engine.create_model.
+      - name: Python calibration test (MarketSnapshot/Calibrator)
+        run: python clients/python/tests/test_calibration.py build/clients/python

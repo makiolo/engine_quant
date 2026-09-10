@@ -7,6 +7,7 @@ void register_builtins(Registries& registries) {
     registries.products.register_type<IrSwapProduct>("IRSwap");
     registries.measures.register_type<ExposureProfileMeasure>("ExposureProfile");
     registries.measures.register_type<UnilateralCvaMeasure>("UnilateralCVA");
+    registries.calibrators.register_type<HullWhite1FCalibrator>("HullWhite1F");
 }
 
 } // namespace engine

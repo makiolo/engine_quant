@@ -41,16 +41,27 @@ public:
     std::vector<std::string> list_models() const;
     std::vector<std::string> list_products() const;
     std::vector<std::string> list_measures() const;
+    std::vector<std::string> list_calibrators() const;
 
     std::string create_model(const std::string& name, const XLOPER12& params_arg);
     std::string create_product(const std::string& name, const XLOPER12& params_arg);
     std::string create_measure(const std::string& name);
+    // Sin parámetros que memoizar (a diferencia de create_model/create_product): un
+    // ICalibrator no tiene estado propio, ver engine::HullWhite1FCalibrator -- el handle se
+    // memoiza solo por `name`.
+    std::string create_calibrator(const std::string& name);
 
     engine::MeasureResult evaluate(
         const std::string& measure_handle,
         const std::string& model_handle,
         const std::string& product_handle,
         const XLOPER12& params_arg
+    ) const;
+
+    // market_arg: rango de 2 columnas (pillars, zero_rates), ver xlbridge::table_to_market.
+    // initial_guess_arg: mismo formato clave/valor que params_arg en el resto de create_*.
+    engine::CalibrationResult calibrate(
+        const std::string& calibrator_handle, const XLOPER12& market_arg, const XLOPER12& initial_guess_arg
     ) const;
 
     // Libera todas las instancias memoizadas (xlAutoClose, engine_excel.cpp).
@@ -61,6 +72,7 @@ private:
     std::unordered_map<std::string, std::unique_ptr<engine::IModel>> models_;
     std::unordered_map<std::string, std::unique_ptr<engine::IProduct>> products_;
     std::unordered_map<std::string, std::unique_ptr<engine::IMeasure>> measures_;
+    std::unordered_map<std::string, std::unique_ptr<engine::ICalibrator>> calibrators_;
 };
 
 // Instancia única de proceso (una por XLL cargado en Excel), usada desde engine_excel.cpp.

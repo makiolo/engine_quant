@@ -9,7 +9,9 @@
 #include <nanobind/stl/vector.h>
 
 #include "engine/bootstrap.hpp"
+#include "engine/calibrator.hpp"
 #include "engine/engine.hpp"
+#include "engine/market.hpp"
 
 namespace nb = nanobind;
 using namespace nb::literals;
@@ -38,6 +40,18 @@ engine::Params dict_to_params(const nb::dict& params) {
     return result;
 }
 
+// Inversa de dict_to_params (PLAN.md §7.14): CalibrationResult.optimal_params ya viene como
+// un engine::Params del lado C++ (mismo tipo que consumen las factories del registry) -- para
+// que se sienta "de Python" a la salida igual que a la entrada, se expone como dict nativo en
+// vez de una clase Params dedicada.
+nb::dict params_to_dict(const engine::Params& params) {
+    nb::dict result;
+    for (const auto& [key, value] : params) {
+        std::visit([&](const auto& v) { result[key.c_str()] = v; }, value);
+    }
+    return result;
+}
+
 // Envuelve engine::Registries + register_builtins (PLAN.md §5.4, §7.6) en un único objeto
 // Python: se instancia una vez (register_builtins se ejecuta en el constructor) y expone
 // list_*/create_* como métodos, en vez de dejar que el cliente Python tenga que llamar a una
@@ -49,6 +63,7 @@ public:
     std::vector<std::string> list_models() const { return registries_.models.list(); }
     std::vector<std::string> list_products() const { return registries_.products.list(); }
     std::vector<std::string> list_measures() const { return registries_.measures.list(); }
+    std::vector<std::string> list_calibrators() const { return registries_.calibrators.list(); }
 
     std::unique_ptr<engine::IModel> create_model(const std::string& name, const nb::dict& params) const {
         return registries_.models.create(name, dict_to_params(params));
@@ -60,6 +75,10 @@ public:
 
     std::unique_ptr<engine::IMeasure> create_measure(const std::string& name) const {
         return registries_.measures.create(name);
+    }
+
+    std::unique_ptr<engine::ICalibrator> create_calibrator(const std::string& name) const {
+        return registries_.calibrators.create(name);
     }
 
 private:
@@ -182,14 +201,72 @@ NB_MODULE(engine, m) {
         )
         .def("__repr__", [](const engine::IMeasure& self) { return "<Measure '" + self.type_name() + "'>"; });
 
+    // --- Market / calibración (PLAN.md §7.14) ---
+
+    nb::class_<engine::MarketSnapshot>(m, "MarketSnapshot")
+        .def(
+            nb::init<std::vector<double>, std::vector<double>>(),
+            nb::arg("pillars"),
+            nb::arg("zero_rates"),
+            "Curva de mercado observada -- o fabricada, ver synthetic_from_hull_white -- en "
+            "un instante dado: pillars (anios desde hoy, estrictamente creciente) + "
+            "zero_rates (tipos cero de capitalizacion continua, mismo largo)."
+        )
+        .def_prop_ro("pillars", &engine::MarketSnapshot::pillars)
+        .def_prop_ro("zero_rates", &engine::MarketSnapshot::zero_rates)
+        .def("zero_rate", &engine::MarketSnapshot::zero_rate, nb::arg("t"))
+        .def("discount_factor", &engine::MarketSnapshot::discount_factor, nb::arg("t"))
+        .def_static(
+            "synthetic_from_hull_white",
+            &engine::MarketSnapshot::synthetic_from_hull_white,
+            nb::arg("a"),
+            nb::arg("b"),
+            nb::arg("sigma"),
+            nb::arg("r0"),
+            nb::arg("pillars"),
+            "Mercado 'falso': fabrica un MarketSnapshot leyendo la propia formula cerrada de "
+            "HullWhite1F en los pillars dados -- util para probar/demostrar calibrate() sin "
+            "depender de datos de mercado reales."
+        )
+        .def("__repr__", [](const engine::MarketSnapshot& self) {
+            return "<MarketSnapshot pillars=" + std::to_string(self.pillars().size()) + ">";
+        });
+
+    nb::class_<engine::CalibrationResult>(m, "CalibrationResult")
+        .def_prop_ro("optimal_params", [](const engine::CalibrationResult& self) { return params_to_dict(self.optimal_params); })
+        .def_ro("rmse", &engine::CalibrationResult::rmse)
+        .def_ro("iterations", &engine::CalibrationResult::iterations)
+        .def_ro("converged", &engine::CalibrationResult::converged)
+        .def("__repr__", [](const engine::CalibrationResult& self) {
+            return "<CalibrationResult rmse=" + std::to_string(self.rmse) +
+                   " converged=" + (self.converged ? std::string("True") : std::string("False")) + ">";
+        });
+
+    nb::class_<engine::ICalibrator>(m, "Calibrator")
+        .def_prop_ro("type_name", &engine::ICalibrator::type_name)
+        .def(
+            "calibrate",
+            [](const engine::ICalibrator& self, const engine::MarketSnapshot& market, const nb::dict& initial_guess) {
+                return self.calibrate(market, dict_to_params(initial_guess));
+            },
+            nb::arg("market"),
+            nb::arg("initial_guess"),
+            "Calibra este modelo a `market` partiendo de `initial_guess` (dict, mismas claves "
+            "que create_model para el mismo tipo de modelo). Devuelve un CalibrationResult "
+            "cuyo optimal_params se puede pasar directamente a Engine.create_model."
+        )
+        .def("__repr__", [](const engine::ICalibrator& self) { return "<Calibrator '" + self.type_name() + "'>"; });
+
     nb::class_<Engine>(m, "Engine")
         .def(nb::init<>())
         .def("list_models", &Engine::list_models)
         .def("list_products", &Engine::list_products)
         .def("list_measures", &Engine::list_measures)
+        .def("list_calibrators", &Engine::list_calibrators)
         .def("create_model", &Engine::create_model, nb::arg("name"), nb::arg("params") = nb::dict())
         .def("create_product", &Engine::create_product, nb::arg("name"), nb::arg("params") = nb::dict())
-        .def("create_measure", &Engine::create_measure, nb::arg("name"));
+        .def("create_measure", &Engine::create_measure, nb::arg("name"))
+        .def("create_calibrator", &Engine::create_calibrator, nb::arg("name"));
 
     // --- Selección de backend de cómputo (PLAN.md §7.12) ---
 

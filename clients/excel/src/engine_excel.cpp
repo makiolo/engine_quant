@@ -137,6 +137,33 @@ extern "C" __declspec(dllexport) LPXLOPER12 WINAPI xlEngineGetBackend() {
     });
 }
 
+// Market/calibración (PLAN.md §7.14): mismo modelo mental que list_models/create_model, pero
+// ENGINE.CALIBRATE toma el mercado directamente como rango (no como handle -- un
+// MarketSnapshot no necesita memoizarse, se consume una sola vez por llamada) y el resultado
+// es una tabla clave/valor pensada para poder pasarse tal cual a ENGINE.CREATE_MODEL (ver
+// xlbridge::new_calibration_result).
+
+extern "C" __declspec(dllexport) LPXLOPER12 WINAPI xlEngineListCalibrators() {
+    return xlbridge::guarded([] {
+        return xlbridge::new_string_column(xlbridge::shared().list_calibrators());
+    });
+}
+
+extern "C" __declspec(dllexport) LPXLOPER12 WINAPI xlEngineCreateCalibrator(LPXLOPER12 name) {
+    return xlbridge::guarded([&] {
+        return xlbridge::new_str(xlbridge::shared().create_calibrator(xlbridge::read_string(*name)));
+    });
+}
+
+extern "C" __declspec(dllexport) LPXLOPER12 WINAPI xlEngineCalibrate(
+    LPXLOPER12 calibrator, LPXLOPER12 market, LPXLOPER12 initial_guess
+) {
+    return xlbridge::guarded([&] {
+        return xlbridge::new_calibration_result(
+            xlbridge::shared().calibrate(xlbridge::read_string(*calibrator), *market, *initial_guess));
+    });
+}
+
 // PLAN.md §5.4 (registro explicito centralizado) aplicado tambien aqui: una unica tabla que
 // enumera todo lo que este XLL expone, sin auto-registro implicito. Va despues de las UDFs
 // (no antes): ENGINE_XLL_ENTRY necesita verlas ya declaradas para el chequeo `void(&fn)`.
@@ -161,6 +188,14 @@ constexpr FnSpec kFunctions[] = {
                       L"manual (Ctrl+Alt+Intro) de las celdas EVALUATE existentes."),
     ENGINE_XLL_ENTRY(xlEngineGetBackend, L"U", L"ENGINE.GET_BACKEND", L"",
                       L"Backend de computo actualmente seleccionado ('cpu' o 'gpu')."),
+    ENGINE_XLL_ENTRY(xlEngineListCalibrators, L"U", L"ENGINE.LIST_CALIBRATORS", L"",
+                      L"Lista los calibradores registrados en el motor."),
+    ENGINE_XLL_ENTRY(xlEngineCreateCalibrator, L"UQ", L"ENGINE.CREATE_CALIBRATOR", L"nombre",
+                      L"Crea un calibrador y devuelve su handle."),
+    ENGINE_XLL_ENTRY(xlEngineCalibrate, L"UQQQ", L"ENGINE.CALIBRATE", L"calibrador,mercado,estimacion_inicial",
+                      L"Calibra un modelo a un mercado (rango de 2 columnas: pillars, zero_rates) "
+                      L"partiendo de una estimacion inicial (rango clave/valor); el resultado se "
+                      L"puede pasar tal cual a ENGINE.CREATE_MODEL."),
 };
 } // namespace
 

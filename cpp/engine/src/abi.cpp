@@ -8,7 +8,9 @@
 #include "engine/abi.h"
 
 #include "engine/bootstrap.hpp"
+#include "engine/calibrator.hpp"
 #include "engine/engine.hpp"
+#include "engine/market.hpp"
 
 #include <algorithm>
 #include <cstring>
@@ -215,6 +217,45 @@ std::size_t engine_abi_get_compute_backend(char* buffer, std::size_t buffer_len)
 }
 
 int engine_abi_is_gpu_backend_available(void) { return engine::is_gpu_backend_available() ? 1 : 0; }
+
+int engine_abi_calibrate_hull_white(
+    const EngineMarketSnapshot* market,
+    double initial_a,
+    double initial_b,
+    double sigma,
+    double r0,
+    EngineHullWhiteCalibration* out_result
+) {
+    *out_result = EngineHullWhiteCalibration{};
+    try {
+        if (!market) {
+            throw std::invalid_argument("engine_abi_calibrate_hull_white: market no puede ser NULL");
+        }
+        engine::MarketSnapshot snapshot(
+            std::vector<double>(market->pillars, market->pillars + market->count),
+            std::vector<double>(market->zero_rates, market->zero_rates + market->count)
+        );
+
+        auto calibrator = registries().calibrators.create("HullWhite1F");
+        engine::Params initial_guess{{"a", initial_a}, {"b", initial_b}, {"sigma", sigma}, {"r0", r0}};
+        engine::CalibrationResult result = calibrator->calibrate(snapshot, initial_guess);
+
+        out_result->a = std::get<double>(result.optimal_params.at("a"));
+        out_result->b = std::get<double>(result.optimal_params.at("b"));
+        out_result->sigma = std::get<double>(result.optimal_params.at("sigma"));
+        out_result->r0 = std::get<double>(result.optimal_params.at("r0"));
+        out_result->rmse = result.rmse;
+        out_result->iterations = result.iterations;
+        out_result->converged = result.converged ? 1 : 0;
+
+        clear_last_error();
+        return 0;
+    } catch (const std::exception& e) {
+        set_last_error(e);
+        *out_result = EngineHullWhiteCalibration{};
+        return 1;
+    }
+}
 
 std::size_t engine_abi_last_error(char* buffer, std::size_t buffer_len) {
     return copy_to_buffer(g_last_error, buffer, buffer_len);

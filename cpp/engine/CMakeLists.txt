@@ -4,6 +4,8 @@ add_library(engine STATIC
     src/model.cpp
     src/product.cpp
     src/measure.cpp
+    src/market.cpp
+    src/calibrator.cpp
     src/bootstrap.cpp
 )
 

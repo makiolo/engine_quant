@@ -1,13 +1,15 @@
 # XVA Engine — Plan de Arquitectura
 
 > Documento vivo. Se construye de forma incremental, sección a sección.
-> Estado: **v0.12 — Fase 4 completada (cliente Excel vía XLL sobre el registry C++) +
+> Estado: **v0.13 — Fase 4 completada (cliente Excel vía XLL sobre el registry C++) +
 > empaquetado/distribución (wheel Python + XLL autocontenidos, release automática en CI, §7.9)
 > + instalador Windows todo-en-uno (wizard .exe, §7.10) + Fase 5 completada (backend GPU
 > ejercitado con benchmarks reales, se mantiene opcional, §7.11; seleccionable desde Python
 > (`with engine.backend(...)`) y Excel (`ENGINE.SET_BACKEND`), §7.12) + Fase 6: API universal
 > en C ABI (`engine/abi.h`), verificada con GoogleTest y una sonda en C puro, aún sin
-> distribuirse en ninguna release (§7.13)**
+> distribuirse en ninguna release (§7.13) + Fase 7: `MarketSnapshot`/`ICalibrator` — calibrar
+> `HullWhite1F` a una curva de mercado (real o fabricada) en las cinco capas (Rust/C++/C
+> ABI/Python/Excel), §7.14**
 
 ## 1. Visión
 
@@ -233,6 +235,11 @@ añade en cuanto exista más de un cliente.
    misma superficie que Python/Excel (registry + selección de backend de §7.12) expresada en
    `extern "C"` plano, verificada con GoogleTest y una sonda en C puro (ver §7.13). Pendiente
    de decidir cómo se distribuye fuera de este repo (no forma parte de ninguna release hoy).
+8. **Fase 7** ✅ — `MarketSnapshot` (curva de mercado, real o fabricada) + `ICalibrator`/
+   `Registry<ICalibrator>` (nuevo cuarto registry, mismo patrón que modelos/productos/
+   medidas): calibra `a`/`b` de `HullWhite1F` a una curva por mínimos cuadrados vía AAD
+   (reutiliza la infraestructura de §5.3), en las cinco capas — Rust, registry C++, C ABI,
+   Python (nanobind), Excel (ver §7.14).
 
 ## 7. Estructura de repos/carpetas (Fase 0)
 
@@ -1156,6 +1163,99 @@ FFI que la consuma. CI (`ci.yml`) construye y ejecuta las cinco en cada push (el
 comparten el build de CMake; Rust y ambas versiones de Python se compilan/ejecutan aparte, con
 el mismo `engine_abi.dll` ya generado).
 
+### 7.14 Fase 7 — `MarketSnapshot` y calibración de modelos (`ICalibrator`)
+
+**Motivación**: hasta esta fase, `HullWhite1F` se instanciaba siempre con `a`/`b`/`sigma`
+elegidos a mano (PLAN.md §5.2 lo documentaba como simplificación deliberada de la primera
+versión). Para que el motor sirva para valorar un swap de verdad —no solo el caso dorado de
+prueba— hace falta poder decir "estos son los parámetros que mejor reproducen *esta* curva de
+mercado", no solo los que alguien tecleó. Esta fase añade esa infraestructura, en las cinco
+capas del árbol, no solo en Rust.
+
+**`MarketSnapshot` es datos, no una jerarquía polimórfica** — misma filosofía que `Params`
+(§5.4): `pillars` (años desde hoy, estrictamente creciente) + `zero_rates` (tipos cero de
+capitalización continua), dos vectores paralelos con interpolación lineal entre pillars y
+extrapolación plana fuera de rango. Que el mercado sea "falso" (fabricado,
+`synthetic_from_hull_white` — lee la propia fórmula cerrada de `HullWhite1F` en los pillars
+dados, para poder probar/demostrar calibración sin depender de datos reales) o "real" (números
+observados, de donde sea que vengan — no hay todavía un bootstrapping desde instrumentos de
+mercado crudos: eso queda fuera de esta fase, ver "Próxima iteración" más abajo) es una
+cuestión de *de dónde salen los números*, no de un tipo C++/Rust/Python distinto.
+
+**Solo `a`/`b` se calibran; `sigma`/`r0` se toman como datos de entrada — decisión tomada tras
+comprobarlo empíricamente, no una simplificación *a priori***: la primera versión intentó
+calibrar `a`/`b`/`sigma` los tres a la vez contra el factor de descuento, y el optimizador
+colapsaba `sigma` hacia 0 casi sin mover el error, porque `sigma` solo entra en el precio del
+bono cero-cupón vía el término de convexidad `-sigma²/2` de `a_factor` — un efecto de segundo
+orden, casi invisible frente al efecto de primer orden de `a`/`b` sobre la forma/nivel de la
+curva. No es un defecto del optimizador: en la práctica de mercado la volatilidad de un modelo
+de tipo corto se calibra contra instrumentos de volatilidad (swaptions, caps), no contra la
+curva de descuento — no hay ese tipo de instrumento en `MarketSnapshot` todavía. `a`/`b` sí
+están bien identificados por la curva (determinan directamente su forma y su nivel de largo
+plazo) y calibran de forma robusta.
+
+**Gauss-Newton amortiguado (Levenberg-Marquardt) con jacobiana vía AAD, no diferencias
+finitas** (`rust/crates/engine-core/src/calibration.rs`): reutiliza el mismo autodiff en modo
+reverse de Burn que ya usa `crate::smoke`/`tests/aad_vs_bump_reval.rs` (§5.3) — una
+`backward()` por pillar y por iteración calcula la jacobiana de los residuos de precio
+respecto a `(ln(a), b)` (`a` reparametrizado sobre su logaritmo para que el optimizador no
+necesite restricciones: la fórmula afín de `HullWhite1F` exige `a > 0`, y el propio autodiff
+se encarga de la regla de la cadena a través de `exp()`). La amortiguación de
+Levenberg-Marquardt (subir/bajar un factor `lambda` en la diagonal de `JᵀJ` según si el paso
+propuesto de verdad mejora el error) evita que Gauss-Newton diverja desde una estimación
+inicial lejana — verificado con una estimación inicial deliberadamente alejada de los
+parámetros "verdaderos" en los tests de las cinco capas.
+
+**Registro explícito centralizado, cuarto registry** (§5.4, mismo patrón que
+`IModel`/`IProduct`/`IMeasure`): `engine::ICalibrator` (`calibrate(MarketSnapshot, Params
+inicial) -> CalibrationResult{Params óptimo, rmse, iterations, converged}`) +
+`Registry<ICalibrator>` + `Registries::calibrators`, con `HullWhite1FCalibrator` registrado en
+`bootstrap.cpp` bajo `"HullWhite1F"`. `CalibrationResult::optimal_params` es un `Params`
+—igual que ya consume `Registry<IModel>::create`— no un struct de campos fijos: cierra el
+círculo **Mercado → calibrar → Modelo calibrado** pasando el resultado directamente a
+`create_model` sin ningún paso intermedio (verificado en las cinco capas: Rust, GoogleTest de
+C++, GoogleTest de la C ABI, `pytest`-style de Python, y el propio rango "derramado" de Excel
+referenciado con `#` en `ENGINE.CREATE_MODEL`).
+
+**Las cinco capas, de dentro hacia fuera**:
+
+1. **Rust** (`engine_core::market::MarketSnapshot`, `engine_core::calibration::
+   calibrate_hull_white`, expuesto en `f64` puro vía `crate::api::calibrate_hull_white`).
+2. **`engine-ffi`** (`cxx`): struct plano `HullWhiteCalibrationResult` + función
+   `calibrate_hull_white`, sin lógica propia (frontera aislada, igual que el resto de este
+   crate).
+3. **Registry C++** (`engine::MarketSnapshot`, `engine::ICalibrator`/`HullWhite1FCalibrator`,
+   `Registries::calibrators`) — la pieza que pedía explícitamente esta fase: "especialmente en
+   C++", porque es donde vive el concepto genérico (`ICalibrator`), no solo su única
+   implementación de hoy.
+4. **C ABI** (`engine/abi.h`/`abi.cpp`): `EngineMarketSnapshot` (pillars/zero_rates/count, el
+   mismo par de arrays plano) + `engine_abi_calibrate_hull_white`. **Deliberadamente sin
+   handle de calibrador ni `Registry<ICalibrator>` genérico a este nivel** (a diferencia de
+   model/product/measure, que sí lo tienen): con un solo calibrador implementado no hay
+   genericidad real que ganar todavía en la ABI pública — se añadirá cuando exista un segundo
+   calibrador, sin tener que rediseñar nada (la capa C++ ya es genérica).
+5. **Python** (nanobind): `engine.MarketSnapshot` (constructor + `synthetic_from_hull_white`
+   estático + `zero_rate`/`discount_factor`), `engine.Calibrator` (`Engine.list_calibrators`/
+   `create_calibrator`), `engine.CalibrationResult` (`optimal_params` como `dict`, igual
+   filosofía de "se siente de Python" que `dict_to_params` ya aplicaba a la entrada — nueva
+   función inversa `params_to_dict`).
+6. **Excel**: `ENGINE.LIST_CALIBRATORS`/`ENGINE.CREATE_CALIBRATOR`/`ENGINE.CALIBRATE`.
+   `ENGINE.CALIBRATE` no toma el mercado como handle (`MarketSnapshot` no tiene estado que
+   memoizar, se consume una sola vez por llamada): se pasa directamente como rango de **2
+   columnas sin clave por fila** (`xlbridge::table_to_market`, distinto del rango
+   clave/valor de `params`) — el resultado (`xlbridge::new_calibration_result`) "derrama" una
+   tabla clave/valor con los parámetros óptimos más `rmse`/`iterations`/`converged`, pensada
+   para pasarse tal cual a `ENGINE.CREATE_MODEL` (que ignora las claves que no reconoce).
+
+**Verificado con el mismo caso en las cinco capas** (`true_a=0.15`, `true_b=0.025`,
+`sigma=0.008`, `r0=0.02`, pillars de 0.5 a 30 años, estimación inicial `a=0.3, b=0.01`
+deliberadamente lejana): todas recuperan `a`/`b` dentro de `1e-4` del valor verdadero,
+`rmse < 1e-9`, `converged = true` — Rust (`cargo test`), C++ (`cpp/engine/tests/
+test_calibration.cpp`, incluido el *round-trip* hasta `Registry<IModel>::create`), la C ABI
+(`cpp/engine/tests/test_abi.cpp`), Python (`clients/python/tests/test_calibration.py`,
+incluido el mismo *round-trip* hasta `Engine.create_model`) y Excel (`clients/excel/tests/
+test_xloper.cpp`, vía `HandleRegistry::calibrate`).
+
 ---
 *Próxima iteración: confirmar en la práctica (no se pudo ejecutar GitHub Actions desde este
 entorno de desarrollo) que el job `build-installer` de `.github/workflows/release.yml` (§7.10)
@@ -1165,10 +1265,18 @@ Redist con nombre distinto en un toolset de CI más nuevo) que no había apareci
 verificación local. En cuanto exista verificación manual de Fase 4 con Excel real
 (`clients/excel/README.md`), completar la capa 4 de test de §5.6 marcándola como verificada de
 punta a punta, no solo parcial — aprovechar esa sesión para probar también `ENGINE.SET_BACKEND`/
-`ENGINE.GET_BACKEND` (§7.12) con Excel real, incluida la advertencia de recálculo manual. Con
-Fase 6 (§7.13) cerrada en su mecanismo pero no en su distribución: `engine/abi.h`/`engine_abi`
-no se publican todavía en ninguna release (§7.9 solo empaqueta la wheel y el `.xll`) — decidir
-si hace falta un artefacto propio (zip con `abi.h` + `engine_abi.dll` + `.lib` de import) antes
-de considerar la interoperabilidad externa "usable" por alguien fuera de este repo, no solo
-"implementada y testeada" dentro de él. CUDA (`burn-cuda`, §5.1) sigue abierto como backend
-adicional si algún día hiciera falta más rendimiento que `wgpu`.*
+`ENGINE.GET_BACKEND` (§7.12) y `ENGINE.CALIBRATE` (§7.14) con Excel real, incluida la
+advertencia de recálculo manual. Con Fase 6 (§7.13) cerrada en su mecanismo pero no en su
+distribución: `engine/abi.h`/`engine_abi` no se publican todavía en ninguna release (§7.9 solo
+empaqueta la wheel y el `.xll`) — decidir si hace falta un artefacto propio (zip con `abi.h` +
+`engine_abi.dll` + `.lib` de import) antes de considerar la interoperabilidad externa "usable"
+por alguien fuera de este repo, no solo "implementada y testeada" dentro de él. Sobre la Fase 7
+(§7.14): sigue pendiente todo lo que quedó fuera de alcance al cerrarla — bootstrapping de
+`MarketSnapshot` desde instrumentos de mercado crudos (depósitos, futuros, swaps) en vez de
+zero rates ya construidos; calibrar `sigma` contra instrumentos de volatilidad (swaptions,
+caps) en vez de dejarlo fijo; generalizar `engine_abi_calibrate_hull_white` a un
+`engine_abi_calibrate` genérico en cuanto exista un segundo `ICalibrator`; y, más en general,
+el resto de la lista de "qué faltaría para valorar un swap de verdad" (day count/calendarios/
+generación de calendario de pagos, multi-curva descuento vs. proyección, valoración a media
+vida de un swap que ya fijó su cupón actual). CUDA (`burn-cuda`, §5.1) sigue abierto como
+backend adicional si algún día hiciera falta más rendimiento que `wgpu`.*

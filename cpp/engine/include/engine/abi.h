@@ -139,6 +139,45 @@ ENGINE_ABI_API int engine_abi_set_compute_backend(const char* name); /* 1 ok, 0 
 ENGINE_ABI_API size_t engine_abi_get_compute_backend(char* buffer, size_t buffer_len);
 ENGINE_ABI_API int engine_abi_is_gpu_backend_available(void);
 
+/* --- Calibracion (PLAN.md §7.14) ---------------------------------------------------------
+ * Sin handle de calibrador ni Registry<ICalibrator> a este nivel (a diferencia de model/
+ * product/measure): con un solo calibrador implementado hoy (HullWhite1F) no hay genericidad
+ * real que ganar todavia con un engine_abi_create_calibrator/engine_abi_calibrate genericos
+ * -- se anadira cuando exista un segundo. La capa C++ (engine::ICalibrator, PLAN.md §7.14) SI
+ * es generica ya, esta funcion es su unica traduccion a esta ABI por ahora. */
+typedef struct EngineMarketSnapshot {
+    const double* pillars;    /* anios desde hoy, estrictamente creciente */
+    const double* zero_rates; /* tipos cero de capitalizacion continua, mismo largo */
+    size_t count;
+} EngineMarketSnapshot;
+
+typedef struct EngineHullWhiteCalibration {
+    double a;
+    double b;
+    double sigma; /* no se calibra: se devuelve tal cual se paso, ver engine_abi_calibrate_hull_white */
+    double r0;    /* no se calibra: se devuelve tal cual se paso */
+    double rmse;
+    int iterations;
+    int converged; /* 0 o 1 */
+} EngineHullWhiteCalibration;
+
+/* Calibra a/b de HullWhite1F a `market` por minimos cuadrados sobre el factor de descuento,
+ * partiendo de (initial_a, initial_b); sigma/r0 no se calibran (ver engine_core::calibration
+ * en el core Rust para el porque: sigma solo entra en el precio del bono cero-cupon como un
+ * efecto de segundo orden, mal identificado contra unicamente una curva de descuento).
+ * Devuelve 0 en exito (`*out_result` queda relleno) o != 0 en error (parametros invalidos --
+ * `market->count == 0`, pillars no creciente, initial_a <= 0 -- ver engine_abi_last_error;
+ * `*out_result` queda a cero). No hace falta liberar `*out_result`: son todo campos planos,
+ * sin punteros owned por la libreria. */
+ENGINE_ABI_API int engine_abi_calibrate_hull_white(
+    const EngineMarketSnapshot* market,
+    double initial_a,
+    double initial_b,
+    double sigma,
+    double r0,
+    EngineHullWhiteCalibration* out_result
+);
+
 /* --- Errores --------------------------------------------------------------------------
  * Mensaje de la ultima llamada de ESTE HILO (thread-local) a una funcion de este header que
  * fallo; cadena vacia si la ultima llamada tuvo exito. Misma convencion de buffer/longitud

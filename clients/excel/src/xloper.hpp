@@ -19,6 +19,8 @@
 #include <utility>
 #include <vector>
 
+#include "engine/calibrator.hpp"
+#include "engine/market.hpp"
 #include "engine/measure.hpp"
 #include "engine/params.hpp"
 
@@ -59,6 +61,12 @@ struct ParsedParams {
 };
 ParsedParams table_to_params(const XLOPER12& params_arg);
 
+// Rango de 2 columnas (col 0 = pillars, col 1 = zero_rates), sin clave por fila -- distinto
+// de table_to_params, que sí la tiene (PLAN.md §7.14: MarketSnapshot es dos vectores
+// paralelos, no un bag de parámetros con nombre). Filas con la columna de pillars en blanco
+// se ignoran.
+engine::MarketSnapshot table_to_market(const XLOPER12& market_arg);
+
 // --- Construcción de valores de retorno: todo lo que devuelve una UDF de engine_excel.cpp
 // se reserva en el heap y se marca xlbitDLLFree (PLAN.md Fase 4, §7.8: "todo lo que
 // devolvemos es propiedad de la DLL"), para que Excel llame de vuelta a xlAutoFree12
@@ -68,6 +76,13 @@ XLOPER12* new_num(double value);
 XLOPER12* new_str(const std::string& utf8);
 XLOPER12* new_string_column(const std::vector<std::string>& values);
 XLOPER12* new_measure_result(const engine::MeasureResult& result);
+
+// Tabla clave/valor (col 0 = clave, col 1.. = valor -- mismo formato que espera
+// table_to_params, para poder pasar directamente el resultado a ENGINE.CREATE_MODEL): los
+// parámetros óptimos (a/b/sigma/r0) más "rmse"/"iterations"/"converged" como filas de
+// diagnóstico -- ENGINE.CREATE_MODEL ignora las claves que no reconoce, así que el rango
+// devuelto por ENGINE.CALIBRATE se puede pasar tal cual como `params`.
+XLOPER12* new_calibration_result(const engine::CalibrationResult& result);
 
 // Envuelve el cuerpo de una UDF exportada: ninguna excepción de C++ puede cruzar la
 // frontera con Excel (comportamiento indefinido), así que toda UDF debe atraparlas y

@@ -11,6 +11,7 @@ HandleRegistry::HandleRegistry() { engine::register_builtins(registries_); }
 std::vector<std::string> HandleRegistry::list_models() const { return registries_.models.list(); }
 std::vector<std::string> HandleRegistry::list_products() const { return registries_.products.list(); }
 std::vector<std::string> HandleRegistry::list_measures() const { return registries_.measures.list(); }
+std::vector<std::string> HandleRegistry::list_calibrators() const { return registries_.calibrators.list(); }
 
 std::string HandleRegistry::create_model(const std::string& name, const XLOPER12& params_arg) {
     ParsedParams parsed = table_to_params(params_arg);
@@ -38,6 +39,14 @@ std::string HandleRegistry::create_measure(const std::string& name) {
     return handle;
 }
 
+std::string HandleRegistry::create_calibrator(const std::string& name) {
+    std::string handle = "calibrator:" + name;
+    if (calibrators_.find(handle) == calibrators_.end()) {
+        calibrators_.emplace(handle, registries_.calibrators.create(name));
+    }
+    return handle;
+}
+
 engine::MeasureResult HandleRegistry::evaluate(
     const std::string& measure_handle,
     const std::string& model_handle,
@@ -61,10 +70,24 @@ engine::MeasureResult HandleRegistry::evaluate(
     return measure_it->second->evaluate(*model_it->second, *product_it->second, parsed.params);
 }
 
+engine::CalibrationResult HandleRegistry::calibrate(
+    const std::string& calibrator_handle, const XLOPER12& market_arg, const XLOPER12& initial_guess_arg
+) const {
+    auto calibrator_it = calibrators_.find(calibrator_handle);
+    if (calibrator_it == calibrators_.end()) {
+        throw std::out_of_range("xlbridge: handle de calibrador desconocido: " + calibrator_handle);
+    }
+
+    engine::MarketSnapshot market = table_to_market(market_arg);
+    ParsedParams initial_guess = table_to_params(initial_guess_arg);
+    return calibrator_it->second->calibrate(market, initial_guess.params);
+}
+
 void HandleRegistry::clear() {
     models_.clear();
     products_.clear();
     measures_.clear();
+    calibrators_.clear();
 }
 
 HandleRegistry& shared() {
