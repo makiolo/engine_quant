@@ -1,8 +1,9 @@
 # XVA Engine — Plan de Arquitectura
 
 > Documento vivo. Se construye de forma incremental, sección a sección.
-> Estado: **v0.8 — Fase 4 completada (cliente Excel vía XLL sobre el registry C++) +
-> empaquetado/distribución (wheel Python + XLL autocontenidos, release automática en CI, ver §7.9)**
+> Estado: **v0.9 — Fase 4 completada (cliente Excel vía XLL sobre el registry C++) +
+> empaquetado/distribución (wheel Python + XLL autocontenidos, release automática en CI, §7.9)
+> + instalador Windows todo-en-uno (wizard .exe, §7.10)**
 
 ## 1. Visión
 
@@ -796,13 +797,138 @@ Todo el pipeline (sustitución de versión, `pip wheel` + `delvewheel repair`, y
 empaquetado en zip del `.xll`) se verificó localmente paso a paso con una versión de prueba
 antes de confiar en que funcionaría sin poder ejecutar GitHub Actions desde este entorno.
 
+**Confirmado en la práctica** (a diferencia del resto de esta fase, verificada solo en
+local): una release real ejecutada desde GitHub Actions construyó las ruedas de Python
+correctamente a la primera. El empaquetado del `.xll` falló la primera vez con un error real
+de CI que no se había visto en local — el runner tenía un toolset de Visual Studio más nuevo
+(14.51) cuya carpeta de `Redist` no se llama `Microsoft.VC143.CRT` como en el VS2022 14.44
+usado para probar esto en desarrollo (la ruta estaba fija en vez de buscarse); corregido
+sustituyendo la ruta fija por una búsqueda con `Get-ChildItem -Recurse` dentro de
+`VCToolsRedistDir` (con `VCToolsInstallDir` como segundo intento) que no depende de ese
+nombre de carpeta. Lección: por bien que se verifique cada paso en local, el entorno real de
+CI puede diferir de formas que solo aparecen al ejecutarlo de verdad — de ahí que el "próxima
+iteración" de más abajo siga recomendando confirmar en la práctica lo que no se pudo probar
+así.
+
+También se detectó (uso real, no en el desarrollo de esta fase) que `publish-release` se
+saltaba siempre al lanzar el workflow a mano (`workflow_dispatch`): esa condición solo miraba
+si el disparo era un `push` de un tag. Se añadió un job `determine-version` (calcula
+versión/tag/si-se-publica una única vez, consumido por el resto de jobs) y dos inputs nuevos
+de `workflow_dispatch` (`publish`, `version`) que permiten publicar una release real
+directamente desde la pestaña Actions sin tocar git en local — `softprops/action-gh-release`
+crea el tag `vX.Y.Z` correspondiente en el mismo paso. Python 3.14 añadido a la matriz de
+`build-wheels` en la misma revisión.
+
+### 7.10 Instalador Windows todo-en-uno (wizard `.exe`, Inno Setup)
+
+Motivación: incluso con wheel y `.xll` autocontenidos (§7.9), seguía haciendo falta saber
+qué hacer con cada uno (descomprimir un zip, ejecutar un script de PowerShell, saber en qué
+`python.exe` instalar la rueda si hay varios). Objetivo de esta fase: un único `.exe` de
+"siguiente, siguiente, instalar" que resuelva las dos cosas, con una casilla por componente
+(complemento de Excel / paquete de Python), y que una desinstalación o una actualización
+posterior deshaga o sustituya exactamente lo que instaló, sin dejar nada a medias.
+
+**Inno Setup** (no WiX/NSIS) — elegido por su sencillez para este caso (wizard con
+`[Components]` casi gratis, `[Run]`/`[UninstallRun]` para invocar los scripts de PowerShell
+ya existentes sin reimplementar su lógica en otro lenguaje) y por integrarse bien en CI:
+Chocolatey (preinstalado en los runners `windows-latest`) lo instala con una línea
+(`choco install innosetup`), y se compila con un compilador de línea de comandos
+(`ISCC.exe`).
+
+**Reutiliza los scripts de PowerShell existentes, no los reimplementa**: el `.iss`
+(`installer/EngineQuantSetup.iss`) es sobre todo empaquetado + un puñado de líneas `[Run]`/
+`[UninstallRun]` que invocan `clients/excel/install/Install-EngineExcelAddin.ps1` y el
+`Install-EngineWheels.ps1` nuevo de esta fase (ver más abajo) — la lógica de detección de
+Excel/Python vive en un único sitio cada una, testeable y usable también sin el instalador
+(zips manuales de §7.9). Retoque necesario en `Install-EngineExcelAddin.ps1`: nuevo
+parámetro `-Optional` para que, si la máquina no tiene Excel instalado, termine con éxito en
+vez de lanzar un error — antes solo se contemplaba el caso "Excel instalado y ya ejecutado
+alguna vez" (única situación probada manualmente en §7.8); el instalador no debe fallar
+entero solo porque no haya Excel. De paso, si Excel está instalado pero nunca se ha ejecutado
+en esa cuenta (la clave `HKCU\...\Excel\Options` aún no existe, solo se crea la primera vez
+que arranca), ahora se detecta la versión instalada vía `HKLM\...\Excel\InstallRoot`
+(nativo y `WOW6432Node`) y se crea esa clave para poder registrar el complemento igual —
+antes este caso también lanzaba un error.
+
+**`Install-EngineWheels.ps1`/`Uninstall-EngineWheels.ps1`** (`clients/python/install/`,
+nuevos en esta fase) — instalan/desinstalan la rueda en *todos* los intérpretes de Python de
+64 bits detectados, sin una lista fija de versiones que mantener:
+
+- Descubrimiento vía PEP 514 (`HKLM`/`HKCU\SOFTWARE\Python\PythonCore`, incluida la vista
+  `WOW6432Node` de 32 bits en un Windows de 64) — comprobado en una máquina real que
+  Miniconda también se registra ahí, no es exclusivo de los instaladores de python.org — más
+  el lanzador `py` (`py -0p`) como fuente complementaria si está presente, deduplicado por
+  ruta resuelta de `python.exe`.
+- Para cada candidato, se le pregunta *directamente* su versión y arquitectura
+  (`sys.version_info`, `struct.calcsize('P') * 8`) en vez de fiarse del nombre de la clave
+  del registro: una entrada obsoleta (detectada de verdad en la máquina de desarrollo, una
+  clave PEP 514 de un Python 3.7 ya desinstalado sin subclave `InstallPath`) se descarta sola
+  en vez de romper el resto.
+- Selección de rueda por nombre de fichero (`*-cp<major><minor>-cp<major><minor>-*.whl`): una
+  versión de Python nueva que aún no exista hoy funciona en cuanto la matriz de
+  `build-wheels` (§7.9) incluya su rueda, sin tocar este script.
+- `pip install --force-reinstall --no-deps` (instala) / `pip uninstall -y` (desinstala) sobre
+  cada intérprete, con un manifiesto (`installed_pythons.txt`, un `python.exe` por línea) que
+  recuerda en cuáles se instaló para que la desinstalación no tenga que repetir todo el
+  descubrimiento ni arriesgarse a tocar un intérprete que nunca lo tuvo.
+
+**`installer/EngineQuantSetup.iss`** — `AppId` fijo (generado una vez,
+`{C3C5CE8D-CE38-461E-A633-81B65EE77AE3}`, no cambia nunca entre releases): con el mismo
+`AppId`, instalar una versión más nueva sobre una ya instalada actualiza en el mismo sitio
+(Windows la reconoce como "la misma app", no crea una segunda entrada en Programas y
+características) en vez de necesitar desinstalar la anterior a mano primero — los propios
+pasos de instalación (idempotentes por diseño: `Install-EngineExcelAddin.ps1` ya lo era desde
+§7.8, `pip install --force-reinstall` también) sobrescriben correctamente lo anterior al
+volver a ejecutarse sobre los ficheros nuevos.
+
+**Bug real encontrado probando la actualización** (no algo evitado por diseño a priori): el
+nombre de fichero de la rueda incluye la versión (`engine_quant-1.2.3-...whl`), así que sin
+más, Inno Setup *añade* la rueda nueva junto a la antigua en vez de sustituirla (no borra
+ficheros que ya no aparecen en `[Files]` solo porque cambien de nombre) — y
+`Install-EngineWheels.ps1`, al encontrar dos ficheros que casan con el mismo `cp3XX`, se
+quedaba con el primero por orden alfabético, que resultó ser el *más antiguo*. Reproducido y
+corregido en desarrollo: sección `[InstallDelete]` que vacía `{app}\wheels`/`{app}\xll` antes
+de copiar los ficheros de la versión nueva. Verificado con un ciclo completo real (instalar
+9.9.9 → actualizar a 9.9.10 → `pip show engine-quant` daba `9.9.10`, un único fichero `.whl`
+en `{app}\wheels`, una única entrada en el registro de Programas y características con
+`DisplayVersion 9.9.10`) antes de dar el fix por bueno — sin este ciclo de prueba real el bug
+habría pasado desapercibido (compila y "funciona" en una instalación limpia igualmente).
+
+`PrivilegesRequired=admin` (hace falta para poder instalar en cualquier intérprete detectado,
+algunos solo escribibles como administrador) combinado con `Flags: runascurrentuser` en los
+pasos `[Run]`/`[UninstallRun]` (para que el registro de Excel en `HKCU` y los intérpretes
+"solo para mí" del usuario operen sobre el perfil del usuario real, no sobre el token elevado
+de administrador). `[Components]` (Excel / Python, ambos marcados por defecto) da la casilla
+de selección casi gratis, sin código adicional.
+
+**`.github/workflows/release.yml`** — nuevo job `build-installer` (tras `build-wheels`/
+`build-xll`): descarga las N ruedas (`merge-multiple`, todas a una misma carpeta —
+`Install-EngineWheels.ps1` elige la que corresponda en tiempo de instalación, no hace falta
+elegir aquí) y el zip del `.xll` (descomprimido a `installer\payload\xll`), copia los scripts
+de `clients/python/install/`, instala Inno Setup vía Chocolatey y compila con
+`ISCC.exe /DMyAppVersion=<version>`. `publish-release` adjunta también este `.exe` a la
+release.
+
+**Verificado en local, ciclo completo real** (instalación limpia, actualización 9.9.9→9.9.10,
+desinstalación completa — los tres verificados leyendo el registro/el disco antes y después,
+no solo confiando en el código de salida): compila con `ISCC.exe`; una instalación limpia dejó
+`engine-quant` importable en el intérprete de Miniconda detectado en la máquina de desarrollo
+y el complemento de Excel correctamente registrado en `HKCU\...\Excel\Options`; la
+actualización sustituyó la rueda y no duplicó la entrada de Programas y características tras
+corregir el bug de `[InstallDelete]` descrito arriba; la desinstalación completa dejó la
+máquina exactamente como al principio (paquete no importable, clave de Excel eliminada,
+carpetas de `%LOCALAPPDATA%`/`Program Files` limpias, entrada de Programas y características
+eliminada).
+
 ---
-*Próxima iteración: confirmar en la práctica que `.github/workflows/release.yml` (§7.9)
-funciona empujando un primer tag `v0.1.0` (no pudo ejecutarse GitHub Actions desde este
-entorno de desarrollo, solo verificarse cada paso por separado en local) y, con eso resuelto,
-arrancar Fase 5 — backend GPU (§6): ejercitar en serio el alias `GpuBackend` (`burn-wgpu`, ya
-presente tras la feature `gpu` de `engine-core` desde Fase 1, §5.1) con benchmarks reales
-sobre el caso IRS+Hull-White de §5.2, decidiendo si conviene activarlo por defecto o dejarlo
-opcional. En cuanto exista verificación manual de Fase 4 con Excel real
-(`clients/excel/README.md`), completar la capa 4 de test de §5.6 marcándola como verificada
-de punta a punta, no solo parcial.*
+*Próxima iteración: confirmar en la práctica (no se pudo ejecutar GitHub Actions desde este
+entorno de desarrollo) que el job `build-installer` de `.github/workflows/release.yml` (§7.10)
+compila y publica `engine_quant_setup.exe` en una release real, con la misma cautela que en
+§7.9: la primera ejecución real del pipeline de wheel+xll ya reveló un problema (carpeta de
+Redist con nombre distinto en un toolset de CI más nuevo) que no había aparecido en ninguna
+verificación local. Con eso resuelto, arrancar Fase 5 — backend GPU (§6): ejercitar en serio
+el alias `GpuBackend` (`burn-wgpu`, ya presente tras la feature `gpu` de `engine-core` desde
+Fase 1, §5.1) con benchmarks reales sobre el caso IRS+Hull-White de §5.2, decidiendo si
+conviene activarlo por defecto o dejarlo opcional. En cuanto exista verificación manual de
+Fase 4 con Excel real (`clients/excel/README.md`), completar la capa 4 de test de §5.6
+marcándola como verificada de punta a punta, no solo parcial.*
