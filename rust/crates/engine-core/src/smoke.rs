@@ -50,7 +50,7 @@ pub fn hull_white_zero_coupon_bond_delta_r0(a: f64, b: f64, sigma: f64, r0: f64,
 /// los dos factores latentes en su valor inicial (`x_0 = y_0 = 0`, de ahí que esta función solo
 /// tome `t=0` implícitamente vía el propio `HullWhite2F::zero_coupon_bond` con estado nulo) --
 /// equivalente de dos factores de `hull_white_zero_coupon_bond`, usado por
-/// `crate::market::MarketSnapshot::synthetic_from_hull_white_2f` para fabricar un mercado sin
+/// `crate::curve::Curve::synthetic_from_hull_white_2f` para fabricar una curva sin
 /// depender de datos reales, igual que ya hace la versión de 1 factor.
 #[allow(clippy::too_many_arguments)]
 pub fn hull_white_2f_zero_coupon_bond(a: f64, b: f64, sigma: f64, eta: f64, rho: f64, r0: f64, maturity: f64) -> f64 {

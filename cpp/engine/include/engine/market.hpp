@@ -6,25 +6,74 @@
 
 namespace engine {
 
-// Snapshot inmutable de una curva de mercado observada -- o fabricada, ver
-// synthetic_from_hull_white -- en un instante dado (PLAN.md §7.14/§7.15): pillars (años desde
-// hoy, estrictamente crecientes) + zero_rates (tipos cero de capitalización continua), los
-// mismos dos vectores paralelos que ya usa engine::ffi::HullWhiteCalibrationResult por debajo
-// (PLAN.md §5.5: "structs planos"). Es solo datos, como Params -- no una jerarquía
-// polimórfica: que el mercado sea "falso" o "real" es una cuestión de de dónde salen los
-// números (fabricados aquí mismo, leídos de un fichero/feed en el futuro), no de un tipo C++
-// distinto.
+// Curva de descuento inmutable (PLAN.md §7.20): pillars (años desde hoy, estrictamente
+// crecientes) + zero_rates (tipos cero de capitalización continua), los mismos dos vectores
+// paralelos que ya usa engine::ffi::HullWhiteCalibrationResult por debajo (PLAN.md §5.5:
+// "structs planos"). Extraído de MarketSnapshot -- que lo compone via discount_curve() -- porque
+// es el único dato que consume la calibración (calibrator.cpp) y el único que tiene semántica de
+// interpolación propia; hazard_rate/recovery_rate son datos de crédito sin relación con esto.
 //
-// `hazard_rate`/`recovery_rate` (PLAN.md §7.15, añadidos junto con `ENGINE.CALC`): datos de
-// crédito observables, opcionales (default 0.0 -- "sin riesgo de default"), que solo consume
-// `UnilateralCvaMeasure`. Encajan en `Market` por la misma razón que `pillars`/`zero_rates`:
-// son observables desde fuera del `Trade`, no parámetros del modelo ni del producto.
-class MarketSnapshot {
+// Renombrado desde lo que antes era el propio MarketSnapshot (PLAN.md §7.14): "mercado" incluía
+// datos de crédito, pero pillars/zero_rates son estrictamente una curva de descuento -- Curve es
+// el nombre exacto.
+class Curve {
 public:
     // Lanza std::invalid_argument si pillars/zero_rates no tienen el mismo tamaño, están
     // vacíos, o pillars no es estrictamente creciente (zero_rate()/discount_factor()
     // interpolan linealmente entre pillars consecutivos: sin este invariante no tiene
     // sentido).
+    Curve(std::vector<double> pillars, std::vector<double> zero_rates);
+
+    const std::vector<double>& pillars() const { return pillars_; }
+    const std::vector<double>& zero_rates() const { return zero_rates_; }
+
+    // Tipo cero interpolado linealmente entre los pillars que rodean a t, con extrapolación
+    // plana fuera de rango; discount_factor() es exp(-zero_rate(t) * t).
+    double zero_rate(double t) const;
+    double discount_factor(double t) const;
+
+    // Curva "falsa" (PLAN.md §7.14): fabrica una Curve leyendo la propia fórmula cerrada de
+    // HullWhite1F (engine::hull_white_zero_coupon_bond) en los pillars dados -- útil para
+    // probar/demostrar calibración sin depender de datos de mercado reales (round-trip:
+    // generar con unos parámetros conocidos, calibrar desde otra estimación inicial,
+    // comprobar que se recuperan).
+    static Curve synthetic_from_hull_white(
+        double a, double b, double sigma, double r0, const std::vector<double>& pillars
+    );
+
+    // Equivalente de dos factores de synthetic_from_hull_white (PLAN.md §7.16/§7.18): fabrica
+    // una Curve leyendo la propia fórmula cerrada de HullWhite2F
+    // (engine::hull_white_2f_zero_coupon_bond, factores latentes en su valor inicial) en los
+    // pillars dados.
+    static Curve synthetic_from_hull_white_2f(
+        double a, double b, double sigma, double eta, double rho, double r0, const std::vector<double>& pillars
+    );
+
+private:
+    std::vector<double> pillars_;
+    std::vector<double> zero_rates_;
+};
+
+// Snapshot inmutable de un mercado observado -- o fabricado, ver synthetic_from_hull_white --
+// en un instante dado (PLAN.md §7.14/§7.15): compone una Curve de descuento (PLAN.md §7.20) más
+// datos de crédito. Es solo datos, como Params -- no una jerarquía polimórfica: que el mercado
+// sea "falso" o "real" es una cuestión de de dónde salen los números (fabricados aquí mismo,
+// leídos de un fichero/feed en el futuro), no de un tipo C++ distinto.
+//
+// `hazard_rate`/`recovery_rate` (PLAN.md §7.15, añadidos junto con `ENGINE.CALC`): datos de
+// crédito observables, opcionales (default 0.0 -- "sin riesgo de default"), que solo consume
+// `UnilateralCvaMeasure`. Encajan en `Market` por la misma razón que `pillars`/`zero_rates`:
+// son observables desde fuera del `Trade`, no parámetros del modelo ni del producto.
+//
+// Composición, no herencia (PLAN.md §7.20): el constructor público y los accessors planos
+// (pillars/zero_rates/zero_rate/discount_factor) se mantienen sin cambios -- delegan en
+// discount_curve() -- para no romper Python/Excel/C ABI/tests existentes; discount_curve() es
+// el único punto nuevo, y calibrator.cpp lo usa explícitamente para dejar claro que la
+// calibración nunca toca datos de crédito.
+class MarketSnapshot {
+public:
+    // Lanza std::invalid_argument si pillars/zero_rates no tienen el mismo tamaño, están
+    // vacíos, o pillars no es estrictamente creciente (delegado en Curve).
     MarketSnapshot(
         std::vector<double> pillars, std::vector<double> zero_rates,
         double hazard_rate = 0.0, double recovery_rate = 0.0
@@ -36,40 +85,33 @@ public:
     // opcionales, default 0.0 si están ausentes.
     explicit MarketSnapshot(const Params& params);
 
-    const std::vector<double>& pillars() const { return pillars_; }
-    const std::vector<double>& zero_rates() const { return zero_rates_; }
+    const Curve& discount_curve() const { return discount_curve_; }
+
+    const std::vector<double>& pillars() const { return discount_curve_.pillars(); }
+    const std::vector<double>& zero_rates() const { return discount_curve_.zero_rates(); }
     double hazard_rate() const { return hazard_rate_; }
     double recovery_rate() const { return recovery_rate_; }
 
-    // Tipo cero interpolado linealmente entre los pillars que rodean a t, con extrapolación
-    // plana fuera de rango; discount_factor() es exp(-zero_rate(t) * t).
-    double zero_rate(double t) const;
-    double discount_factor(double t) const;
+    double zero_rate(double t) const { return discount_curve_.zero_rate(t); }
+    double discount_factor(double t) const { return discount_curve_.discount_factor(t); }
 
-    // Mercado "falso" (PLAN.md §7.14): fabrica un MarketSnapshot leyendo la propia fórmula
-    // cerrada de HullWhite1F (engine::hull_white_zero_coupon_bond) en los pillars dados --
-    // útil para probar/demostrar calibración sin depender de datos de mercado reales
-    // (round-trip: generar con unos parámetros conocidos, calibrar desde otra estimación
-    // inicial, comprobar que se recuperan). `hazard_rate`/`recovery_rate` opcionales, default
-    // 0.0 (calibración no los usa; solo relevantes si además se quiere ejercitar CVA sobre
-    // este mismo mercado fabricado).
+    // Mercado "falso" (PLAN.md §7.14): fabrica un MarketSnapshot cuya Curve reproduce la
+    // propia fórmula cerrada de HullWhite1F en los pillars dados. `hazard_rate`/`recovery_rate`
+    // opcionales, default 0.0 (calibración no los usa; solo relevantes si además se quiere
+    // ejercitar CVA sobre este mismo mercado fabricado).
     static MarketSnapshot synthetic_from_hull_white(
         double a, double b, double sigma, double r0, const std::vector<double>& pillars,
         double hazard_rate = 0.0, double recovery_rate = 0.0
     );
 
-    // Equivalente de dos factores de synthetic_from_hull_white (PLAN.md §7.16/§7.18): fabrica
-    // un MarketSnapshot leyendo la propia fórmula cerrada de HullWhite2F
-    // (engine::hull_white_2f_zero_coupon_bond, factores latentes en su valor inicial) en los
-    // pillars dados.
+    // Equivalente de dos factores (PLAN.md §7.16/§7.18) de synthetic_from_hull_white.
     static MarketSnapshot synthetic_from_hull_white_2f(
         double a, double b, double sigma, double eta, double rho, double r0, const std::vector<double>& pillars,
         double hazard_rate = 0.0, double recovery_rate = 0.0
     );
 
 private:
-    std::vector<double> pillars_;
-    std::vector<double> zero_rates_;
+    Curve discount_curve_;
     double hazard_rate_;
     double recovery_rate_;
 };

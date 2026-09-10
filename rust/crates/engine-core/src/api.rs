@@ -928,7 +928,7 @@ pub fn irs_hull_white_2f_npv_delta_r0_batch(
 /// Calibra `a`/`b` de `HullWhite1F` a una curva de mercado (`pillars`/`zero_rates`, mismo
 /// largo, `pillars` estrictamente creciente) partiendo de `(initial_a, initial_b)`; `sigma`/
 /// `r0` no se calibran, ver `crate::calibration` para el porqué. Traduce
-/// `crate::market::MarketSnapshot` (que ya es `f64` puro) a esta frontera solo para mantener
+/// `crate::curve::Curve` (que ya es `f64` puro) a esta frontera solo para mantener
 /// la misma convención que el resto de `crate::api`: un único punto por el que `engine-ffi`
 /// entra al core.
 pub fn calibrate_hull_white(
@@ -939,8 +939,8 @@ pub fn calibrate_hull_white(
     sigma: f64,
     r0: f64,
 ) -> crate::calibration::HullWhiteCalibrationResult {
-    let market = crate::market::MarketSnapshot::new(pillars, zero_rates);
-    crate::calibration::calibrate_hull_white(&market, initial_a, initial_b, sigma, r0)
+    let curve = crate::curve::Curve::new(pillars, zero_rates);
+    crate::calibration::calibrate_hull_white(&curve, initial_a, initial_b, sigma, r0)
 }
 
 /// Equivalente de dos factores de `calibrate_hull_white` (PLAN.md §7.18): calibra `a`/`b` de
@@ -957,8 +957,8 @@ pub fn calibrate_hull_white_2f(
     rho: f64,
     r0: f64,
 ) -> crate::calibration::HullWhite2FCalibrationResult {
-    let market = crate::market::MarketSnapshot::new(pillars, zero_rates);
-    crate::calibration::calibrate_hull_white_2f(&market, initial_a, initial_b, sigma, eta, rho, r0)
+    let curve = crate::curve::Curve::new(pillars, zero_rates);
+    crate::calibration::calibrate_hull_white_2f(&curve, initial_a, initial_b, sigma, eta, rho, r0)
 }
 
 #[cfg(test)]
@@ -1413,9 +1413,9 @@ mod tests {
     fn calibrate_hull_white_recovers_known_parameters() {
         let (true_a, true_b, sigma, r0) = (0.15, 0.025, 0.008, 0.02);
         let pillars = vec![1.0, 2.0, 5.0, 10.0, 20.0];
-        let market = crate::market::MarketSnapshot::synthetic_from_hull_white(true_a, true_b, sigma, r0, pillars.clone());
+        let curve = crate::curve::Curve::synthetic_from_hull_white(true_a, true_b, sigma, r0, pillars.clone());
 
-        let result = calibrate_hull_white(pillars, market.zero_rates().to_vec(), 0.3, 0.01, sigma, r0);
+        let result = calibrate_hull_white(pillars, curve.zero_rates().to_vec(), 0.3, 0.01, sigma, r0);
 
         assert!(result.converged, "no convergió: rmse={}", result.rmse);
         assert!((result.a - true_a).abs() < 1e-4);
@@ -1426,10 +1426,10 @@ mod tests {
     fn calibrate_hull_white_2f_recovers_known_parameters() {
         let (true_a, true_b, sigma, eta, rho, r0) = (0.15, 0.25, 0.008, 0.01, -0.6, 0.02);
         let pillars = vec![1.0, 2.0, 5.0, 10.0, 20.0];
-        let market =
-            crate::market::MarketSnapshot::synthetic_from_hull_white_2f(true_a, true_b, sigma, eta, rho, r0, pillars.clone());
+        let curve =
+            crate::curve::Curve::synthetic_from_hull_white_2f(true_a, true_b, sigma, eta, rho, r0, pillars.clone());
 
-        let result = calibrate_hull_white_2f(pillars, market.zero_rates().to_vec(), 0.4, 0.05, sigma, eta, rho, r0);
+        let result = calibrate_hull_white_2f(pillars, curve.zero_rates().to_vec(), 0.4, 0.05, sigma, eta, rho, r0);
 
         assert!(result.converged, "no convergió: rmse={}", result.rmse);
         assert!((result.a - true_a).abs() < 1e-4);

@@ -330,9 +330,9 @@ mod ffi {
             recovery_rate: f64,
         ) -> Vec<f64>;
 
-        // Calibración de mercado (PLAN.md §7.14): pillars/zero_rates es el MarketSnapshot en
+        // Calibración de mercado (PLAN.md §7.14, §7.20): pillars/zero_rates es la Curve en
         // su forma más plana (dos vectores paralelos, PLAN.md §5.5), ver
-        // `engine_core::market`/`engine_core::calibration`.
+        // `engine_core::curve`/`engine_core::calibration`.
         fn calibrate_hull_white(
             pillars: Vec<f64>,
             zero_rates: Vec<f64>,
@@ -357,8 +357,8 @@ mod ffi {
 
         // Precio del bono cero-cupón de HullWhite2F con los dos factores latentes en su valor
         // inicial (PLAN.md §7.18) -- equivalente de dos factores de
-        // hull_white_zero_coupon_bond, usado por engine::MarketSnapshot::
-        // synthetic_from_hull_white_2f en C++ para fabricar un mercado sin datos reales.
+        // hull_white_zero_coupon_bond, usado por engine::Curve::synthetic_from_hull_white_2f
+        // en C++ (PLAN.md §7.20) para fabricar una curva sin datos reales.
         fn hull_white_2f_zero_coupon_bond(a: f64, b: f64, sigma: f64, eta: f64, rho: f64, r0: f64, maturity: f64) -> f64;
     }
 }

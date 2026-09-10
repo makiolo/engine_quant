@@ -1,5 +1,5 @@
-//! Calibración de modelos a un `crate::market::MarketSnapshot`: encontrar los parámetros que
-//! mejor reproducen ese mercado, en vez de elegirlos a mano (PLAN.md §5.2 documentaba esto
+//! Calibración de modelos a una `crate::curve::Curve`: encontrar los parámetros que
+//! mejor la reproducen, en vez de elegirlos a mano (PLAN.md §5.2 documentaba esto
 //! como la limitación deliberada de `HullWhite1F`: "un `theta(t)` calibrado... exigiría
 //! infraestructura de calibración" — esta es esa infraestructura, aunque calibra parámetros
 //! constantes, no un `theta(t)` completo que ajuste la curva exactamente).
@@ -30,7 +30,7 @@
 //! de volatilidad. En la práctica de mercado, la volatilidad (y la correlación, en un modelo
 //! multi-factor) de un modelo de tipo corto se calibra contra instrumentos de volatilidad
 //! (swaptions, caps) — fuera de alcance de esta iteración (no hay ese tipo de instrumento en
-//! `MarketSnapshot` todavía). `a`/`b` sí están bien identificados por la curva (determinan
+//! `Curve` todavía). `a`/`b` sí están bien identificados por la curva (determinan
 //! directamente su forma y su nivel de largo plazo) y calibran de forma robusta en ambos
 //! modelos.
 //!
@@ -49,7 +49,7 @@
 //! reparametrización) permanece en cada función pública, no en el optimizador.
 
 use crate::backend::{Autodiff, CpuBackend};
-use crate::market::MarketSnapshot;
+use crate::curve::Curve;
 use crate::models::hull_white::HullWhite1F;
 use crate::models::hull_white_2f::HullWhite2F;
 use burn::tensor::{Tensor, TensorData};
@@ -168,7 +168,7 @@ fn levenberg_marquardt_2p(
 }
 
 /// Parámetros óptimos de un `HullWhite1F` que mejor reproducen (en mínimos cuadrados sobre el
-/// factor de descuento) un `MarketSnapshot`, más diagnóstico del ajuste. `sigma`/`r0` no se
+/// factor de descuento) una `Curve`, más diagnóstico del ajuste. `sigma`/`r0` no se
 /// calibran (ver documentación del módulo): se devuelven tal cual se pasaron a
 /// `calibrate_hull_white`, para que el resultado sea directamente los cuatro parámetros que
 /// espera `HullWhite1F::new`/`ENGINE.CREATE_MODEL("HullWhite1F", ...)`.
@@ -238,13 +238,13 @@ fn discount_factors_2f(a: f64, b: f64, sigma: f64, eta: f64, rho: f64, r0: f64, 
         .collect()
 }
 
-/// Calibra `a`/`b` de `HullWhite1F` a `market` por mínimos cuadrados sobre el factor de
+/// Calibra `a`/`b` de `HullWhite1F` a `curve` por mínimos cuadrados sobre el factor de
 /// descuento en cada pillar, partiendo de `(initial_a, initial_b)`. `sigma`/`r0` no se
 /// calibran (ver documentación del módulo): entran como datos fijos, igual que en
 /// `HullWhite1F::new`. `initial_a` debe ser estrictamente positivo (se reparametriza
 /// internamente sobre su logaritmo, ver documentación del módulo).
 pub fn calibrate_hull_white(
-    market: &MarketSnapshot,
+    curve: &Curve,
     initial_a: f64,
     initial_b: f64,
     sigma: f64,
@@ -253,8 +253,8 @@ pub fn calibrate_hull_white(
     assert!(initial_a > 0.0, "initial_a debe ser positivo");
 
     let device = Device::default();
-    let pillars = market.pillars().to_vec();
-    let market_prices: Vec<f64> = pillars.iter().map(|&t| market.discount_factor(t)).collect();
+    let pillars = curve.pillars().to_vec();
+    let market_prices: Vec<f64> = pillars.iter().map(|&t| curve.discount_factor(t)).collect();
 
     let price_fn = |p: [f64; 2]| discount_factors(p[0].exp(), p[1], sigma, r0, &pillars);
     let residuals_and_jacobian_fn = |p: [f64; 2]| -> (Vec<f64>, Vec<[f64; 2]>) {
@@ -295,7 +295,7 @@ pub fn calibrate_hull_white(
 }
 
 /// Calibra `a`/`b` de `HullWhite2F` (las velocidades de reversión de los dos factores
-/// latentes) a `market` por mínimos cuadrados sobre el factor de descuento en cada pillar,
+/// latentes) a `curve` por mínimos cuadrados sobre el factor de descuento en cada pillar,
 /// partiendo de `(initial_a, initial_b)`. `sigma`/`eta`/`rho`/`r0` no se calibran (ver
 /// documentación del módulo): entran como datos fijos, igual que en `HullWhite2F::new`.
 /// `initial_a`/`initial_b` deben ser estrictamente positivos (ambos se reparametrizan
@@ -303,7 +303,7 @@ pub fn calibrate_hull_white(
 /// parámetros libres son velocidades de reversión, no un nivel de largo plazo).
 #[allow(clippy::too_many_arguments)]
 pub fn calibrate_hull_white_2f(
-    market: &MarketSnapshot,
+    curve: &Curve,
     initial_a: f64,
     initial_b: f64,
     sigma: f64,
@@ -315,8 +315,8 @@ pub fn calibrate_hull_white_2f(
     assert!(initial_b > 0.0, "initial_b debe ser positivo");
 
     let device = Device::default();
-    let pillars = market.pillars().to_vec();
-    let market_prices: Vec<f64> = pillars.iter().map(|&t| market.discount_factor(t)).collect();
+    let pillars = curve.pillars().to_vec();
+    let market_prices: Vec<f64> = pillars.iter().map(|&t| curve.discount_factor(t)).collect();
 
     let price_fn = |p: [f64; 2]| discount_factors_2f(p[0].exp(), p[1].exp(), sigma, eta, rho, r0, &pillars);
     let residuals_and_jacobian_fn = |p: [f64; 2]| -> (Vec<f64>, Vec<[f64; 2]>) {
@@ -371,11 +371,11 @@ mod tests {
     fn calibration_recovers_known_parameters_from_a_synthetic_market() {
         let (true_a, true_b, sigma, r0) = (0.15, 0.025, 0.008, 0.02);
         let pillars = vec![0.5, 1.0, 2.0, 3.0, 5.0, 7.0, 10.0, 15.0, 20.0, 30.0];
-        let market = MarketSnapshot::synthetic_from_hull_white(true_a, true_b, sigma, r0, pillars);
+        let curve = Curve::synthetic_from_hull_white(true_a, true_b, sigma, r0, pillars);
 
         // Estimación inicial deliberadamente lejos de los parámetros "verdaderos" -- si el
         // optimizador solo funcionase partiendo ya del óptimo, no probaría gran cosa.
-        let result = calibrate_hull_white(&market, 0.3, 0.01, sigma, r0);
+        let result = calibrate_hull_white(&curve, 0.3, 0.01, sigma, r0);
 
         assert!(result.converged, "no convergió: rmse={} iterations={}", result.rmse, result.iterations);
         assert!(result.rmse < 1e-9, "rmse demasiado alto: {}", result.rmse);
@@ -390,9 +390,9 @@ mod tests {
         // Punto de partida = óptimo: debe detectar convergencia casi de inmediato (rmse ~ 0
         // ya en la primera evaluación, antes de iterar).
         let (a, b, sigma, r0) = (0.1, 0.03, 0.01, 0.02);
-        let market = MarketSnapshot::synthetic_from_hull_white(a, b, sigma, r0, vec![1.0, 5.0, 10.0]);
+        let curve = Curve::synthetic_from_hull_white(a, b, sigma, r0, vec![1.0, 5.0, 10.0]);
 
-        let result = calibrate_hull_white(&market, a, b, sigma, r0);
+        let result = calibrate_hull_white(&curve, a, b, sigma, r0);
 
         assert!(result.converged);
         assert!(result.rmse < 1e-9);
@@ -406,8 +406,8 @@ mod tests {
         // a b ~= r0 -- el tipo corto no tiene por qué revertir a ningún otro sitio si la curva
         // ya está en su nivel de largo plazo. Caso de mercado "fabricado a mano" directo, no
         // vía `synthetic_from_hull_white`.
-        let market = MarketSnapshot::new(vec![1.0, 5.0, 10.0, 20.0], vec![0.03, 0.03, 0.03, 0.03]);
-        let result = calibrate_hull_white(&market, 0.1, 0.01, 0.01, 0.03);
+        let curve = Curve::new(vec![1.0, 5.0, 10.0, 20.0], vec![0.03, 0.03, 0.03, 0.03]);
+        let result = calibrate_hull_white(&curve, 0.1, 0.01, 0.01, 0.03);
 
         assert!(result.rmse < 1e-6, "ajuste demasiado pobre: rmse={}", result.rmse);
         assert!((result.b - 0.03).abs() < 1e-3, "b={} esperado~0.03", result.b);
@@ -417,11 +417,11 @@ mod tests {
     fn calibration_2f_recovers_known_parameters_from_a_synthetic_market() {
         let (true_a, true_b, sigma, eta, rho, r0) = (0.15, 0.25, 0.008, 0.01, -0.6, 0.02);
         let pillars = vec![0.5, 1.0, 2.0, 3.0, 5.0, 7.0, 10.0, 15.0, 20.0, 30.0];
-        let market = MarketSnapshot::synthetic_from_hull_white_2f(true_a, true_b, sigma, eta, rho, r0, pillars);
+        let curve = Curve::synthetic_from_hull_white_2f(true_a, true_b, sigma, eta, rho, r0, pillars);
 
         // Estimación inicial deliberadamente lejos de los parámetros "verdaderos", igual que
         // el test equivalente de HullWhite1F.
-        let result = calibrate_hull_white_2f(&market, 0.4, 0.05, sigma, eta, rho, r0);
+        let result = calibrate_hull_white_2f(&curve, 0.4, 0.05, sigma, eta, rho, r0);
 
         assert!(result.converged, "no convergió: rmse={} iterations={}", result.rmse, result.iterations);
         assert!(result.rmse < 1e-9, "rmse demasiado alto: {}", result.rmse);
@@ -436,9 +436,9 @@ mod tests {
     #[test]
     fn calibration_2f_from_the_true_parameters_is_already_converged() {
         let (a, b, sigma, eta, rho, r0) = (0.1, 0.2, 0.01, 0.012, -0.7, 0.03);
-        let market = MarketSnapshot::synthetic_from_hull_white_2f(a, b, sigma, eta, rho, r0, vec![1.0, 5.0, 10.0]);
+        let curve = Curve::synthetic_from_hull_white_2f(a, b, sigma, eta, rho, r0, vec![1.0, 5.0, 10.0]);
 
-        let result = calibrate_hull_white_2f(&market, a, b, sigma, eta, rho, r0);
+        let result = calibrate_hull_white_2f(&curve, a, b, sigma, eta, rho, r0);
 
         assert!(result.converged);
         assert!(result.rmse < 1e-9);

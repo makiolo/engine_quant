@@ -1892,6 +1892,60 @@ calc_batch`), la sección nueva de `cpp/engine/examples/abi_c_smoke.c` (lote de 
 — los tres reproducen exactamente los mismos PV por trade (`9625.35`, `82701.41`, `-6914.93`
 para el caso de referencia usado en los tres), confirmando consistencia entre capas.
 
+## 7.20 `Curve` por composición dentro de `MarketSnapshot`
+
+### Motivación
+
+Pregunta del usuario al revisar §7.19: ¿no debería `MarketSnapshot` llamarse `Curve`? En Rust
+(`engine_core::market::MarketSnapshot`) la respuesta es que el tipo nunca tuvo datos de
+crédito -- `hazard_rate`/`recovery_rate` solo existen en la capa C++ -- así que el nombre
+describía más de lo que el tipo hacía de verdad; es una corrección de nombre, no una
+composición nueva. En C++ sí hay algo que componer: `engine::MarketSnapshot` mezcla en un solo
+tipo la curva de descuento (`pillars`/`zero_rates` + interpolación + fábricas sintéticas) con
+datos de crédito observables (`hazard_rate`/`recovery_rate`) que no tienen relación con la
+interpolación. El usuario pidió extraer esa curva como un objeto `Curve` propio que
+`MarketSnapshot` use por composición.
+
+### Diseño
+
+**Rust**: renombrado puro. `crates/engine-core/src/market.rs` → `src/curve.rs`,
+`MarketSnapshot` → `Curve`, sin cambios de campos/métodos/comportamiento. Propagado a
+`calibration.rs` (firmas `calibrate_hull_white(_2f)?(curve: &Curve, ...)`), `api.rs` (wrappers
+`f64` y sus tests), `smoke.rs`, `engine-ffi/src/lib.rs` (comentarios) y
+`examples/calibrate_models.rs` -- todos los tests renombrados (`market`/`MarketSnapshot` →
+`curve`/`Curve`) sin tocar ninguna aserción.
+
+**C++**: composición real, no renombrado. `engine::Curve` (nuevo, `market.hpp`/`.cpp`): mismos
+`pillars()`/`zero_rates()`/`zero_rate()`/`discount_factor()`/`synthetic_from_hull_white(_2f)?`
+que antes vivían en `MarketSnapshot`, ahora aquí. `engine::MarketSnapshot` pasa a componer
+`Curve discount_curve_` + `hazard_rate_`/`recovery_rate_`; su constructor público, el
+constructor desde `Params`, y los accessors planos (`pillars()`, `zero_rates()`, `zero_rate()`,
+`discount_factor()`, `hazard_rate()`, `recovery_rate()`) se mantienen **sin cambios** --
+delegan en `discount_curve_` -- para no romper Python/Excel/C ABI/tests existentes; el único
+punto nuevo es el accessor `discount_curve()`. La C ABI (`engine/abi.h`) **no** gana un struct
+`Curve` anidado -- deliberado, `EngineMarketSnapshot` sigue siendo un struct plano
+(PLAN.md §5.5), la composición es un detalle interno de la capa C++ que la ABI no necesita
+reflejar.
+
+**Bonus de la composición** (no el motivo original, pero confirma que vale la pena):
+`calibrator.cpp` pasa a llamar `market.discount_curve().pillars()`/`.zero_rates()` en vez de
+`market.pillars()`/`market.zero_rates()` -- el propio código de calibración deja explícito que
+nunca toca datos de crédito, algo que antes solo se podía inferir leyendo el cuerpo de la
+función.
+
+### Verificación
+
+Rust: `cargo build --workspace` + `cargo test --workspace --locked`, 67 tests `engine-core` +
+5 AAD en verde, mismos conteos que §7.19 (renombrado puro, sin tests nuevos ni perdidos). C++:
+`cpp/engine/tests/test_calibration.cpp` gana ocho tests `Curve.*` (construcción, interpolación,
+extrapolación, ambas fábricas sintéticas) más `Market.DiscountCurveExposesTheSameCurveUsedInternally`
+(confirma que `discount_curve()` expone exactamente la misma curva que los accessors planos ya
+exponían); los `Market.*` existentes se mantienen literalmente iguales y siguen en verde,
+ejercitando la nueva composición sin saberlo. `cmake --build build --config Release` + `ctest -C
+Release` (106 tests, todos en verde, sobre los 98 de §7.19) sin regresiones. Python: import y
+uso manual de `engine.MarketSnapshot` desde el `.pyd` reconstruido confirma que
+`pillars`/`zero_rates`/`discount_factor` siguen funcionando sin cambios en la API expuesta.
+
 ---
 *Próxima iteración: confirmar en la práctica (no se pudo ejecutar GitHub Actions desde este
 entorno de desarrollo) que el job `build-installer` de `.github/workflows/release.yml` (§7.10)
@@ -1953,4 +2007,10 @@ solo se agrupa por calendario, con un único tipo de producto); extender el ejem
 `calc_batch` a los otros cuatro lenguajes de `examples/abi/` (mismo pendiente que ya señalaba
 §7.18 para calibración); y medir si vectorizar de verdad compensa en la práctica (mismo
 benchmark pendiente que ya señalaba §7.17, ahora con las cinco medidas en lote disponibles
-para medirlo, no solo `PV`).*
+para medirlo, no solo `PV`). Sobre la Fase 7.20 (`Curve` por composición): sigue pendiente
+exponer `Curve` como bloque reutilizable fuera de `MarketSnapshot` en las capas por encima de
+C++ (Python/Excel/C ABI siguen exponiendo solo el `MarketSnapshot` compuesto, nunca `Curve` por
+separado) -- deliberado por ahora (nadie pidió construir/calibrar una curva sin datos de
+crédito desde esas capas), pero a revisar si `Curve` acaba necesitando reutilizarse fuera de
+`MarketSnapshot` (p.ej. una curva de proyección distinta de la de descuento, mencionada como
+pendiente en la Fase 7.15).*

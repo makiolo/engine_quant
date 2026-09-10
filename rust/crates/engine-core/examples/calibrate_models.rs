@@ -1,6 +1,6 @@
 //! Ejemplo de la capa Rust (PLAN.md §7.18): calibra los dos modelos del motor --
-//! `HullWhite1F` y `HullWhite2F`/G2++ -- a un `MarketSnapshot` fabricado (no hay datos de
-//! mercado reales en este árbol todavía, ver `MarketSnapshot::synthetic_from_hull_white*`),
+//! `HullWhite1F` y `HullWhite2F`/G2++ -- a una `Curve` fabricada (no hay datos de
+//! mercado reales en este árbol todavía, ver `Curve::synthetic_from_hull_white*`),
 //! partiendo de una estimación inicial deliberadamente alejada de los parámetros "verdaderos",
 //! y usa el `CalibrationResult` de cada uno para reconstruir el modelo ya calibrado -- cerrando
 //! el círculo Mercado -> calibrar -> Modelo, igual que hacen los tests de las cinco capas
@@ -9,7 +9,7 @@
 //! `cargo run -p engine-core --example calibrate_models`
 
 use engine_core::calibration::{calibrate_hull_white, calibrate_hull_white_2f};
-use engine_core::market::MarketSnapshot;
+use engine_core::curve::Curve;
 use engine_core::models::hull_white::HullWhite1F;
 use engine_core::models::hull_white_2f::HullWhite2F;
 
@@ -18,9 +18,9 @@ fn main() {
 
     // --- HullWhite1F: calibra (a, b); sigma/r0 son datos de entrada (PLAN.md §7.18). ---
     let (true_a, true_b, sigma, r0) = (0.15, 0.025, 0.008, 0.02);
-    let market_1f = MarketSnapshot::synthetic_from_hull_white(true_a, true_b, sigma, r0, pillars.clone());
+    let curve_1f = Curve::synthetic_from_hull_white(true_a, true_b, sigma, r0, pillars.clone());
 
-    let result_1f = calibrate_hull_white(&market_1f, /* initial_a */ 0.3, /* initial_b */ 0.01, sigma, r0);
+    let result_1f = calibrate_hull_white(&curve_1f, /* initial_a */ 0.3, /* initial_b */ 0.01, sigma, r0);
     println!(
         "HullWhite1F: a={:.6} b={:.6} rmse={:.3e} iterations={} converged={}",
         result_1f.a, result_1f.b, result_1f.rmse, result_1f.iterations, result_1f.converged
@@ -42,11 +42,11 @@ fn main() {
     // son datos de entrada -- distinto subconjunto que HullWhite1F (PLAN.md §7.18: en G2++ "b"
     // es una velocidad de reversión, no un nivel de largo plazo). ---
     let (true_a_2f, true_b_2f, sigma_2f, eta_2f, rho_2f, r0_2f) = (0.15, 0.25, 0.008, 0.01, -0.6, 0.02);
-    let market_2f =
-        MarketSnapshot::synthetic_from_hull_white_2f(true_a_2f, true_b_2f, sigma_2f, eta_2f, rho_2f, r0_2f, pillars);
+    let curve_2f =
+        Curve::synthetic_from_hull_white_2f(true_a_2f, true_b_2f, sigma_2f, eta_2f, rho_2f, r0_2f, pillars);
 
     let result_2f = calibrate_hull_white_2f(
-        &market_2f, /* initial_a */ 0.4, /* initial_b */ 0.05, sigma_2f, eta_2f, rho_2f, r0_2f,
+        &curve_2f, /* initial_a */ 0.4, /* initial_b */ 0.05, sigma_2f, eta_2f, rho_2f, r0_2f,
     );
     println!(
         "HullWhite2F: a={:.6} b={:.6} rmse={:.3e} iterations={} converged={}",

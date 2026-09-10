@@ -8,9 +8,9 @@
 pub mod api;
 pub mod backend;
 pub mod calibration;
+pub mod curve;
 pub mod exposure;
 pub mod kernel;
-pub mod market;
 pub mod models;
 pub mod products;
 pub mod smoke;

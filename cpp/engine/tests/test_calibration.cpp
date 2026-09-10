@@ -15,12 +15,77 @@
 
 namespace {
 
+using engine::Curve;
 using engine::MarketSnapshot;
 using engine::Params;
 using engine::Registries;
 using engine::register_builtins;
 
 } // namespace
+
+// Tests de Curve (PLAN.md §7.20): la curva de descuento que MarketSnapshot compone --
+// pillars/zero_rates + interpolación + fábricas sintéticas, sin datos de crédito.
+
+TEST(Curve, DiscountFactorMatchesContinuousCompoundingFormula) {
+    Curve curve({1.0, 2.0}, {0.02, 0.02});
+    double expected = std::exp(-0.02 * 2.0);
+    EXPECT_NEAR(curve.discount_factor(2.0), expected, 1e-12);
+}
+
+TEST(Curve, ZeroRateInterpolatesLinearlyBetweenPillars) {
+    Curve curve({1.0, 2.0, 5.0}, {0.02, 0.03, 0.04});
+    EXPECT_NEAR(curve.zero_rate(1.0), 0.02, 1e-12);
+    EXPECT_NEAR(curve.zero_rate(2.0), 0.03, 1e-12);
+    EXPECT_NEAR(curve.zero_rate(3.5), 0.035, 1e-12); // a mitad de camino entre 2.0 y 5.0
+}
+
+TEST(Curve, ZeroRateExtrapolatesFlatOutsidePillars) {
+    Curve curve({1.0, 5.0}, {0.02, 0.04});
+    EXPECT_NEAR(curve.zero_rate(0.1), 0.02, 1e-12);
+    EXPECT_NEAR(curve.zero_rate(10.0), 0.04, 1e-12);
+}
+
+TEST(Curve, ConstructorRejectsMismatchedLengths) {
+    EXPECT_THROW(Curve({1.0, 2.0}, {0.02}), std::invalid_argument);
+}
+
+TEST(Curve, ConstructorRejectsNonIncreasingPillars) {
+    EXPECT_THROW(Curve({1.0, 1.0}, {0.02, 0.03}), std::invalid_argument);
+}
+
+TEST(Curve, SyntheticFromHullWhiteReproducesTheModelsOwnPrices) {
+    double a = 0.1, b = 0.03, sigma = 0.01, r0 = 0.02;
+    std::vector<double> pillars{1.0, 2.0, 5.0, 10.0};
+    Curve curve = Curve::synthetic_from_hull_white(a, b, sigma, r0, pillars);
+
+    for (double t : pillars) {
+        double expected = engine::hull_white_zero_coupon_bond(a, b, sigma, r0, 0.0, t);
+        EXPECT_NEAR(curve.discount_factor(t), expected, 1e-9) << "t=" << t;
+    }
+}
+
+TEST(Curve, SyntheticFromHullWhite2fReproducesTheModelsOwnPrices) {
+    double a = 0.1, b = 0.2, sigma = 0.01, eta = 0.012, rho = -0.7, r0 = 0.03;
+    std::vector<double> pillars{1.0, 2.0, 5.0, 10.0};
+    Curve curve = Curve::synthetic_from_hull_white_2f(a, b, sigma, eta, rho, r0, pillars);
+
+    for (double t : pillars) {
+        double expected = engine::hull_white_2f_zero_coupon_bond(a, b, sigma, eta, rho, r0, t);
+        EXPECT_NEAR(curve.discount_factor(t), expected, 1e-9) << "t=" << t;
+    }
+}
+
+// MarketSnapshot.DiscountCurveExposesTheSameCurveUsedInternally (PLAN.md §7.20): confirma que
+// discount_curve() no es solo un accessor decorativo -- es exactamente la curva que
+// pillars()/zero_rates()/zero_rate()/discount_factor() ya exponían antes de la composición.
+TEST(Market, DiscountCurveExposesTheSameCurveUsedInternally) {
+    MarketSnapshot market({1.0, 2.0, 5.0}, {0.02, 0.03, 0.04}, /* hazard_rate */ 0.01, /* recovery_rate */ 0.4);
+
+    EXPECT_EQ(market.discount_curve().pillars(), market.pillars());
+    EXPECT_EQ(market.discount_curve().zero_rates(), market.zero_rates());
+    EXPECT_NEAR(market.discount_curve().zero_rate(3.5), market.zero_rate(3.5), 1e-12);
+    EXPECT_NEAR(market.discount_curve().discount_factor(3.5), market.discount_factor(3.5), 1e-12);
+}
 
 TEST(Market, DiscountFactorMatchesContinuousCompoundingFormula) {
     MarketSnapshot market({1.0, 2.0}, {0.02, 0.02});

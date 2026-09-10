@@ -21,8 +21,11 @@ CalibrationResult HullWhite1FCalibrator::calibrate(const MarketSnapshot& market,
     double sigma = get_double(initial_guess, "sigma");
     double r0 = get_double(initial_guess, "r0");
 
+    // PLAN.md §7.20: via discount_curve() en vez de market.pillars()/market.zero_rates() --
+    // deja explícito que la calibración nunca toca hazard_rate/recovery_rate.
+    const Curve& curve = market.discount_curve();
     ffi::HullWhiteCalibrationResult raw = ffi::calibrate_hull_white(
-        to_rust_vec(market.pillars()), to_rust_vec(market.zero_rates()), initial_a, initial_b, sigma, r0
+        to_rust_vec(curve.pillars()), to_rust_vec(curve.zero_rates()), initial_a, initial_b, sigma, r0
     );
 
     CalibrationResult result;
@@ -46,8 +49,10 @@ CalibrationResult HullWhite2FCalibrator::calibrate(const MarketSnapshot& market,
     double rho = get_double(initial_guess, "rho");
     double r0 = get_double(initial_guess, "r0");
 
+    // PLAN.md §7.20: via discount_curve(), ver comentario equivalente en HullWhite1FCalibrator.
+    const Curve& curve = market.discount_curve();
     ffi::HullWhite2FCalibrationResult raw = ffi::calibrate_hull_white_2f(
-        to_rust_vec(market.pillars()), to_rust_vec(market.zero_rates()), initial_a, initial_b, sigma, eta, rho, r0
+        to_rust_vec(curve.pillars()), to_rust_vec(curve.zero_rates()), initial_a, initial_b, sigma, eta, rho, r0
     );
 
     CalibrationResult result;
