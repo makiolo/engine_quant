@@ -1,301 +1,275 @@
+<div align="center">
+
 # Engine Quant
 
-<pre>
-  _______  _______  _______  _______  _______  _______  _______
- |   _   ||   _   ||   _   ||   _   ||   _   ||   _   ||   _   |
- |  | |  ||  | |  ||  | |  ||  | |  ||  | |  ||  | |  ||  | |  |
- |  |_|  ||  |_|  ||  |_|  ||  |_|  ||  |_|  ||  |_|  ||  |_|  |
- |       ||       ||       ||       ||       ||       ||       |
- |  _   | |  _   ||  _   ||  _   ||  _   ||  _   ||  _   ||  _   |
- | | |  || | |  || | |  || | |  || | |  || | |  || | |  || | |  |
- | |_|  || |_|  || |_|  || |_|  || |_|  || |_|  || |_|  || |_|  |
- |_______||_______||_______||_______||_______||_______||_______|
- </pre>
+**One XVA engine. Rust numerics. Consistent APIs for Python, C++, C, and Excel.**
 
-Engine Quant is a research-oriented XVA engine for pricing and risk analytics across interest-rate products, exposure curves, and counterparty credit adjustments.
+[![CI](https://github.com/makiolo/engine_quant/actions/workflows/ci.yml/badge.svg)](https://github.com/makiolo/engine_quant/actions/workflows/ci.yml)
+[![Rust 1.97.1](https://img.shields.io/badge/Rust-1.97.1-000000?logo=rust)](rust/rust-toolchain.toml)
+[![Python 3.9+](https://img.shields.io/badge/Python-3.9%2B-3776AB?logo=python&logoColor=white)](pyproject.toml)
+[![C++17](https://img.shields.io/badge/C%2B%2B-17-00599C?logo=cplusplus)](CMakeLists.txt)
 
-The core idea is simple:
+Research-oriented pricing, exposure, and counterparty-credit analytics built around a
+single registry-driven domain model.
 
-- one model, one product, one measure registry
-- the same semantics everywhere: Python, Excel, and C++
-- a Rust numerical core, a C++ orchestration layer, and thin clients on top
+</div>
 
-This project is intentionally designed around the idea that a new product or model should be registered once and then become available to all frontends without re-implementing logic in each client.
+> [!IMPORTANT]
+> Engine Quant is an active research prototype, not a production-ready risk system. Its
+> current scope is deliberately narrow: short-rate models, vanilla interest-rate swaps,
+> exposure profiles, and unilateral CVA.
 
-## Why this project exists
+## Why Engine Quant?
 
-Most quant libraries focus on either:
+Quant engines often grow into separate implementations for notebooks, spreadsheets, and
+production services. Engine Quant keeps the business semantics in one place:
 
-- a single language, or
-- a product-specific calculator, or
-- a pricing engine that is hard to extend
+- models, products, measures, and calibrators are registered centrally;
+- Python, Excel, C++, and the public C ABI consume the same C++ orchestration layer;
+- compute-intensive pricing and Monte Carlo kernels live in Rust;
+- related measures can be calculated together and share the same simulation.
 
-Engine Quant tries to be different.
+The result is one vocabulary and one calculation path across every client.
 
-It aims to unify three layers that are often separated in financial software:
+## Current capabilities
 
-1. numerical engine: fast Monte Carlo / tensor-based pricing kernels
-2. domain layer: models, products, measures, and XVA registries
-3. interface layer: Python notebooks, Excel, and future stable C ABI integrations
+| Area | Implemented |
+| --- | --- |
+| Models | `HullWhite1F`; `HullWhite2F` / G2++ |
+| Products | Vanilla interest-rate swap (`IRSwap`), par or explicit fixed rate |
+| Measures | `PV`, `DV01`, `ExpectedExposure`, `PFE95`, `UnilateralCVA` |
+| Calibration | Registry-based calibrators for both short-rate models, using damped Gauss-Newton and AAD Jacobians |
+| Compute | Burn tensor backend; CPU by default; opt-in WGPU backend |
+| Clients | Python extension, Excel XLL, native C++ API, and versioned C ABI |
+| Distribution | Windows wheels, Excel add-in package, and all-in-one Inno Setup installer produced by the release workflow |
 
-The deliberate goal is not just to “price one swap.”
-The goal is to create a reusable XVA platform where the business logic is centralized and clients stay thin.
+`Engine.calc(...)` accepts a batch of measure names. `ExpectedExposure` and `PFE95`, for
+example, reuse one exposure simulation rather than running Monte Carlo twice.
 
-## Architecture at a glance
+## Architecture
 
 ```text
-┌──────────────────────────────────────────────────────────┐
-│ Clients                                                  │
-│  Python / Jupyter   Excel / XLL   Future C ABI clients   │
-└───────────────────────┬──────────────────────────────────┘
-                        │
-┌───────────────────────▼──────────────────────────────────┐
-│ C++ orchestration layer                                  │
-│ - model registry                                          │
-│ - product registry                                       │
-│ - measure registry                                       │
-│ - API uniform across clients                              │
-└───────────────────────┬──────────────────────────────────┘
-                        │ FFI
-┌───────────────────────▼──────────────────────────────────┐
-│ Rust core                                                │
-│ - Burn tensor backend                                     │
-│ - Monte Carlo / analytic kernels                          │
-│ - differentiation-ready numerics                         │
-└──────────────────────────────────────────────────────────┘
+┌────────────────────┐  ┌────────────────────┐  ┌────────────────────┐
+│ Python / Jupyter   │  │ Excel XLL          │  │ C ABI consumers    │
+│ nanobind module    │  │ worksheet UDFs     │  │ C/Rust/Python/...  │
+└─────────┬──────────┘  └─────────┬──────────┘  └─────────┬──────────┘
+          └───────────────────────┼───────────────────────┘
+                                  ▼
+              ┌───────────────────────────────────────┐
+              │ C++17 domain and orchestration layer │
+              │ registries · contexts · batched calc │
+              └───────────────────┬───────────────────┘
+                                  │ cxx bridge
+                                  ▼
+              ┌───────────────────────────────────────┐
+              │ Rust numerical core                   │
+              │ pricing · Monte Carlo · AAD · Burn   │
+              └───────────────────────────────────────┘
 ```
 
-## What it already does
+The public C ABI is intentionally separate from the internal Rust/C++ `cxx` bridge. It
+exposes flat, versioned types and opaque handles so other languages can consume the engine
+without depending on C++ classes or nanobind.
 
-This repo is not a finished production platform yet; it is a deliberately staged architecture experiment and prototype.
+## Quick start with Python
 
-The current implementation focuses on a core use case:
-
-- two short-rate models: Hull-White 1-factor and Hull-White 2-factor (G2++)
-- interest rate swap (IRS) product
-- exposure profile, PV/DV01, and unilateral CVA metrics
-- a calibrator per model (`HullWhite1F`/`HullWhite2F`), fitting model parameters to a
-  `MarketSnapshot` (real or fabricated) by damped Gauss-Newton with an AAD-computed Jacobian
-- Python and C++ access through the same registry abstraction
-- Excel XLL support in the same design philosophy
-
-In other words, it already demonstrates the “single source of truth” principle:
-
-- the model is defined once
-- the product is defined once
-- the measure is defined once
-- the same registry can be consumed by multiple clients
-
-## The core idea in one sentence
-
-Build an XVA engine where product logic is registered once in a C++ domain layer, while Rust handles the heavy numerical work and Python/Excel only expose the same API semantics to users.
-
-## Why the design matters
-
-In a real XVA workflow, the issue is not only pricing an IRS at a point in time.
-The real challenge is to compose:
-
-- models
-- products
-- exposure profiles
-- CVA/DVA/FVA/MVA/KVA metrics
-- sensitivities
-- client-facing interfaces without duplicating business logic
-
-This project is structured around that problem.
-
-## Example: exposure profile + CVA
-
-The repository already includes a model/product/measure flow such as this:
-
-```python
-import engine
-
-eng = engine.Engine()
-
-model = eng.create_model("HullWhite1F", {
-    "a": 0.1,
-    "b": 0.03,
-    "sigma": 0.01,
-    "r0": 0.02,
-})
-
-product = eng.create_product("IRSwap", {
-    "notional": 1_000_000.0,
-    "payment_times": [1.0, 2.0, 3.0, 4.0, 5.0],
-    "accruals": [1.0, 1.0, 1.0, 1.0, 1.0],
-})
-
-market = engine.MarketSnapshot(pillars=[1.0, 2.0], zero_rates=[0.02, 0.02], hazard_rate=0.02, recovery_rate=0.4)
-pricing = engine.PricingContext({"pricing_date": 0.0, "n_paths": 5000.0, "n_steps": 208.0, "seed": 7.0})
-execution = engine.ExecutionContext({"backend": "auto", "precision": "FP64"})
-
-result = eng.calc(product, ["PV", "DV01", "ExpectedExposure", "PFE95", "UnilateralCVA"], model, market, pricing, execution)
-
-print(result["UnilateralCVA"].scalar)
-# ~ 503.64
-print(result["ExpectedExposure"].primary)   # expected exposure (EE), per auto-derived reset date
-print(result["PFE95"].primary)              # PFE 95%
-```
-
-That is not just a toy example: it captures a realistic XVA workflow in a compact, testable shape — a batch of related measures (PV, DV01, expected exposure, PFE, CVA) computed together against the same trade/model/market/pricing/execution context, sharing the underlying Monte Carlo simulation where possible.
-
-This is exactly the kind of data used to estimate CVA, exposure management limits, and counterparty risk over time.
-
-## Example: calibration
-
-Instead of picking model parameters by hand, a calibrator fits them to a `MarketSnapshot` —
-here a fabricated one (`synthetic_from_hull_white*`), useful for testing/demoing calibration
-without depending on real market data. `Engine.create_calibrator`/`Calibrator.calibrate` are
-fully generic by name, exactly like `create_model`/`create_product`: adding `HullWhite2F`'s
-calibrator required zero changes to this API surface, only a new registration in C++
-`bootstrap.cpp`.
-
-```python
-import engine
-
-eng = engine.Engine()
-
-# HullWhite1F: calibrates (a, b); sigma/r0 stay fixed inputs.
-market_1f = engine.MarketSnapshot.synthetic_from_hull_white(a=0.15, b=0.025, sigma=0.008, r0=0.02,
-                                                             pillars=[0.5, 1, 2, 3, 5, 7, 10, 15, 20, 30])
-calibrator_1f = eng.create_calibrator("HullWhite1F")
-result_1f = calibrator_1f.calibrate(market_1f, {"a": 0.3, "b": 0.01, "sigma": 0.008, "r0": 0.02})
-model_1f = eng.create_model("HullWhite1F", result_1f.optimal_params)  # Market -> calibrate -> Model
-
-# HullWhite2F/G2++: calibrates (a, b), the two mean-reversion speeds; sigma/eta/rho/r0 fixed.
-market_2f = engine.MarketSnapshot.synthetic_from_hull_white_2f(a=0.15, b=0.25, sigma=0.008, eta=0.01,
-                                                                rho=-0.6, r0=0.02,
-                                                                pillars=[0.5, 1, 2, 3, 5, 7, 10, 15, 20, 30])
-calibrator_2f = eng.create_calibrator("HullWhite2F")
-result_2f = calibrator_2f.calibrate(market_2f, {"a": 0.4, "b": 0.05, "sigma": 0.008, "eta": 0.01, "rho": -0.6, "r0": 0.02})
-model_2f = eng.create_model("HullWhite2F", result_2f.optimal_params)
-
-print(result_1f.rmse, result_1f.converged)
-print(result_2f.rmse, result_2f.converged)
-```
-
-The two calibrators are not the same code with renamed fields: `HullWhite1F`'s `b` is a
-long-run level (any sign), while `HullWhite2F`'s `b` is the second factor's mean-reversion
-speed (must be positive, like `a`) — each calibrator reparametrizes only what it needs to keep
-the optimizer unconstrained. Same story in the C ABI: `engine_abi_create_calibrator("HullWhite2F")`
-+ `engine_abi_calibrate(...)` reuse the exact same generic handle-based calls as the model above
-it, and in Excel: `ENGINE.CREATE_CALIBRATOR("HullWhite2F")` + `ENGINE.CALIBRATE(...)`.
-
-## Example: Excel
-
-The project consciously keeps the same semantics in Excel as in Python.
-
-Conceptually:
-
-```excel
-Trade    = ENGINE.CREATE_PRODUCT("IRSwap", SwapParams)
-Model    = ENGINE.CREATE_MODEL("HullWhite1F", HullWhiteParams)
-Market   = ENGINE.CREATE_MARKET(MarketParams)
-Pricing  = ENGINE.CREATE_CONTEXT(PricingParams)
-Compute  = ENGINE.CREATE_EXECUTION(ExecutionParams)
-         = ENGINE.CALC(Trade, {"PV";"DV01";"ExpectedExposure";"PFE95";"UnilateralCVA"}, Model, Market, Pricing, Compute)
-```
-
-The idea is that a trader or quant should not need a different mental model when switching from a notebook to a spreadsheet. The same model/product/measure registry should power both frontends.
-
-## Technology stack
-
-- Rust: numerical core and tensor-based computation
-- Burn: backend abstraction for vectorized computation and autodiff
-- C++: domain orchestration and registry architecture
-- nanobind: Python bindings
-- Excel XLL: spreadsheet integration
-- CMake + Corrosion: build orchestration
-
-## Current status
-
-This repo is in an active prototype phase. The direction is clear and the architecture is intentionally disciplined:
-
-- core numerical layer in Rust
-- registry-first domain design in C++
-- multiple clients consuming the same public API
-- focus on real XVA concepts: exposure, CVA, and model/product extensibility
-
-This is not a polished commercial product yet, but it is a strong engineering foundation for one.
-
-## Roadmap
-
-The project plan in `PLAN.md` outlines a progressive roadmap:
-
-- phase 0: build skeleton and end-to-end smoke tests
-- phase 1: Rust numerical core with Hull-White + IRS + CVA
-- phase 2: C++ registry and measures
-- phase 3: Python client
-- phase 4: Excel XLL client
-- phase 5: GPU backend (`burn-wgpu`) benchmarked on the IRS+Hull-White case; kept opt-in
-  behind the `gpu` feature (see `PLAN.md` §7.11) rather than default, since it only pays off
-  above ~100k Monte Carlo paths (`PLAN.md` §7.12, superseded by `ExecutionContext` in §7.15 —
-  see below)
-- phase 6: universal API as a flat, versioned C ABI (`cpp/engine/include/engine/abi.h`) —
-  the same registry surface Python/Excel already consume, for languages with C FFI (Julia,
-  .NET, Go, ...) without going through `cxx`/nanobind. Verified with GoogleTest and a pure-C
-  smoke program, plus standalone C++/Rust/Python examples under `examples/abi/`; not yet
-  published as its own release artifact (`PLAN.md` §7.13)
-- phase 7: `MarketSnapshot` (a market curve, real or fabricated) and a new `ICalibrator`
-  registry — calibrates `HullWhite1F`'s `a`/`b` to a curve by damped Gauss-Newton using the
-  autodiff already built for sensitivities (§5.3), across all five layers: Rust, the C++
-  registry, the C ABI, Python, and Excel (`PLAN.md` §7.14)
-- phase 7.15: public API redesign — explicit `Market`/`PricingContext`/`ExecutionContext`
-  objects and a single `ENGINE.CALC` batching PV/DV01/ExpectedExposure/PFE95/UnilateralCVA in
-  one call, replacing the old `CREATE_MEASURE`+`EVALUATE` pair and the global backend state of
-  phase 5, across all five layers (`PLAN.md` §7.15)
-- phase 7.16: second model, Hull-White 2-factor (G2++) — a `ShortRateModel` trait unifies
-  both models in Rust so `IrSwap`/`ENGINE.CALC` never special-case which one they're pricing
-  (`PLAN.md` §7.16)
-- phase 7.17: three levels of a future batch-calculation API (scalar / heterogeneous vector /
-  homogeneous batch) — only the Rust-level homogeneous batch is implemented so far, ahead of a
-  second real product (`PLAN.md` §7.17)
-- phase 7.18: second calibrator, for `HullWhite2F` — a different parameter subset than
-  `HullWhite1F`'s (both mean-reversion speeds vs. speed + long-run level), plus generalizing
-  the C ABI's calibration surface from a `HullWhite1F`-specific function to a generic
-  handle-based `engine_abi_create_calibrator`/`engine_abi_calibrate` (ABI version bumped to 3),
-  across all five layers (`PLAN.md` §7.18)
-- future phases: broader XVA metrics, more products
-
-## Why this might get attention
-
-Because it solves a real engineering pain point:
-
-- quant libraries often become language-specific or product-specific
-- XVA workflows are complex and iterative
-- finance teams need the same model logic in notebooks, Excel, and production tooling
-
-Engine Quant is trying to build that “single engine, multiple clients” experience from the start.
-
-## Build and experimentation
-
-This repository is organized for local experimentation and iterative architecture work.
-
-Typical flow:
+Building the Python extension from source requires Git, CMake 3.24+, Ninja, a C++17
+toolchain, Rust/rustup, and Python 3.9+.
 
 ```bash
 git clone https://github.com/makiolo/engine_quant.git
 cd engine_quant
-cmake -S . -B build -G Ninja
-cmake --build build
+python -m pip install .
 ```
 
-The repo already contains Python tests and a registry-driven usage pattern; the project is designed to evolve from this prototype into a more complete XVA platform.
+Then create a model, trade, market, and explicit calculation contexts:
+
+```python
+import engine
+
+eng = engine.Engine()
+
+model = eng.create_model(
+    "HullWhite1F",
+    {"a": 0.10, "b": 0.03, "sigma": 0.01, "r0": 0.02},
+)
+
+# Omitting fixed_rate creates a par swap under the selected model.
+trade = eng.create_product(
+    "IRSwap",
+    {
+        "notional": 1_000_000.0,
+        "payment_times": [1.0, 2.0, 3.0, 4.0, 5.0],
+        "accruals": [1.0, 1.0, 1.0, 1.0, 1.0],
+    },
+)
+
+market = engine.MarketSnapshot(
+    pillars=[1.0, 2.0],
+    zero_rates=[0.02, 0.02],
+    hazard_rate=0.02,
+    recovery_rate=0.40,
+)
+pricing = engine.PricingContext(
+    {"pricing_date": 0.0, "n_paths": 5_000, "n_steps": 208, "seed": 7}
+)
+execution = engine.ExecutionContext({"backend": "auto", "precision": "FP64"})
+
+results = eng.calc(
+    trade,
+    ["PV", "DV01", "ExpectedExposure", "PFE95", "UnilateralCVA"],
+    model,
+    market,
+    pricing,
+    execution,
+)
+
+print(results["PV"].scalar)
+print(results["ExpectedExposure"].times)
+print(results["ExpectedExposure"].primary)
+print(results["UnilateralCVA"].scalar)
+```
+
+Discover the registered surface at runtime with `list_models()`, `list_products()`,
+`list_measures()`, and `list_calibrators()`.
+
+## Calibration
+
+Calibrators use the same registry pattern as models and products. Their output can be
+passed directly to `create_model`:
+
+```python
+pillars = [0.5, 1.0, 2.0, 3.0, 5.0, 7.0, 10.0]
+market = engine.MarketSnapshot.synthetic_from_hull_white(
+    a=0.15,
+    b=0.025,
+    sigma=0.008,
+    r0=0.02,
+    pillars=pillars,
+)
+
+calibrator = eng.create_calibrator("HullWhite1F")
+fit = calibrator.calibrate(
+    market,
+    {"a": 0.30, "b": 0.01, "sigma": 0.008, "r0": 0.02},
+)
+calibrated_model = eng.create_model("HullWhite1F", fit.optimal_params)
+
+print(fit.rmse, fit.iterations, fit.converged)
+```
+
+The one-factor calibrator fits `a` and `b`; `sigma` and `r0` remain fixed. The two-factor
+calibrator fits the two mean-reversion speeds (`a` and `b`), while `sigma`, `eta`, `rho`,
+and `r0` remain fixed. The synthetic-market helpers exist for deterministic examples and
+tests; they are not a substitute for a real calibration instrument set.
+
+## Build and test from source
+
+The repository pins Rust `1.97.1`. When rustup is installed, Cargo picks it up from
+`rust/rust-toolchain.toml` automatically.
+
+### Rust core
+
+```bash
+cargo test --manifest-path rust/Cargo.toml --workspace --locked
+```
+
+The GPU feature is kept opt-in. It can be compile-checked without a physical GPU:
+
+```bash
+cargo check --manifest-path rust/Cargo.toml \
+  -p engine-core --features gpu --locked --examples
+```
+
+### Full CMake stack
+
+```bash
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build build
+ctest --test-dir build --output-on-failure -C Release
+```
+
+The default build includes C++ tests and, on Windows, the Excel XLL. Useful options are:
+
+| CMake option | Default | Purpose |
+| --- | --- | --- |
+| `ENGINE_QUANT_BUILD_TESTS` | `ON` | Build C++ and Excel bridge tests |
+| `ENGINE_QUANT_BUILD_EXCEL` | `ON` | Build the Excel client on Windows |
+| `ENGINE_QUANT_ENABLE_GPU` | `OFF` | Compile the WGPU backend |
+
+To run the Python checks against the module produced in `build/clients/python`:
+
+```bash
+python clients/python/tests/test_smoke.py build/clients/python
+python clients/python/tests/test_registry.py build/clients/python
+python clients/python/tests/test_calc.py build/clients/python
+python clients/python/tests/test_calibration.py build/clients/python
+```
+
+CI runs the Rust suite on Linux and the complete CMake, C++, C ABI, Python, and Excel-XLL
+harness suite on Windows. The XLL harness loads the compiled add-in without requiring Excel
+to be installed.
+
+## Clients and examples
+
+- [Python package notes](clients/python/README_PYPI.md)
+- [Python calculation example](clients/python/examples/README.md)
+- [Jupyter notebook notes](clients/python/notebooks/README.md)
+- [Excel XLL guide](clients/excel/README.md)
+- [Excel add-in installation](clients/excel/install/README.md)
+- [C ABI examples in C, C++, Rust, ctypes, and cffi](examples/abi/README.md)
+- [Windows all-in-one installer](installer/README.md)
+
+Excel exposes the same object flow through handles and worksheet functions:
+
+```excel
+=ENGINE.CREATE_MODEL("HullWhite1F", ModelParams)
+=ENGINE.CREATE_PRODUCT("IRSwap", TradeParams)
+=ENGINE.CREATE_MARKET(MarketParams)
+=ENGINE.CREATE_CONTEXT(PricingParams)
+=ENGINE.CREATE_EXECUTION(ExecutionParams)
+=ENGINE.CALC(Trade, Measures, Model, Market, Pricing, Execution)
+```
+
+## Repository layout
+
+```text
+rust/crates/engine-core/   Numerical models, products, exposure, CVA, calibration, AAD
+rust/crates/engine-ffi/    Internal Rust ↔ C++ bridge
+cpp/engine/                C++ registries, contexts, batched calculation, public C ABI
+clients/python/            nanobind extension, tests, examples, and notebook
+clients/excel/             Excel XLL, bridge tests, and install scripts
+examples/abi/              External-language examples for the stable C ABI
+installer/                 Inno Setup packaging for Windows
+.github/workflows/         CI and release pipelines
+PLAN.md                    Architectural decisions and implementation history
+```
+
+## Scope and known limitations
+
+- Only one product (`IRSwap`) and unilateral CVA are implemented; DVA, FVA, MVA, and KVA
+  remain roadmap items.
+- `pricing_date` is currently metadata. Calendar generation and day-count arithmetic are
+  not implemented.
+- `PV` and `DV01` are model-based and do not yet discount from the `MarketSnapshot` curve.
+  The curve is used by calibration; hazard and recovery data feed unilateral CVA.
+- Calibration currently targets a discount curve. Production calibration to instruments
+  such as swaptions or caps is outside the present scope.
+- The Excel client and packaged release artifacts target 64-bit Windows. The Rust core and
+  non-Excel CMake targets are designed to remain portable.
+- GPU support is experimental and must be enabled explicitly. `backend="auto"` resolves to
+  GPU only in a GPU-enabled build; otherwise it resolves to CPU.
+
+See [PLAN.md](PLAN.md) for the detailed architecture record, numerical-validation strategy,
+completed phases, and future work.
 
 ## Contributing
 
-Contributions are welcome if they help move the project forward in any of these areas:
-
-- more models and products
-- stronger numerical validation
-- better exposure analytics
-- improved Python ergonomics
-- Excel integration polish
-- documentation and examples
-
-If you like the idea of a single XVA engine with one registry and multiple interfaces, this project is worth following.
+Contributions are welcome, especially around additional products and XVA measures,
+numerical validation, market-data integration, and client ergonomics. Please keep the
+single-source-of-truth rule: clients should expose domain behavior, not reimplement it.
 
 ## License
 
-This project is currently in active development. Please check the repository state and licensing terms before using it in production environments.
+This repository does not currently include a license file. Do not assume permission to use,
+modify, or redistribute it outside the rights granted by applicable law.
