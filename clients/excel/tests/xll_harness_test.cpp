@@ -120,7 +120,8 @@ int main() {
 
     int rc = auto_open();
     ok &= check(rc == 1, "xlAutoOpen devuelve 1");
-    ok &= check(g_register_calls == 12, "xlAutoOpen registra exactamente 12 UDFs via xlfRegister");
+    // PLAN.md §7.19: +3 (ENGINE.CALC_BATCH/CALC_MANY/CALC_GRID) sobre las 12 anteriores.
+    ok &= check(g_register_calls == 15, "xlAutoOpen registra exactamente 15 UDFs via xlfRegister");
     for (const auto& name : g_registered_names) {
         ok &= check(name.rfind("ENGINE.", 0) == 0, "cada UDF registrada se llama ENGINE.*");
     }

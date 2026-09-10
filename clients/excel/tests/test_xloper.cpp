@@ -224,6 +224,34 @@ XLOPER12 par_irs_5y_params_table(std::vector<std::vector<XCHAR>>& bufs, std::vec
     return make_table(cells, 3, 6);
 }
 
+// Con fixed_rate explicito (PLAN.md §7.19): HandleRegistry::calc_batch/calc_many no soportan
+// use_par_rate, a diferencia de par_irs_5y_params_table.
+XLOPER12 irs_5y_params_table(
+    std::vector<std::vector<XCHAR>>& bufs, std::vector<XLOPER12>& cells, double notional, double fixed_rate
+) {
+    cells = {
+        str_cell(bufs, "notional"), num_cell(notional), blank_cell(), blank_cell(), blank_cell(), blank_cell(),
+        str_cell(bufs, "fixed_rate"), num_cell(fixed_rate), blank_cell(), blank_cell(), blank_cell(), blank_cell(),
+        str_cell(bufs, "payment_times"), num_cell(1.0), num_cell(2.0), num_cell(3.0), num_cell(4.0), num_cell(5.0),
+        str_cell(bufs, "accruals"), num_cell(1.0), num_cell(1.0), num_cell(1.0), num_cell(1.0), num_cell(1.0),
+    };
+    return make_table(cells, 4, 6);
+}
+
+// Mismo calendario que irs_5y_params_table, distinto tenor (3 años) -- para ejercitar el
+// agrupamiento heterogéneo de calc_many.
+XLOPER12 irs_3y_params_table(
+    std::vector<std::vector<XCHAR>>& bufs, std::vector<XLOPER12>& cells, double notional, double fixed_rate
+) {
+    cells = {
+        str_cell(bufs, "notional"), num_cell(notional), blank_cell(), blank_cell(),
+        str_cell(bufs, "fixed_rate"), num_cell(fixed_rate), blank_cell(), blank_cell(),
+        str_cell(bufs, "payment_times"), num_cell(1.0), num_cell(2.0), num_cell(3.0),
+        str_cell(bufs, "accruals"), num_cell(1.0), num_cell(1.0), num_cell(1.0),
+    };
+    return make_table(cells, 4, 4);
+}
+
 // Mercado con 2 pillars (no 1: table_to_params colapsa una fila de un solo valor numérico a
 // double, no vector<double> -- una vector-valued row necesita >= 2 celdas para no ser
 // ambigua, ver table_to_params en xloper.cpp): ninguna medida del caso base usa la curva en
@@ -353,6 +381,115 @@ TEST(HandleRegistry, CalcRejectsUnknownMeasureName) {
     std::string execution = registry.create_execution(cpu_execution_table(execution_bufs, execution_cells));
 
     EXPECT_THROW(registry.calc(product, {"NoExiste"}, model, market, pricing, execution), std::invalid_argument);
+}
+
+// PLAN.md §7.19: HandleRegistry::calc_batch (lote homogéneo) debe coincidir, trade a trade,
+// con llamar a calc() una vez por trade -- mismo espíritu que Calc.MatchesALoopOfScalarCalls
+// en cpp/engine/tests/test_registry.cpp.
+TEST(HandleRegistry, CalcBatchMatchesALoopOfScalarCallsPerTrade) {
+    xlbridge::HandleRegistry registry = make_registry();
+    std::vector<std::vector<XCHAR>> model_bufs, product_a_bufs, product_b_bufs, market_bufs, pricing_bufs, execution_bufs;
+    std::vector<XLOPER12> model_cells, product_a_cells, product_b_cells, market_cells, pricing_cells, execution_cells;
+
+    std::string model = registry.create_model("HullWhite1F", hull_white_params_table(model_bufs, model_cells));
+    std::string product_a = registry.create_product("IRSwap", irs_5y_params_table(product_a_bufs, product_a_cells, 1'000'000.0, 0.02));
+    std::string product_b = registry.create_product("IRSwap", irs_5y_params_table(product_b_bufs, product_b_cells, 2'500'000.0, 0.015));
+    std::string market = registry.create_market(market_params_table(market_bufs, market_cells, 0.02, 0.4));
+    std::string pricing = registry.create_context(pricing_context_table(pricing_bufs, pricing_cells, 5000.0, 7.0));
+    std::string execution = registry.create_execution(cpu_execution_table(execution_bufs, execution_cells));
+
+    std::vector<std::string> products{product_a, product_b};
+    std::vector<std::string> measures{"PV", "DV01", "ExpectedExposure", "PFE95", "UnilateralCVA"};
+
+    engine::CalcBatchResult batch = registry.calc_batch(products, measures, model, market, pricing, execution);
+    ASSERT_EQ(batch.size(), products.size());
+
+    for (std::size_t i = 0; i < products.size(); ++i) {
+        EXPECT_EQ(batch[i].trade_index, i);
+        engine::CalcResult scalar = registry.calc(products[i], measures, model, market, pricing, execution);
+        for (std::size_t m = 0; m < measures.size(); ++m) {
+            if (scalar[m].result.has_scalar) {
+                EXPECT_NEAR(batch[i].measures[m].result.scalar, scalar[m].result.scalar, 1e-6) << measures[m];
+            } else {
+                for (std::size_t k = 0; k < scalar[m].result.primary.size(); ++k) {
+                    EXPECT_NEAR(batch[i].measures[m].result.primary[k], scalar[m].result.primary[k], 1e-6);
+                }
+            }
+        }
+    }
+}
+
+TEST(HandleRegistry, CalcBatchRejectsMismatchedCalendars) {
+    xlbridge::HandleRegistry registry = make_registry();
+    std::vector<std::vector<XCHAR>> model_bufs, product_5y_bufs, product_3y_bufs, market_bufs, pricing_bufs, execution_bufs;
+    std::vector<XLOPER12> model_cells, product_5y_cells, product_3y_cells, market_cells, pricing_cells, execution_cells;
+
+    std::string model = registry.create_model("HullWhite1F", hull_white_params_table(model_bufs, model_cells));
+    std::string product_5y = registry.create_product("IRSwap", irs_5y_params_table(product_5y_bufs, product_5y_cells, 1'000'000.0, 0.02));
+    std::string product_3y = registry.create_product("IRSwap", irs_3y_params_table(product_3y_bufs, product_3y_cells, 1'000'000.0, 0.02));
+    std::string market = registry.create_market(market_params_table(market_bufs, market_cells));
+    std::string pricing = registry.create_context(pricing_context_table(pricing_bufs, pricing_cells, 100.0, 1.0));
+    std::string execution = registry.create_execution(cpu_execution_table(execution_bufs, execution_cells));
+
+    EXPECT_THROW(
+        registry.calc_batch({product_5y, product_3y}, {"PV"}, model, market, pricing, execution), std::invalid_argument
+    );
+}
+
+// PLAN.md §7.19, Nivel 2: calc_many agrupa internamente por calendario y devuelve el
+// resultado en el orden de entrada, nunca falla por heterogeneidad (a diferencia de
+// calc_batch en el test anterior).
+TEST(HandleRegistry, CalcManyGroupsHeterogeneousCalendars) {
+    xlbridge::HandleRegistry registry = make_registry();
+    std::vector<std::vector<XCHAR>> model_bufs, product_5y_bufs, product_3y_bufs, market_bufs, pricing_bufs, execution_bufs;
+    std::vector<XLOPER12> model_cells, product_5y_cells, product_3y_cells, market_cells, pricing_cells, execution_cells;
+
+    std::string model = registry.create_model("HullWhite1F", hull_white_params_table(model_bufs, model_cells));
+    std::string product_5y = registry.create_product("IRSwap", irs_5y_params_table(product_5y_bufs, product_5y_cells, 1'000'000.0, 0.02));
+    std::string product_3y = registry.create_product("IRSwap", irs_3y_params_table(product_3y_bufs, product_3y_cells, 2'000'000.0, 0.018));
+    std::string market = registry.create_market(market_params_table(market_bufs, market_cells, 0.02, 0.4));
+    std::string pricing = registry.create_context(pricing_context_table(pricing_bufs, pricing_cells, 5000.0, 7.0));
+    std::string execution = registry.create_execution(cpu_execution_table(execution_bufs, execution_cells));
+
+    std::vector<std::string> products{product_5y, product_3y};
+    engine::CalcBatchResult many = registry.calc_many(products, {"PV"}, model, market, pricing, execution);
+    ASSERT_EQ(many.size(), 2u);
+    EXPECT_EQ(many[0].trade_index, 0u);
+    EXPECT_EQ(many[1].trade_index, 1u);
+}
+
+// PLAN.md §7.19: calc_grid explota Trades x Models x Markets.
+TEST(HandleRegistry, CalcGridComputesTradesTimesModelsTimesMarkets) {
+    xlbridge::HandleRegistry registry = make_registry();
+    std::vector<std::vector<XCHAR>> model_1f_bufs, model_2f_bufs, product_a_bufs, product_b_bufs;
+    std::vector<std::vector<XCHAR>> market_a_bufs, market_b_bufs, pricing_bufs, execution_bufs;
+    std::vector<XLOPER12> model_1f_cells, model_2f_cells, product_a_cells, product_b_cells;
+    std::vector<XLOPER12> market_a_cells, market_b_cells, pricing_cells, execution_cells;
+
+    std::string model_1f = registry.create_model("HullWhite1F", hull_white_params_table(model_1f_bufs, model_1f_cells));
+    std::string model_2f = registry.create_model("HullWhite2F", hull_white_2f_params_table(model_2f_bufs, model_2f_cells));
+    std::string product_a = registry.create_product("IRSwap", irs_5y_params_table(product_a_bufs, product_a_cells, 1'000'000.0, 0.02));
+    std::string product_b = registry.create_product("IRSwap", irs_5y_params_table(product_b_bufs, product_b_cells, 2'000'000.0, 0.018));
+    std::string market_a = registry.create_market(market_params_table(market_a_bufs, market_a_cells, 0.02, 0.4));
+    std::string market_b = registry.create_market(market_params_table(market_b_bufs, market_b_cells, 0.05, 0.3));
+    std::string pricing = registry.create_context(pricing_context_table(pricing_bufs, pricing_cells, 5000.0, 7.0));
+    std::string execution = registry.create_execution(cpu_execution_table(execution_bufs, execution_cells));
+
+    std::vector<std::string> products{product_a, product_b};
+    std::vector<std::string> models{model_1f, model_2f};
+    std::vector<std::string> markets{market_a, market_b};
+    std::vector<std::string> measures{"PV", "UnilateralCVA"};
+
+    engine::CalcGridResult grid = registry.calc_grid(products, measures, models, markets, pricing, execution);
+    ASSERT_EQ(grid.size(), products.size() * models.size() * markets.size());
+
+    for (const auto& cell : grid) {
+        engine::CalcResult scalar =
+            registry.calc(products[cell.trade_index], measures, models[cell.model_index], markets[cell.market_index], pricing, execution);
+        for (std::size_t m = 0; m < measures.size(); ++m) {
+            EXPECT_NEAR(cell.measures[m].result.scalar, scalar[m].result.scalar, 1e-6);
+        }
+    }
 }
 
 // Mismos parámetros/semilla que Registry.ExposureProfileMatchesGoldenValue (cpp/engine/tests/
@@ -607,6 +744,73 @@ TEST(NewCalcResult, MixesScalarAndProfileRowsInLongFormat) {
 TEST(NewCalcResult, EmptyResultBecomesNaError) {
     engine::CalcResult result;
     XLOPER12* out = xlbridge::new_calc_result(result);
+    EXPECT_EQ(xl_base_type(*out), static_cast<DWORD>(xltypeErr));
+    xlbridge::free_xloper(out);
+}
+
+// PLAN.md §7.19: mismo formato largo que new_calc_result, con una columna TradeIndex al
+// frente.
+TEST(NewCalcBatchResult, PrependsTradeIndexColumn) {
+    engine::MeasureResult pv_a;
+    pv_a.has_scalar = true;
+    pv_a.scalar = 100.0;
+    engine::MeasureResult pv_b;
+    pv_b.has_scalar = true;
+    pv_b.scalar = 200.0;
+
+    engine::CalcBatchResult result;
+    result.push_back({0, {{"PV", pv_a}}});
+    result.push_back({1, {{"PV", pv_b}}});
+
+    XLOPER12* out = xlbridge::new_calc_batch_result(result);
+    ASSERT_EQ(xl_base_type(*out), static_cast<DWORD>(xltypeMulti));
+    EXPECT_EQ(out->val.array.columns, 4);
+    ASSERT_EQ(out->val.array.rows, 2);
+
+    const XLOPER12* rows = out->val.array.lparray;
+    EXPECT_DOUBLE_EQ(rows[0 * 4 + 0].val.num, 0.0); // TradeIndex
+    EXPECT_EQ(xlbridge::from_xl_string(rows[0 * 4 + 1].val.str + 1, rows[0 * 4 + 1].val.str[0]), "PV");
+    EXPECT_DOUBLE_EQ(rows[0 * 4 + 3].val.num, 100.0);
+    EXPECT_DOUBLE_EQ(rows[1 * 4 + 0].val.num, 1.0);
+    EXPECT_DOUBLE_EQ(rows[1 * 4 + 3].val.num, 200.0);
+
+    xlbridge::free_xloper(out);
+}
+
+TEST(NewCalcBatchResult, EmptyResultBecomesNaError) {
+    engine::CalcBatchResult result;
+    XLOPER12* out = xlbridge::new_calc_batch_result(result);
+    EXPECT_EQ(xl_base_type(*out), static_cast<DWORD>(xltypeErr));
+    xlbridge::free_xloper(out);
+}
+
+// PLAN.md §7.19: mismo formato largo, con tres columnas de indice al frente.
+TEST(NewCalcGridResult, PrependsTradeModelMarketIndexColumns) {
+    engine::MeasureResult pv;
+    pv.has_scalar = true;
+    pv.scalar = 42.0;
+
+    engine::CalcGridResult result;
+    result.push_back({1, 0, 1, {{"PV", pv}}});
+
+    XLOPER12* out = xlbridge::new_calc_grid_result(result);
+    ASSERT_EQ(xl_base_type(*out), static_cast<DWORD>(xltypeMulti));
+    EXPECT_EQ(out->val.array.columns, 6);
+    ASSERT_EQ(out->val.array.rows, 1);
+
+    const XLOPER12* rows = out->val.array.lparray;
+    EXPECT_DOUBLE_EQ(rows[0].val.num, 1.0);       // TradeIndex
+    EXPECT_DOUBLE_EQ(rows[1].val.num, 0.0);       // ModelIndex
+    EXPECT_DOUBLE_EQ(rows[2].val.num, 1.0);       // MarketIndex
+    EXPECT_EQ(xlbridge::from_xl_string(rows[3].val.str + 1, rows[3].val.str[0]), "PV");
+    EXPECT_DOUBLE_EQ(rows[5].val.num, 42.0);
+
+    xlbridge::free_xloper(out);
+}
+
+TEST(NewCalcGridResult, EmptyResultBecomesNaError) {
+    engine::CalcGridResult result;
+    XLOPER12* out = xlbridge::new_calc_grid_result(result);
     EXPECT_EQ(xl_base_type(*out), static_cast<DWORD>(xltypeErr));
     xlbridge::free_xloper(out);
 }

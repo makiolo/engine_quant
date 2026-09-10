@@ -1,7 +1,7 @@
 # XVA Engine — Plan de Arquitectura
 
 > Documento vivo. Se construye de forma incremental, sección a sección.
-> Estado: **v0.17 — Fase 4 completada (cliente Excel vía XLL sobre el registry C++) +
+> Estado: **v0.18 — Fase 4 completada (cliente Excel vía XLL sobre el registry C++) +
 > empaquetado/distribución (wheel Python + XLL autocontenidos, release automática en CI, §7.9)
 > + instalador Windows todo-en-uno (wizard .exe, §7.10) + Fase 5 completada (backend GPU
 > ejercitado con benchmarks reales, se mantiene opcional, §7.11; la selección de backend como
@@ -20,7 +20,10 @@
 > `HullWhite1F`), más generalización de la calibración en la C ABI de una función específica
 > (`engine_abi_calibrate_hull_white`) a un `EngineCalibrator` opaco genérico
 > (`engine_abi_create_calibrator`/`engine_abi_calibrate`, versión de ABI subida a 3), en las
-> cinco capas**
+> cinco capas + Fase 7.19: niveles 2 y 3 completos de la API de cálculo por lotes —
+> `calc_batch` (homogéneo), `calc_many` (heterogéneo, agrupa y llama a `calc_batch`) y
+> `calc_grid` (explosión Trades × Models × Markets, llama a `calc_many` por celda) — con las 5
+> medidas de `ENGINE.CALC` soportadas en lote, en las cinco capas**
 
 ## 1. Visión
 
@@ -274,6 +277,12 @@ añade en cuanto exista más de un cliente.
     opaco genérico (`engine_abi_create_calibrator`/`engine_abi_calibrate`, mismo patrón que
     `EngineModel`/`EngineProduct`), subiendo la versión de la ABI de 2 a 3 — Python y Excel ya
     eran genéricos por nombre desde §7.14, así que no necesitaron ningún cambio (ver §7.18).
+13. **Fase 7.19** ✅ — Niveles 2 y 3 completos de la API de cálculo por lotes (§7.17 solo
+    dejaba el nivel 3 más básico, sin bridgear a C++): `calc_batch` (homogéneo, las 5 medidas
+    de `ENGINE.CALC` vectorizadas sobre N trades del mismo calendario, sin bucle),
+    `calc_many` (heterogéneo, agrupa por tipo+calendario y llama a `calc_batch`) y `calc_grid`
+    (explosión Trades × Models × Markets, llama a `calc_many` por combinación
+    modelo×mercado), en las cinco capas (ver §7.19).
 
 ## 7. Estructura de repos/carpetas (Fase 0)
 
@@ -1756,6 +1765,133 @@ test previo -- en particular, `engine_abi_c_smoke.exe` sigue imprimiendo
 `engine_abi_version()` subir de 2 a 3 no afectó a ninguna otra parte de la superficie ya
 publicada.
 
+## 7.19 Niveles 2 y 3 completos de la API de cálculo por lotes: `calc_batch`/`calc_many`/`calc_grid`
+
+### Motivación
+
+§7.17 dejó documentado el vocabulario de tres niveles (scalar / heterogéneo / homogéneo) para
+escalar `ENGINE.CALC` a carteras, pero implementado solo el nivel 3 más básico
+(`irs_hull_white_npv_batch` en Rust, ni siquiera bridgeado a C++) y bloqueado el nivel 2 "hasta
+que exista un segundo producto real". El usuario pidió completar el resto con tres funciones
+nombradas explícitamente: `calc_batch` (interna, homogénea), `calc_many` (pública, heterogénea
+— agrupa y llama a `calc_batch`) y `calc_grid` (la explosión de combinaciones **Trades ×
+Models × Markets**), con las 5 medidas de `ENGINE.CALC` soportadas en lote — no solo `PV`.
+
+### Diseño
+
+**Descubrimiento clave: no hace falta rediseñar `models/hull_white(_2f).rs`, `kernel.rs` ni el
+trait `ShortRateModel`.** Toda esa capa es aritmética elemento a elemento agnóstica de forma;
+el "eje trade" solo necesita aparecer donde `notional`/`fixed_rate` (hoy `Tensor<B,1>` forma
+`[1]`) se combinan con el estado del modelo (`[n_paths]` en Monte Carlo, `[1]` en valoración
+determinista) — un único punto, `IrSwap::npv` (`products/irs.rs`). PV/DV01 en lote ya eran
+"gratis" por ese motivo (`irs_hull_white_npv_batch` ya existía); para Monte Carlo se añadió
+`IrSwap::npv_batch_over_paths` (nuevo), que hace explícito con `unsqueeze`/`unsqueeze_dim` lo
+que antes bastaba con broadcasting implícito (`state` → `[n_paths,1]`, `notional`/`fixed_rate`
+→ `[1,n_trades]`, producto → `[n_paths,n_trades]`) — necesario porque dos tensores de rango 1
+de tamaños distintos no son difundibles entre sí sin riesgo de combinarse por índice si
+coincidieran en longitud. La simulación (`model.simulate_path`) no cambia: todos los trades del
+lote comparten el mismo escenario Monte Carlo, que es además lo matemáticamente correcto para
+exposición de cartera.
+
+**Rust** (`rust/crates/engine-core`): `IrSwap::npv_batch_over_paths` (nuevo, `products/irs.rs`);
+`expected_exposure_profile_batch`/`_2f_batch` y `unilateral_cva_batch`/`_2f_batch`
+(`exposure.rs`, reutilizan `ee_pfe`/`unilateral_cva_with_discount` ya existentes, devuelven
+`Vec<ExposureProfile>`/`Vec<f64>` — cero structs nuevos); ocho wrappers `f64` puros en `api.rs`
+(`irs_hull_white_(2f_)?npv_batch`, `irs_hull_white_(2f_)?npv_delta_r0_batch`,
+`irs_hull_white_(2f_)?exposure_profile_batch`, `unilateral_cva_from_exposure_(2f_)?batch`),
+mismo patrón de despacho de backend (`resolve_backend`) que las versiones escalares.
+
+**Limitación honesta, no ocultada**: el `DV01` en lote **no** es una sola pasada `backward()`
+para todo el lote. Con `r0` compartido y N salidas independientes, reverse-mode AD solo da la
+*suma* de las N sensibilidades en una pasada (el cotangente se reduce en la dirección en la que
+se difundió `r0`), no cada una por separado — obtener cada delta por trade exige N pasadas
+backward, una por trade. `irs_hull_white_npv_delta_r0_batch`/`_2f_batch` hacen exactamente eso
+(un bucle interno en Rust sobre `irs_hull_white_npv_delta_r0`/`_2f_`): el lote evita N
+*round-trips* de FFI/C++/Python/Excel, no las N pasadas backward en sí — documentado así en el
+código, sin fingir un ahorro que no existe.
+
+**Descubrimiento no anticipado — `B::seed` (burn-ndarray) es un `Mutex` global de proceso, no
+por hilo**: los primeros tests de lote (comparando `expected_exposure_profile_batch` contra un
+bucle de llamadas escalares con la misma seed) fallaban de forma reproducible en paralelo (el
+modo por defecto de `cargo test`) porque dos tests sembrando el RNG *al mismo tiempo* en hilos
+distintos se pisaban entre sí, aunque usaran la misma seed — un test nunca antes visible porque
+ningún test previo comparaba dos simulaciones independientes bit a bit (los existentes solo
+verificaban invariantes tolerantes al ruido, ej. "EE ≥ 0"). Se añadió `crate::rng_test_lock`
+(un `Mutex<()>` propio del crate, `lib.rs`) que **todo** test sembrado del crate debe adquirir
+—no solo los nuevos: un lock solo protege a quien lo adquiere, así que los tests ya existentes
+en `exposure.rs`/`api.rs`/`smoke.rs`/`hull_white(_2f).rs` que tocan `B::seed`/`Tensor::random`
+también lo adquieren ahora. Verificado con 5 ejecuciones consecutivas en paralelo sin fallos
+(antes fallaba de forma consistente en la primera).
+
+**`engine-ffi`**: ocho funciones nuevas en el bloque `extern "Rust"`, reutilizando
+`ExposureProfileResult` (ahora también como `Vec<ExposureProfileResult>`, soportado
+nativamente por `cxx`) y `Vec<f64>` — cero structs nuevos en el bridge.
+
+**C++ (`cpp/engine`)**: `measure.hpp`/`measure.cpp` ganan cuatro funciones libres
+(`compute_*_batch`) en paralelo a las que ya despachan por `dynamic_cast` a
+`HullWhite1FModel`/`HullWhite2FModel` — **sin** tocar `IMeasure` (no hace falta un método
+virtual `evaluate_batch`: con un único producto real, el despacho de lote vive directamente en
+esas cuatro funciones, igual que el escalar). `calc.hpp`/`calc.cpp` ganan:
+
+- `calc_batch(registries, vector<const IProduct*>, measure_names, model, market, pricing, execution) -> CalcBatchResult` (`{trade_index, CalcResult}` por fila) — valida mismo `type_name()`, mismo calendario (`start`/`payment_times`/`accruals` byte a byte) y `use_par_rate() == false` en todos los trades; reutiliza la tabla de traducción de nombres ya existente, evaluando cada medida registrada una única vez para todo el lote.
+- `calc_many(...) -> CalcBatchResult`: agrupa por `(type_name(), clave_de_calendario)` (clave formateada con `std::to_chars`, mismo mecanismo que `HandleRegistry` en Excel) y llama a `calc_batch` por grupo — grupos de tamaño 1 incluidos, sin caso especial — recomponiendo el resultado en el orden de entrada. Nunca lanza por heterogeneidad.
+- `calc_grid(registries, products, measure_names, vector<const IModel*>, vector<MarketSnapshot>, pricing, execution) -> CalcGridResult` (`{trade_index, model_index, market_index, CalcResult}` por fila): doble bucle sobre `models`×`markets`, llama a `calc_many` en cada combinación. `PricingContext`/`ExecutionContext` son compartidos, no forman parte de la rejilla.
+
+**C ABI**: aditivo, `engine_abi_version()` se mantiene en 3. `EngineCalcBatchResultEntry`/
+`EngineCalcGridResultEntry` (mismo `EngineCalcResultEntry*` por fila que ya usa
+`engine_abi_calc`) más `engine_abi_calc_batch`/`_many`/`_grid` y sus `_free_*`.
+`const EngineProduct**`/`const EngineModel**` (array de punteros a handle opaco) es un patrón
+nuevo en esta ABI — hasta ahora un handle se pasaba de uno en uno — pero consistente con el
+resto (`array + count`, igual que `EngineParam*`/`measure_names`); `markets` es directamente un
+array de `EngineMarketSnapshot` por valor (struct plano, sin alocación extra).
+
+**Python**: `Engine.calc_batch`/`calc_many`/`calc_grid`, aceptando `list[Product]`/
+`list[Model]` — nanobind extrae el puntero subyacente de cada objeto Python ya bindeado,
+generalizando el mismo mecanismo que un único `const IProduct&` de `Engine.calc`. Nuevas
+clases `BatchResult` (`.trade_index`, `.measures`) y `GridResult` (`.trade_index`,
+`.model_index`, `.market_index`, `.measures`) — `std::vector<CalcBatchResultEntry>` se
+convierte automáticamente a `list[BatchResult]`.
+
+**Excel**: `ENGINE.CALC_BATCH`/`ENGINE.CALC_MANY`/`ENGINE.CALC_GRID`, recibiendo `trades`
+(y `modelos`/`mercados` en `CALC_GRID`) como una **columna** de handles
+(`xlbridge::read_string_list`, ya existente, reutilizado tal cual). Resultado en el mismo
+formato largo que `ENGINE.CALC` con columnas de índice al frente: `[TradeIndex, MeasureName,
+Time, Value]` para `CALC_BATCH`/`CALC_MANY`, `[TradeIndex, ModelIndex, MarketIndex,
+MeasureName, Time, Value]` para `CALC_GRID` (`new_calc_batch_result`/`new_calc_grid_result`,
+nuevos en `xloper.hpp`/`.cpp`).
+
+**Diseño de resultado consistente en las cinco capas**: cada fila lleva su(s) índice(s)
+explícito(s) — nunca una lista/tabla anidada por trade/modelo/mercado — mismo principio en
+Rust (`Vec<ExposureProfile>` en el mismo orden que la columna de entrada), C++
+(`CalcBatchResultEntry::trade_index`), C ABI, Python (`BatchResult.trade_index`) y Excel
+(columna `TradeIndex`).
+
+**Alcance explícito de esta fase**, documentado como tal (no oculto): con un único tipo de
+producto real (`IRSwap`) hoy, "agrupar por tipo" en `calc_many` se ejercita como caso trivial
+(siempre un grupo, o varios solo por calendario distinto) — igual que `HullWhite2F` se añadió
+en §7.16 sin poder ejercitar un tercer modelo. `calc_batch`/`calc_many` exigen `fixed_rate`
+explícito (`use_par_rate() == false`) en todos los trades del lote, heredado del primitivo Rust.
+
+### Verificación
+
+Mismo patrón que §7.18: comparación exacta contra un bucle de llamadas escalares en las cinco
+capas, no solo invariantes cualitativos. Rust (`cargo test --workspace`, 67 tests
+`engine-core` en verde, 11 nuevos sobre los 56 de §7.18, incluidos los de `IrSwap::
+npv_batch_over_paths` y los ocho `*_batch` de `api.rs`); C++ (`cpp/engine/tests/
+test_registry.cpp`, suites `CalcBatch`/`CalcMany`/`CalcGrid`, HW1F y HW2F; `cpp/engine/tests/
+test_abi.cpp`, mismas comparaciones vía la C ABI); Python (`clients/python/tests/test_calc.py`,
+mismas comparaciones vía `Engine.calc_batch`/`calc_many`/`calc_grid`); Excel
+(`clients/excel/tests/test_xloper.cpp`, suites `HandleRegistry.CalcBatch*`/`CalcMany*`/
+`CalcGrid*` más `NewCalcBatchResult`/`NewCalcGridResult` para el formato largo).
+`cmake --build build` completo + `ctest` (98 tests, todos en verde, incluido
+`EngineExcelHarness` tras actualizar el conteo esperado de UDFs registradas de 12 a 15) sin
+regresiones. Ejemplos nuevos verificados manualmente en las tres capas que los llevan:
+`rust/crates/engine-core/examples/calc_batch.rs` (`cargo run -p engine-core --example
+calc_batch`), la sección nueva de `cpp/engine/examples/abi_c_smoke.c` (lote de 3 swaps vía
+`engine_abi_calc_batch`) y la sección nueva de `clients/python/notebooks/demo_registry.ipynb`
+— los tres reproducen exactamente los mismos PV por trade (`9625.35`, `82701.41`, `-6914.93`
+para el caso de referencia usado en los tres), confirmando consistencia entre capas.
+
 ---
 *Próxima iteración: confirmar en la práctica (no se pudo ejecutar GitHub Actions desde este
 entorno de desarrollo) que el job `build-installer` de `.github/workflows/release.yml` (§7.10)
@@ -1792,22 +1928,29 @@ partiendo de un mercado fabricado, no real), y decidir si vale la pena generaliz
 `zero_coupon_bond`) para que `expected_exposure_profile`/`unilateral_cva` dejen de estar
 duplicadas por modelo en `exposure.rs` -- la extracción de `ee_pfe`/`unilateral_cva_with_
 discount` en esta fase ya redujo esa duplicación a la parte que de verdad difiere (simulación
-de 1 vs. 2 factores correlacionados). Sobre la Fase 7.17 (tres niveles de API de cálculo):
-sigue pendiente todo el nivel 2 (agrupar una lista heterogénea de trades por tipo de producto
-en `engine::calc`) y su exposición en las cinco capas (`ENGINE.CALC` aceptando un rango de
-trades en Excel, `Engine.calc` aceptando una lista en Python, `engine_abi_calc` aceptando un
-array de trades en la ABI) -- bloqueado, a propósito, hasta que exista un segundo producto
-real (no solo un segundo modelo) que obligue a decidir la forma exacta del despacho por tipo;
-generalizar el nivel 3 a lotes con calendarios distintos dentro de un mismo tipo de producto
-(rejilla común + máscara); un `Dv01Measure` de lote (hoy solo hay `PV` vectorizado, la
-sensibilidad vía AAD de un lote completo en una sola pasada backward queda sin probar); y
-medir si vectorizar de verdad compensa en la práctica (benchmark lote vs. bucle escalar,
-mismo espíritu que el benchmark CPU/GPU de §7.11) en vez de asumirlo solo por argumento de
-diseño. Sobre la Fase 7.18 (segundo calibrador + C ABI genérica): sigue pendiente extender el
-ejemplo de calibración a los otros cuatro lenguajes de `examples/abi/` (C++/Rust/`ctypes`/
-`cffi`, hoy solo el ejemplo en C puro la ejercita); calibrar `HullWhite2F` a partir de un
-`MarketSnapshot` con datos de mercado reales (sigue siendo siempre `synthetic_from_hull_white*`
-en los tests/ejemplos de las cinco capas); y, si algún día existiera un tercer modelo con
-calibrador propio, confirmar que `EngineCalibrationResult`/`export_params` (que hoy sabe
-traducir `double`/`vector<double>`/`bool` de `engine::Params` a `EngineParam`, pero no
-`std::string`) sigue bastando o necesita ampliarse.*
+de 1 vs. 2 factores correlacionados). Sobre la Fase 7.17 (tres niveles de API de cálculo): el
+nivel 2 (agrupar una lista heterogénea de trades por tipo de producto) se implementó en
+`calc_many` en la Fase 7.19, ya expuesto en las cinco capas -- sigue pendiente generalizar el
+nivel 3 a lotes con calendarios distintos dentro de un mismo tipo de producto (rejilla común +
+máscara, hoy `calc_batch` exige calendario idéntico) y medir si vectorizar de verdad compensa
+en la práctica (benchmark lote vs. bucle escalar, mismo espíritu que el benchmark CPU/GPU de
+§7.11) en vez de asumirlo solo por argumento de diseño. Sobre la Fase 7.18 (segundo calibrador
++ C ABI genérica): sigue pendiente extender el ejemplo de calibración a los otros cuatro
+lenguajes de `examples/abi/` (C++/Rust/`ctypes`/`cffi`, hoy solo el ejemplo en C puro la
+ejercita); calibrar `HullWhite2F` a partir de un `MarketSnapshot` con datos de mercado reales
+(sigue siendo siempre `synthetic_from_hull_white*` en los tests/ejemplos de las cinco capas); y,
+si algún día existiera un tercer modelo con calibrador propio, confirmar que
+`EngineCalibrationResult`/`export_params` (que hoy sabe traducir `double`/`vector<double>`/
+`bool` de `engine::Params` a `EngineParam`, pero no `std::string`) sigue bastando o necesita
+ampliarse. Sobre la Fase 7.19 (`calc_batch`/`calc_many`/`calc_grid`): sigue pendiente un
+`DV01` de lote con AAD en una sola pasada de verdad (hoy es un bucle interno de N pasadas
+backward, ver la limitación documentada al cerrar la fase -- no hay forma conocida de evitarlo
+con reverse-mode AD y un `r0` compartido, forward-mode sería la vía natural pero Burn no lo
+ofrece); generalizar `calc_batch` a calendarios distintos dentro de un mismo tipo de producto
+(mismo pendiente que ya señalaba §7.17 para el nivel 3, ahora heredado por el nivel 2); un
+tercer producto real que ejercite de verdad el agrupamiento heterogéneo de `calc_many` (hoy
+solo se agrupa por calendario, con un único tipo de producto); extender el ejemplo de
+`calc_batch` a los otros cuatro lenguajes de `examples/abi/` (mismo pendiente que ya señalaba
+§7.18 para calibración); y medir si vectorizar de verdad compensa en la práctica (mismo
+benchmark pendiente que ya señalaba §7.17, ahora con las cinco medidas en lote disponibles
+para medirlo, no solo `PV`).*

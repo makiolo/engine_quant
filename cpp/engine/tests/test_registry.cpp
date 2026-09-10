@@ -58,6 +58,28 @@ Params par_irs_5y_params() {
     };
 }
 
+// Con fixed_rate explícito (PLAN.md §7.19): calc_batch/calc_many no soportan use_par_rate, a
+// diferencia de calc() -- cada trade de un lote debe traer ya su tipo fijo.
+Params irs_5y_params(double notional, double fixed_rate) {
+    return Params{
+        {"notional", notional},
+        {"fixed_rate", fixed_rate},
+        {"payment_times", std::vector<double>{1.0, 2.0, 3.0, 4.0, 5.0}},
+        {"accruals", std::vector<double>{1.0, 1.0, 1.0, 1.0, 1.0}},
+    };
+}
+
+// Mismo calendario que irs_5y_params, distinto tenor (3 años) -- usado para ejercitar el
+// agrupamiento heterogéneo de calc_many.
+Params irs_3y_params(double notional, double fixed_rate) {
+    return Params{
+        {"notional", notional},
+        {"fixed_rate", fixed_rate},
+        {"payment_times", std::vector<double>{1.0, 2.0, 3.0}},
+        {"accruals", std::vector<double>{1.0, 1.0, 1.0}},
+    };
+}
+
 // Mercado mínimo (1 pillar): ninguna medida del caso base usa la curva en sí para descontar
 // (PLAN.md §7.15: PV/DV01/EE/PFE95 siguen usando solo el modelo, límite de alcance
 // documentado) -- solo hazard_rate/recovery_rate importan aquí, para UnilateralCVA.
@@ -427,6 +449,236 @@ TEST(Calc, RejectsUnknownMeasureName) {
 
     EXPECT_THROW(
         engine::calc(registries, *product, {"NoExiste"}, *model, market, pricing, execution),
+        std::invalid_argument
+    );
+}
+
+// PLAN.md §7.19: calc_batch (lote homogéneo) debe coincidir, trade a trade, con llamar a
+// calc() una vez por trade -- mismo espíritu que los tests "matches a loop of scalar calls" de
+// Rust, aquí a nivel de la orquestación C++.
+TEST(CalcBatch, MatchesALoopOfScalarCallsPerTrade) {
+    Registries registries;
+    register_builtins(registries);
+
+    auto model = registries.models.create("HullWhite1F", hull_white_params());
+    auto product_a = registries.products.create("IRSwap", irs_5y_params(1'000'000.0, 0.02));
+    auto product_b = registries.products.create("IRSwap", irs_5y_params(2'500'000.0, 0.015));
+    auto product_c = registries.products.create("IRSwap", irs_5y_params(500'000.0, 0.025));
+    MarketSnapshot market = market_with_credit(0.02, 0.4);
+    PricingContext pricing = golden_pricing(5000, 7);
+    ExecutionContext execution = cpu_execution();
+
+    std::vector<const engine::IProduct*> products{product_a.get(), product_b.get(), product_c.get()};
+    std::vector<std::string> measures{"PV", "DV01", "ExpectedExposure", "PFE95", "UnilateralCVA"};
+
+    engine::CalcBatchResult batch = engine::calc_batch(registries, products, measures, *model, market, pricing, execution);
+    ASSERT_EQ(batch.size(), products.size());
+
+    for (std::size_t i = 0; i < products.size(); ++i) {
+        EXPECT_EQ(batch[i].trade_index, i);
+        engine::CalcResult scalar = engine::calc(registries, *products[i], measures, *model, market, pricing, execution);
+        ASSERT_EQ(batch[i].measures.size(), scalar.size());
+        for (std::size_t m = 0; m < measures.size(); ++m) {
+            EXPECT_EQ(batch[i].measures[m].measure_name, scalar[m].measure_name);
+            EXPECT_EQ(batch[i].measures[m].result.has_scalar, scalar[m].result.has_scalar);
+            if (scalar[m].result.has_scalar) {
+                EXPECT_NEAR(batch[i].measures[m].result.scalar, scalar[m].result.scalar, 1e-6)
+                    << "trade " << i << " medida " << measures[m];
+            } else {
+                ASSERT_EQ(batch[i].measures[m].result.primary.size(), scalar[m].result.primary.size());
+                for (std::size_t k = 0; k < scalar[m].result.primary.size(); ++k) {
+                    EXPECT_NEAR(batch[i].measures[m].result.primary[k], scalar[m].result.primary[k], 1e-6)
+                        << "trade " << i << " medida " << measures[m] << " fecha " << k;
+                }
+            }
+        }
+    }
+}
+
+TEST(CalcBatch, MatchesALoopOfScalarCallsPerTradeUnderHullWhite2F) {
+    Registries registries;
+    register_builtins(registries);
+
+    auto model = registries.models.create("HullWhite2F", hull_white_2f_params());
+    auto product_a = registries.products.create("IRSwap", irs_5y_params(1'000'000.0, 0.02));
+    auto product_b = registries.products.create("IRSwap", irs_5y_params(2'500'000.0, 0.015));
+    MarketSnapshot market = market_with_credit(0.02, 0.4);
+    PricingContext pricing = golden_pricing(5000, 7);
+    ExecutionContext execution = cpu_execution();
+
+    std::vector<const engine::IProduct*> products{product_a.get(), product_b.get()};
+    std::vector<std::string> measures{"PV", "DV01", "ExpectedExposure", "PFE95", "UnilateralCVA"};
+
+    engine::CalcBatchResult batch = engine::calc_batch(registries, products, measures, *model, market, pricing, execution);
+    ASSERT_EQ(batch.size(), products.size());
+
+    for (std::size_t i = 0; i < products.size(); ++i) {
+        engine::CalcResult scalar = engine::calc(registries, *products[i], measures, *model, market, pricing, execution);
+        for (std::size_t m = 0; m < measures.size(); ++m) {
+            if (scalar[m].result.has_scalar) {
+                EXPECT_NEAR(batch[i].measures[m].result.scalar, scalar[m].result.scalar, 1e-6);
+            } else {
+                for (std::size_t k = 0; k < scalar[m].result.primary.size(); ++k) {
+                    EXPECT_NEAR(batch[i].measures[m].result.primary[k], scalar[m].result.primary[k], 1e-6);
+                }
+            }
+        }
+    }
+}
+
+TEST(CalcBatch, RejectsMismatchedCalendars) {
+    Registries registries;
+    register_builtins(registries);
+
+    auto model = registries.models.create("HullWhite1F", hull_white_params());
+    auto product_5y = registries.products.create("IRSwap", irs_5y_params(1'000'000.0, 0.02));
+    auto product_3y = registries.products.create("IRSwap", irs_3y_params(1'000'000.0, 0.02));
+    MarketSnapshot market = market_with_credit(0.0, 0.0);
+    PricingContext pricing = golden_pricing(100, 1);
+    ExecutionContext execution = cpu_execution();
+
+    std::vector<const engine::IProduct*> products{product_5y.get(), product_3y.get()};
+    EXPECT_THROW(
+        engine::calc_batch(registries, products, {"PV"}, *model, market, pricing, execution),
+        std::invalid_argument
+    );
+}
+
+TEST(CalcBatch, RejectsUseParRate) {
+    Registries registries;
+    register_builtins(registries);
+
+    auto model = registries.models.create("HullWhite1F", hull_white_params());
+    auto par_product = registries.products.create("IRSwap", par_irs_5y_params()); // sin fixed_rate
+    MarketSnapshot market = market_with_credit(0.0, 0.0);
+    PricingContext pricing = golden_pricing(100, 1);
+    ExecutionContext execution = cpu_execution();
+
+    std::vector<const engine::IProduct*> products{par_product.get()};
+    EXPECT_THROW(
+        engine::calc_batch(registries, products, {"PV"}, *model, market, pricing, execution),
+        std::invalid_argument
+    );
+}
+
+TEST(CalcBatch, RejectsEmptyBatch) {
+    Registries registries;
+    register_builtins(registries);
+    auto model = registries.models.create("HullWhite1F", hull_white_params());
+    MarketSnapshot market = market_with_credit(0.0, 0.0);
+    PricingContext pricing = golden_pricing(100, 1);
+    ExecutionContext execution = cpu_execution();
+
+    std::vector<const engine::IProduct*> products;
+    EXPECT_THROW(
+        engine::calc_batch(registries, products, {"PV"}, *model, market, pricing, execution),
+        std::invalid_argument
+    );
+}
+
+// PLAN.md §7.19, Nivel 2: calc_many acepta calendarios distintos (agrupa internamente) y
+// devuelve el resultado en el orden de entrada, sin importar el orden de los grupos.
+TEST(CalcMany, GroupsByCalendarAndPreservesInputOrder) {
+    Registries registries;
+    register_builtins(registries);
+
+    auto model = registries.models.create("HullWhite1F", hull_white_params());
+    auto product_5y_a = registries.products.create("IRSwap", irs_5y_params(1'000'000.0, 0.02));
+    auto product_3y = registries.products.create("IRSwap", irs_3y_params(2'000'000.0, 0.018));
+    auto product_5y_b = registries.products.create("IRSwap", irs_5y_params(3'000'000.0, 0.022));
+    MarketSnapshot market = market_with_credit(0.02, 0.4);
+    PricingContext pricing = golden_pricing(5000, 7);
+    ExecutionContext execution = cpu_execution();
+
+    // Intercalados a propósito: 5y, 3y, 5y -- dos grupos de calendario, no en bloques contiguos.
+    std::vector<const engine::IProduct*> products{product_5y_a.get(), product_3y.get(), product_5y_b.get()};
+    std::vector<std::string> measures{"PV", "UnilateralCVA"};
+
+    engine::CalcBatchResult many = engine::calc_many(registries, products, measures, *model, market, pricing, execution);
+    ASSERT_EQ(many.size(), products.size());
+
+    for (std::size_t i = 0; i < products.size(); ++i) {
+        EXPECT_EQ(many[i].trade_index, i);
+        engine::CalcResult scalar = engine::calc(registries, *products[i], measures, *model, market, pricing, execution);
+        for (std::size_t m = 0; m < measures.size(); ++m) {
+            EXPECT_NEAR(many[i].measures[m].result.scalar, scalar[m].result.scalar, 1e-6)
+                << "trade " << i << " medida " << measures[m];
+        }
+    }
+}
+
+TEST(CalcMany, RejectsEmptyList) {
+    Registries registries;
+    register_builtins(registries);
+    auto model = registries.models.create("HullWhite1F", hull_white_params());
+    MarketSnapshot market = market_with_credit(0.0, 0.0);
+    PricingContext pricing = golden_pricing(100, 1);
+    ExecutionContext execution = cpu_execution();
+
+    std::vector<const engine::IProduct*> products;
+    EXPECT_THROW(
+        engine::calc_many(registries, products, {"PV"}, *model, market, pricing, execution),
+        std::invalid_argument
+    );
+}
+
+// PLAN.md §7.19: calc_grid explota Trades x Models x Markets -- PricingContext/
+// ExecutionContext son compartidos, no forman parte de la rejilla.
+TEST(CalcGrid, ComputesTradesTimesModelsTimesMarkets) {
+    Registries registries;
+    register_builtins(registries);
+
+    auto model_1f = registries.models.create("HullWhite1F", hull_white_params());
+    auto model_2f = registries.models.create("HullWhite2F", hull_white_2f_params());
+    auto product_a = registries.products.create("IRSwap", irs_5y_params(1'000'000.0, 0.02));
+    auto product_b = registries.products.create("IRSwap", irs_5y_params(2'000'000.0, 0.018));
+    MarketSnapshot market_a = market_with_credit(0.02, 0.4);
+    MarketSnapshot market_b = market_with_credit(0.05, 0.3);
+    PricingContext pricing = golden_pricing(5000, 7);
+    ExecutionContext execution = cpu_execution();
+
+    std::vector<const engine::IProduct*> products{product_a.get(), product_b.get()};
+    std::vector<const engine::IModel*> models{model_1f.get(), model_2f.get()};
+    std::vector<MarketSnapshot> markets{market_a, market_b};
+    std::vector<std::string> measures{"PV", "UnilateralCVA"};
+
+    engine::CalcGridResult grid = engine::calc_grid(registries, products, measures, models, markets, pricing, execution);
+    ASSERT_EQ(grid.size(), products.size() * models.size() * markets.size());
+
+    // Cada celda de la rejilla debe coincidir con la llamada escalar equivalente.
+    for (const auto& cell : grid) {
+        engine::CalcResult scalar = engine::calc(
+            registries, *products[cell.trade_index], measures, *models[cell.model_index], markets[cell.market_index],
+            pricing, execution
+        );
+        for (std::size_t m = 0; m < measures.size(); ++m) {
+            EXPECT_NEAR(cell.measures[m].result.scalar, scalar[m].result.scalar, 1e-6)
+                << "trade=" << cell.trade_index << " model=" << cell.model_index << " market=" << cell.market_index;
+        }
+    }
+}
+
+TEST(CalcGrid, RejectsEmptyModelsOrMarkets) {
+    Registries registries;
+    register_builtins(registries);
+    auto product = registries.products.create("IRSwap", irs_5y_params(1'000'000.0, 0.02));
+    MarketSnapshot market = market_with_credit(0.0, 0.0);
+    PricingContext pricing = golden_pricing(100, 1);
+    ExecutionContext execution = cpu_execution();
+    auto model = registries.models.create("HullWhite1F", hull_white_params());
+
+    std::vector<const engine::IProduct*> products{product.get()};
+    std::vector<const engine::IModel*> no_models;
+    std::vector<const engine::IModel*> some_models{model.get()};
+    std::vector<MarketSnapshot> no_markets;
+    std::vector<MarketSnapshot> some_markets{market};
+
+    EXPECT_THROW(
+        engine::calc_grid(registries, products, {"PV"}, no_models, some_markets, pricing, execution),
+        std::invalid_argument
+    );
+    EXPECT_THROW(
+        engine::calc_grid(registries, products, {"PV"}, some_models, no_markets, pricing, execution),
         std::invalid_argument
     );
 }

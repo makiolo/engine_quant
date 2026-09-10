@@ -3,6 +3,7 @@
 #include <string>
 #include <vector>
 
+#include "engine/engine.hpp" // ExposureProfile, usada por compute_exposure_profile_batch
 #include "engine/execution_context.hpp"
 #include "engine/market.hpp"
 #include "engine/model.hpp"
@@ -105,5 +106,28 @@ public:
         const PricingContext& pricing, const ExecutionContext& execution
     ) const override;
 };
+
+// --- Lote homogéneo (PLAN.md §7.17/§7.19) ---------------------------------------------------
+// Equivalentes de lote de los cuatro `compute_*` internos de measure.cpp (mismo despacho por
+// `dynamic_cast` a HullWhite1FModel/HullWhite2FModel, "único sitio que conoce ambos modelos a
+// la vez"). Declarados aquí (no en el `namespace {}` anónimo de measure.cpp) porque
+// `engine::calc_batch` (calc.hpp) necesita llamarlos directamente -- el despacho de lote no
+// pasa por `IMeasure`/`Registry<IMeasure>`: con un único producto real (`IrSwapProduct`) no
+// hay genericidad real que ganar con un método virtual `evaluate_batch` todavía (mismo
+// argumento que ya justificó no generalizar la C ABI de calibración hasta el segundo
+// calibrador, PLAN.md §7.18). `irs_products` debe ser un lote ya validado por el llamante:
+// mismo calendario (`start`/`payment_times`/`accruals`) y `use_par_rate() == false` en todos
+// -- estas cuatro funciones no repiten esa validación.
+std::vector<ExposureProfile> compute_exposure_profile_batch(
+    const IModel& model, const std::vector<const IrSwapProduct*>& irs_products,
+    const PricingContext& pricing, const ExecutionContext& execution
+);
+std::vector<double> compute_cva_from_exposure_batch(
+    const IModel& model, const ExecutionContext& execution,
+    const std::vector<ExposureProfile>& profiles,
+    double hazard_rate, double recovery_rate
+);
+std::vector<double> compute_npv_batch(const IModel& model, const std::vector<const IrSwapProduct*>& irs_products);
+std::vector<double> compute_npv_delta_r0_batch(const IModel& model, const std::vector<const IrSwapProduct*>& irs_products);
 
 } // namespace engine

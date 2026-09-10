@@ -248,6 +248,8 @@ mod tests {
     /// to_analytic_formula` pero simulando los dos factores correlacionados a la vez.
     #[test]
     fn monte_carlo_bond_price_converges_to_analytic_formula() {
+        // PLAN.md §7.19: ver el mismo lock/comentario en hull_white.rs.
+        let _guard = crate::rng_test_lock::LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let model = reference_model();
         let phi0 = 0.03;
         let maturity = 5.0;

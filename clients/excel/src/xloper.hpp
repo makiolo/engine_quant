@@ -81,6 +81,15 @@ XLOPER12* new_measure_result(const engine::MeasureResult& result);
 // homogéneo para todo el lote, fácil de filtrar/dinamizar en Excel.
 XLOPER12* new_calc_result(const engine::CalcResult& result);
 
+// Igual formato largo que new_calc_result, con una columna TradeIndex al frente (PLAN.md
+// §7.19): [TradeIndex, MeasureName, Time, Value] -- una fila por (trade, medida[, fecha]).
+// Usado por ENGINE.CALC_BATCH/ENGINE.CALC_MANY, que devuelven la misma forma.
+XLOPER12* new_calc_batch_result(const engine::CalcBatchResult& result);
+
+// Igual formato largo, con tres columnas de indice al frente (PLAN.md §7.19): [TradeIndex,
+// ModelIndex, MarketIndex, MeasureName, Time, Value]. Usado por ENGINE.CALC_GRID.
+XLOPER12* new_calc_grid_result(const engine::CalcGridResult& result);
+
 // Tabla clave/valor (col 0 = clave, col 1.. = valor -- mismo formato que espera
 // table_to_params, para poder pasar directamente el resultado a ENGINE.CREATE_MODEL): los
 // parámetros óptimos (a/b/sigma/r0) más "rmse"/"iterations"/"converged" como filas de

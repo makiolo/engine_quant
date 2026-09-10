@@ -27,6 +27,26 @@ def _par_irs_5y_params():
     }
 
 
+def _irs_5y_params(notional, fixed_rate):
+    # Con fixed_rate explicito (PLAN.md §7.19): calc_batch/calc_many no soportan
+    # use_par_rate, a diferencia de calc().
+    return {
+        "notional": notional,
+        "fixed_rate": fixed_rate,
+        "payment_times": [1.0, 2.0, 3.0, 4.0, 5.0],
+        "accruals": [1.0, 1.0, 1.0, 1.0, 1.0],
+    }
+
+
+def _irs_3y_params(notional, fixed_rate):
+    return {
+        "notional": notional,
+        "fixed_rate": fixed_rate,
+        "payment_times": [1.0, 2.0, 3.0],
+        "accruals": [1.0, 1.0, 1.0],
+    }
+
+
 def _market_with_credit(hazard_rate=0.0, recovery_rate=0.0):
     return engine.MarketSnapshot(pillars=[1.0], zero_rates=[0.02], hazard_rate=hazard_rate, recovery_rate=recovery_rate)
 
@@ -129,6 +149,138 @@ def test_unilateral_cva_matches_golden_value():
     assert math.isclose(cva.scalar, 503.6419407799754, abs_tol=1e-6)
 
 
+def test_calc_batch_matches_a_loop_of_scalar_calls_per_trade():
+    eng = engine.Engine()
+    model = eng.create_model("HullWhite1F", _hull_white_params())
+    products = [
+        eng.create_product("IRSwap", _irs_5y_params(1_000_000.0, 0.02)),
+        eng.create_product("IRSwap", _irs_5y_params(2_500_000.0, 0.015)),
+        eng.create_product("IRSwap", _irs_5y_params(500_000.0, 0.025)),
+    ]
+    market = _market_with_credit(0.02, 0.4)
+    pricing = _golden_pricing()
+    execution = _cpu_execution()
+    measures = ["PV", "DV01", "ExpectedExposure", "PFE95", "UnilateralCVA"]
+
+    batch = eng.calc_batch(products, measures, model, market, pricing, execution)
+    assert len(batch) == len(products)
+
+    for i, row in enumerate(batch):
+        assert row.trade_index == i
+        scalar = eng.calc(products[i], measures, model, market, pricing, execution)
+        for name in measures:
+            if scalar[name].has_scalar:
+                assert math.isclose(row.measures[name].scalar, scalar[name].scalar, abs_tol=1e-6)
+            else:
+                for a, b in zip(row.measures[name].primary, scalar[name].primary):
+                    assert math.isclose(a, b, abs_tol=1e-6)
+
+
+def test_calc_batch_rejects_mismatched_calendars():
+    eng = engine.Engine()
+    model = eng.create_model("HullWhite1F", _hull_white_params())
+    products = [
+        eng.create_product("IRSwap", _irs_5y_params(1_000_000.0, 0.02)),
+        eng.create_product("IRSwap", _irs_3y_params(1_000_000.0, 0.02)),
+    ]
+    market = _market_with_credit()
+    pricing = _golden_pricing(n_paths=100, seed=1)
+    execution = _cpu_execution()
+
+    try:
+        eng.calc_batch(products, ["PV"], model, market, pricing, execution)
+        assert False, "se esperaba ValueError"
+    except ValueError:
+        pass
+
+
+def test_calc_batch_rejects_use_par_rate():
+    eng = engine.Engine()
+    model = eng.create_model("HullWhite1F", _hull_white_params())
+    products = [eng.create_product("IRSwap", _par_irs_5y_params())]  # sin fixed_rate
+    market = _market_with_credit()
+    pricing = _golden_pricing(n_paths=100, seed=1)
+    execution = _cpu_execution()
+
+    try:
+        eng.calc_batch(products, ["PV"], model, market, pricing, execution)
+        assert False, "se esperaba ValueError"
+    except ValueError:
+        pass
+
+
+def test_calc_many_groups_heterogeneous_calendars_and_preserves_order():
+    eng = engine.Engine()
+    model = eng.create_model("HullWhite1F", _hull_white_params())
+    product_5y_a = eng.create_product("IRSwap", _irs_5y_params(1_000_000.0, 0.02))
+    product_3y = eng.create_product("IRSwap", _irs_3y_params(2_000_000.0, 0.018))
+    product_5y_b = eng.create_product("IRSwap", _irs_5y_params(3_000_000.0, 0.022))
+    market = _market_with_credit(0.02, 0.4)
+    pricing = _golden_pricing()
+    execution = _cpu_execution()
+
+    # Intercalados a proposito: 5y, 3y, 5y -- dos grupos de calendario, no en bloques contiguos.
+    products = [product_5y_a, product_3y, product_5y_b]
+    measures = ["PV", "UnilateralCVA"]
+    many = eng.calc_many(products, measures, model, market, pricing, execution)
+    assert len(many) == len(products)
+
+    for i, row in enumerate(many):
+        assert row.trade_index == i
+        scalar = eng.calc(products[i], measures, model, market, pricing, execution)
+        for name in measures:
+            assert math.isclose(row.measures[name].scalar, scalar[name].scalar, abs_tol=1e-6)
+
+
+def test_calc_grid_computes_trades_times_models_times_markets():
+    eng = engine.Engine()
+    model_1f = eng.create_model("HullWhite1F", _hull_white_params())
+    model_2f = eng.create_model(
+        "HullWhite2F", {"a": 0.1, "b": 0.2, "sigma": 0.01, "eta": 0.012, "rho": -0.7, "r0": 0.03}
+    )
+    products = [
+        eng.create_product("IRSwap", _irs_5y_params(1_000_000.0, 0.02)),
+        eng.create_product("IRSwap", _irs_5y_params(2_000_000.0, 0.018)),
+    ]
+    market_a = _market_with_credit(0.02, 0.4)
+    market_b = _market_with_credit(0.05, 0.3)
+    pricing = _golden_pricing()
+    execution = _cpu_execution()
+    models = [model_1f, model_2f]
+    markets = [market_a, market_b]
+    measures = ["PV", "UnilateralCVA"]
+
+    grid = eng.calc_grid(products, measures, models, markets, pricing, execution)
+    assert len(grid) == len(products) * len(models) * len(markets)
+
+    for cell in grid:
+        scalar = eng.calc(
+            products[cell.trade_index], measures, models[cell.model_index], markets[cell.market_index], pricing, execution
+        )
+        for name in measures:
+            assert math.isclose(cell.measures[name].scalar, scalar[name].scalar, abs_tol=1e-6)
+
+
+def test_calc_grid_rejects_empty_models_or_markets():
+    eng = engine.Engine()
+    model = eng.create_model("HullWhite1F", _hull_white_params())
+    product = eng.create_product("IRSwap", _irs_5y_params(1_000_000.0, 0.02))
+    market = _market_with_credit()
+    pricing = _golden_pricing(n_paths=100, seed=1)
+    execution = _cpu_execution()
+
+    try:
+        eng.calc_grid([product], ["PV"], [], [market], pricing, execution)
+        assert False, "se esperaba ValueError"
+    except ValueError:
+        pass
+    try:
+        eng.calc_grid([product], ["PV"], [model], [], pricing, execution)
+        assert False, "se esperaba ValueError"
+    except ValueError:
+        pass
+
+
 def test_execution_context_resolves_auto_backend():
     execution = engine.ExecutionContext({"backend": "auto"})
     expected = "gpu" if engine.is_gpu_backend_available() else "cpu"
@@ -149,6 +301,12 @@ if __name__ == "__main__":
     test_dv01_of_a_payer_swap_is_positive()
     test_exposure_profile_matches_golden_value()
     test_unilateral_cva_matches_golden_value()
+    test_calc_batch_matches_a_loop_of_scalar_calls_per_trade()
+    test_calc_batch_rejects_mismatched_calendars()
+    test_calc_batch_rejects_use_par_rate()
+    test_calc_many_groups_heterogeneous_calendars_and_preserves_order()
+    test_calc_grid_computes_trades_times_models_times_markets()
+    test_calc_grid_rejects_empty_models_or_markets()
     test_execution_context_resolves_auto_backend()
     test_execution_context_rejects_unknown_backend()
     print("OK: tests de Engine.calc pasaron")

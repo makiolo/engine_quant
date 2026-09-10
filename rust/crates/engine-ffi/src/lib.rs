@@ -134,6 +134,72 @@ mod ffi {
             accruals: Vec<f64>,
         ) -> f64;
 
+        // Lote homogéneo (PLAN.md §7.17/§7.19): las cinco medidas de ENGINE.CALC vectorizadas
+        // sobre N trades del mismo tipo/calendario, sin bucle escalar en la frontera C++ --
+        // notionals/fixed_rates son columnas, un valor por trade. `irs_hull_white_npv_batch`
+        // ya existía en `engine_core::api` pero sin bridgear a C++ (§7.17 la dejó como
+        // primitivo interno de Rust); las otras cuatro son nuevas en esta fase.
+        fn irs_hull_white_npv_batch(
+            a: f64,
+            b: f64,
+            sigma: f64,
+            r0: f64,
+            notionals: Vec<f64>,
+            fixed_rates: Vec<f64>,
+            start: f64,
+            payment_times: Vec<f64>,
+            accruals: Vec<f64>,
+        ) -> Vec<f64>;
+
+        // No es una sola pasada backward() para todo el lote -- ver
+        // `engine_core::api::irs_hull_white_npv_delta_r0_batch` para el porqué (reverse-mode
+        // AD con un r0 compartido solo da la suma de sensibilidades en una pasada, no cada una
+        // por separado). El lote evita N *round-trips* de FFI/C++/Python/Excel, no las N
+        // pasadas backward en sí.
+        fn irs_hull_white_npv_delta_r0_batch(
+            a: f64,
+            b: f64,
+            sigma: f64,
+            r0: f64,
+            notionals: Vec<f64>,
+            fixed_rates: Vec<f64>,
+            start: f64,
+            payment_times: Vec<f64>,
+            accruals: Vec<f64>,
+        ) -> Vec<f64>;
+
+        fn irs_hull_white_exposure_profile_batch(
+            backend: String,
+            a: f64,
+            b: f64,
+            sigma: f64,
+            r0: f64,
+            notionals: Vec<f64>,
+            fixed_rates: Vec<f64>,
+            start: f64,
+            payment_times: Vec<f64>,
+            accruals: Vec<f64>,
+            monitoring_times: Vec<f64>,
+            n_steps: u64,
+            n_paths: u64,
+            seed: u64,
+        ) -> Vec<ExposureProfileResult>;
+
+        // `profiles` es el mismo `Vec<ExposureProfileResult>` que ya devuelve
+        // `irs_hull_white_exposure_profile_batch` -- se pasa de vuelta tal cual, sin volver a
+        // calcular el perfil (mismo espíritu que `unilateral_cva_from_exposure` reutilizando
+        // `times`/`ee` ya calculados en la versión escalar).
+        fn unilateral_cva_from_exposure_batch(
+            backend: String,
+            a: f64,
+            b: f64,
+            sigma: f64,
+            r0: f64,
+            profiles: Vec<ExposureProfileResult>,
+            hazard_rate: f64,
+            recovery_rate: f64,
+        ) -> Vec<f64>;
+
         // Segundo modelo del motor, Hull-White 2 factores (PLAN.md §7.16, G2++): mismas seis
         // funciones que su equivalente de 1 factor arriba, mismo shape de resultado
         // (`ExposureProfileResult`) -- la capa C++ (`engine/measure.hpp`) las consume con el
@@ -201,6 +267,68 @@ mod ffi {
             payment_times: Vec<f64>,
             accruals: Vec<f64>,
         ) -> f64;
+
+        // Equivalentes de lote de las cuatro funciones 2F de arriba -- ver las versiones de 1
+        // factor para el porqué de cada una (PLAN.md §7.19).
+        fn irs_hull_white_2f_npv_batch(
+            a: f64,
+            b: f64,
+            sigma: f64,
+            eta: f64,
+            rho: f64,
+            r0: f64,
+            notionals: Vec<f64>,
+            fixed_rates: Vec<f64>,
+            start: f64,
+            payment_times: Vec<f64>,
+            accruals: Vec<f64>,
+        ) -> Vec<f64>;
+
+        fn irs_hull_white_2f_npv_delta_r0_batch(
+            a: f64,
+            b: f64,
+            sigma: f64,
+            eta: f64,
+            rho: f64,
+            r0: f64,
+            notionals: Vec<f64>,
+            fixed_rates: Vec<f64>,
+            start: f64,
+            payment_times: Vec<f64>,
+            accruals: Vec<f64>,
+        ) -> Vec<f64>;
+
+        fn irs_hull_white_2f_exposure_profile_batch(
+            backend: String,
+            a: f64,
+            b: f64,
+            sigma: f64,
+            eta: f64,
+            rho: f64,
+            r0: f64,
+            notionals: Vec<f64>,
+            fixed_rates: Vec<f64>,
+            start: f64,
+            payment_times: Vec<f64>,
+            accruals: Vec<f64>,
+            monitoring_times: Vec<f64>,
+            n_steps: u64,
+            n_paths: u64,
+            seed: u64,
+        ) -> Vec<ExposureProfileResult>;
+
+        fn unilateral_cva_from_exposure_2f_batch(
+            backend: String,
+            a: f64,
+            b: f64,
+            sigma: f64,
+            eta: f64,
+            rho: f64,
+            r0: f64,
+            profiles: Vec<ExposureProfileResult>,
+            hazard_rate: f64,
+            recovery_rate: f64,
+        ) -> Vec<f64>;
 
         // Calibración de mercado (PLAN.md §7.14): pillars/zero_rates es el MarketSnapshot en
         // su forma más plana (dos vectores paralelos, PLAN.md §5.5), ver
@@ -366,6 +494,81 @@ fn irs_hull_white_npv_delta_r0(
 }
 
 #[allow(clippy::too_many_arguments)]
+fn irs_hull_white_npv_batch(
+    a: f64,
+    b: f64,
+    sigma: f64,
+    r0: f64,
+    notionals: Vec<f64>,
+    fixed_rates: Vec<f64>,
+    start: f64,
+    payment_times: Vec<f64>,
+    accruals: Vec<f64>,
+) -> Vec<f64> {
+    engine_core::api::irs_hull_white_npv_batch(a, b, sigma, r0, notionals, fixed_rates, start, payment_times, accruals)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn irs_hull_white_npv_delta_r0_batch(
+    a: f64,
+    b: f64,
+    sigma: f64,
+    r0: f64,
+    notionals: Vec<f64>,
+    fixed_rates: Vec<f64>,
+    start: f64,
+    payment_times: Vec<f64>,
+    accruals: Vec<f64>,
+) -> Vec<f64> {
+    engine_core::api::irs_hull_white_npv_delta_r0_batch(a, b, sigma, r0, notionals, fixed_rates, start, payment_times, accruals)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn irs_hull_white_exposure_profile_batch(
+    backend: String,
+    a: f64,
+    b: f64,
+    sigma: f64,
+    r0: f64,
+    notionals: Vec<f64>,
+    fixed_rates: Vec<f64>,
+    start: f64,
+    payment_times: Vec<f64>,
+    accruals: Vec<f64>,
+    monitoring_times: Vec<f64>,
+    n_steps: u64,
+    n_paths: u64,
+    seed: u64,
+) -> Vec<ffi::ExposureProfileResult> {
+    let profiles = engine_core::api::irs_hull_white_exposure_profile_batch(
+        &backend, a, b, sigma, r0, notionals, fixed_rates, start, payment_times, accruals,
+        &monitoring_times, n_steps as usize, n_paths as usize, seed,
+    );
+    profiles
+        .into_iter()
+        .map(|p| ffi::ExposureProfileResult { times: p.times, ee: p.ee, pfe_95: p.pfe_95 })
+        .collect()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn unilateral_cva_from_exposure_batch(
+    backend: String,
+    a: f64,
+    b: f64,
+    sigma: f64,
+    r0: f64,
+    profiles: Vec<ffi::ExposureProfileResult>,
+    hazard_rate: f64,
+    recovery_rate: f64,
+) -> Vec<f64> {
+    let profiles = profiles
+        .into_iter()
+        .map(|p| engine_core::exposure::ExposureProfile { times: p.times, ee: p.ee, pfe_95: p.pfe_95 })
+        .collect();
+    engine_core::api::unilateral_cva_from_exposure_batch(&backend, a, b, sigma, r0, profiles, hazard_rate, recovery_rate)
+}
+
+#[allow(clippy::too_many_arguments)]
 fn irs_hull_white_2f_exposure_profile(
     backend: String,
     a: f64,
@@ -464,6 +667,91 @@ fn irs_hull_white_2f_npv_delta_r0(
     engine_core::api::irs_hull_white_2f_npv_delta_r0(
         a, b, sigma, eta, rho, r0, notional, fixed_rate, use_par_rate, start, payment_times, accruals,
     )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn irs_hull_white_2f_npv_batch(
+    a: f64,
+    b: f64,
+    sigma: f64,
+    eta: f64,
+    rho: f64,
+    r0: f64,
+    notionals: Vec<f64>,
+    fixed_rates: Vec<f64>,
+    start: f64,
+    payment_times: Vec<f64>,
+    accruals: Vec<f64>,
+) -> Vec<f64> {
+    engine_core::api::irs_hull_white_2f_npv_batch(a, b, sigma, eta, rho, r0, notionals, fixed_rates, start, payment_times, accruals)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn irs_hull_white_2f_npv_delta_r0_batch(
+    a: f64,
+    b: f64,
+    sigma: f64,
+    eta: f64,
+    rho: f64,
+    r0: f64,
+    notionals: Vec<f64>,
+    fixed_rates: Vec<f64>,
+    start: f64,
+    payment_times: Vec<f64>,
+    accruals: Vec<f64>,
+) -> Vec<f64> {
+    engine_core::api::irs_hull_white_2f_npv_delta_r0_batch(
+        a, b, sigma, eta, rho, r0, notionals, fixed_rates, start, payment_times, accruals,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn irs_hull_white_2f_exposure_profile_batch(
+    backend: String,
+    a: f64,
+    b: f64,
+    sigma: f64,
+    eta: f64,
+    rho: f64,
+    r0: f64,
+    notionals: Vec<f64>,
+    fixed_rates: Vec<f64>,
+    start: f64,
+    payment_times: Vec<f64>,
+    accruals: Vec<f64>,
+    monitoring_times: Vec<f64>,
+    n_steps: u64,
+    n_paths: u64,
+    seed: u64,
+) -> Vec<ffi::ExposureProfileResult> {
+    let profiles = engine_core::api::irs_hull_white_2f_exposure_profile_batch(
+        &backend, a, b, sigma, eta, rho, r0, notionals, fixed_rates, start, payment_times, accruals,
+        &monitoring_times, n_steps as usize, n_paths as usize, seed,
+    );
+    profiles
+        .into_iter()
+        .map(|p| ffi::ExposureProfileResult { times: p.times, ee: p.ee, pfe_95: p.pfe_95 })
+        .collect()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn unilateral_cva_from_exposure_2f_batch(
+    backend: String,
+    a: f64,
+    b: f64,
+    sigma: f64,
+    eta: f64,
+    rho: f64,
+    r0: f64,
+    profiles: Vec<ffi::ExposureProfileResult>,
+    hazard_rate: f64,
+    recovery_rate: f64,
+) -> Vec<f64> {
+    let profiles = profiles
+        .into_iter()
+        .map(|p| engine_core::exposure::ExposureProfile { times: p.times, ee: p.ee, pfe_95: p.pfe_95 })
+        .collect();
+    engine_core::api::unilateral_cva_from_exposure_2f_batch(&backend, a, b, sigma, eta, rho, r0, profiles, hazard_rate, recovery_rate)
 }
 
 fn calibrate_hull_white(

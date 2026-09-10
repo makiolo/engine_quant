@@ -108,6 +108,61 @@ struct ParIrs5y {
     }
 };
 
+// Con fixed_rate explícito (PLAN.md §7.19): engine_abi_calc_batch/_many no soportan
+// use_par_rate, a diferencia de ParIrs5y.
+struct Irs5y {
+    double notional;
+    double fixed_rate;
+    std::vector<double> payment_times{1.0, 2.0, 3.0, 4.0, 5.0};
+    std::vector<double> accruals{1.0, 1.0, 1.0, 1.0, 1.0};
+
+    ProductHandle create() const {
+        EngineParam params[] = {
+            scalar_param("notional", notional),
+            scalar_param("fixed_rate", fixed_rate),
+            vector_param("payment_times", payment_times),
+            vector_param("accruals", accruals),
+        };
+        return ProductHandle{engine_abi_create_product("IRSwap", params, 4)};
+    }
+};
+
+struct Irs3y {
+    double notional;
+    double fixed_rate;
+    std::vector<double> payment_times{1.0, 2.0, 3.0};
+    std::vector<double> accruals{1.0, 1.0, 1.0};
+
+    ProductHandle create() const {
+        EngineParam params[] = {
+            scalar_param("notional", notional),
+            scalar_param("fixed_rate", fixed_rate),
+            vector_param("payment_times", payment_times),
+            vector_param("accruals", accruals),
+        };
+        return ProductHandle{engine_abi_create_product("IRSwap", params, 4)};
+    }
+};
+
+struct CalcBatchResultsHandle {
+    EngineCalcBatchResultEntry* entries = nullptr;
+    std::size_t count = 0;
+    ~CalcBatchResultsHandle() { engine_abi_free_calc_batch_results(entries, count); }
+};
+
+struct CalcGridResultsHandle {
+    EngineCalcGridResultEntry* entries = nullptr;
+    std::size_t count = 0;
+    ~CalcGridResultsHandle() { engine_abi_free_calc_grid_results(entries, count); }
+};
+
+const EngineCalcResultEntry* find_measure(const EngineCalcResultEntry* entries, std::size_t count, const char* name) {
+    for (std::size_t i = 0; i < count; ++i) {
+        if (std::strcmp(entries[i].measure_name, name) == 0) return &entries[i];
+    }
+    return nullptr;
+}
+
 } // namespace
 
 TEST(Abi, VersionIsAtLeastTwo) {
@@ -326,6 +381,216 @@ TEST(Abi, CalcComputesAllFiveMeasuresInOneBatchUnderHullWhite2F) {
     ASSERT_NE(cva, nullptr);
     EXPECT_TRUE(cva->result.has_scalar);
     EXPECT_GT(cva->result.scalar, 0.0);
+}
+
+// PLAN.md §7.19: engine_abi_calc_batch (lote homogéneo) debe coincidir, trade a trade, con
+// llamar a engine_abi_calc una vez por trade.
+TEST(Abi, CalcBatchMatchesALoopOfScalarCallsPerTrade) {
+    ModelHandle model = create_hull_white();
+    Irs5y irs_a{1'000'000.0, 0.02};
+    Irs5y irs_b{2'500'000.0, 0.015};
+    Irs5y irs_c{500'000.0, 0.025};
+    ProductHandle product_a = irs_a.create();
+    ProductHandle product_b = irs_b.create();
+    ProductHandle product_c = irs_c.create();
+
+    double pillar = 1.0, rate = 0.02;
+    EngineMarketSnapshot market{};
+    market.pillars = &pillar;
+    market.zero_rates = &rate;
+    market.count = 1;
+    market.hazard_rate = 0.02;
+    market.recovery_rate = 0.4;
+
+    EnginePricingContext pricing{};
+    pricing.n_paths = 5000;
+    pricing.n_steps = 208;
+    pricing.seed = 7;
+
+    EngineExecutionContext execution{};
+    execution.backend = "cpu";
+    execution.precision = "FP64";
+
+    const char* names[] = {"PV", "DV01", "ExpectedExposure", "PFE95", "UnilateralCVA"};
+    const EngineProduct* products[] = {product_a.ptr, product_b.ptr, product_c.ptr};
+
+    CalcBatchResultsHandle batch;
+    int rc = engine_abi_calc_batch(
+        products, 3, names, 5, model.ptr, &market, &pricing, &execution, &batch.entries, &batch.count);
+    ASSERT_EQ(rc, 0) << last_error();
+    ASSERT_EQ(batch.count, 3u);
+
+    for (std::size_t i = 0; i < 3; ++i) {
+        EXPECT_EQ(batch.entries[i].trade_index, i);
+        CalcResultsHandle scalar;
+        int scalar_rc = engine_abi_calc(
+            products[i], names, 5, model.ptr, &market, &pricing, &execution, &scalar.entries, &scalar.count);
+        ASSERT_EQ(scalar_rc, 0) << last_error();
+
+        for (const char* name : names) {
+            const EngineCalcResultEntry* from_batch = find_measure(batch.entries[i].measures, batch.entries[i].n_measures, name);
+            const EngineCalcResultEntry* from_scalar = find_measure(scalar.entries, scalar.count, name);
+            ASSERT_NE(from_batch, nullptr);
+            ASSERT_NE(from_scalar, nullptr);
+            if (from_scalar->result.has_scalar) {
+                EXPECT_NEAR(from_batch->result.scalar, from_scalar->result.scalar, 1e-6) << name;
+            } else {
+                ASSERT_EQ(from_batch->result.len, from_scalar->result.len);
+                for (std::size_t k = 0; k < from_scalar->result.len; ++k) {
+                    EXPECT_NEAR(from_batch->result.primary[k], from_scalar->result.primary[k], 1e-6) << name << " " << k;
+                }
+            }
+        }
+    }
+}
+
+TEST(Abi, CalcBatchRejectsMismatchedCalendars) {
+    ModelHandle model = create_hull_white();
+    Irs5y irs_5y{1'000'000.0, 0.02};
+    Irs3y irs_3y{1'000'000.0, 0.02};
+    ProductHandle product_5y = irs_5y.create();
+    ProductHandle product_3y = irs_3y.create();
+
+    double pillar = 1.0, rate = 0.02;
+    EngineMarketSnapshot market{};
+    market.pillars = &pillar;
+    market.zero_rates = &rate;
+    market.count = 1;
+
+    EnginePricingContext pricing{};
+    pricing.n_paths = 100;
+    pricing.n_steps = 10;
+    pricing.seed = 1;
+    EngineExecutionContext execution{};
+    execution.backend = "cpu";
+    execution.precision = "FP64";
+
+    const char* names[] = {"PV"};
+    const EngineProduct* products[] = {product_5y.ptr, product_3y.ptr};
+    CalcBatchResultsHandle batch;
+    int rc = engine_abi_calc_batch(
+        products, 2, names, 1, model.ptr, &market, &pricing, &execution, &batch.entries, &batch.count);
+    EXPECT_NE(rc, 0);
+    EXPECT_FALSE(last_error().empty());
+}
+
+// PLAN.md §7.19, Nivel 2: engine_abi_calc_many agrupa internamente por calendario y nunca
+// falla por heterogeneidad (a diferencia de engine_abi_calc_batch en el test anterior).
+TEST(Abi, CalcManyGroupsHeterogeneousCalendars) {
+    ModelHandle model = create_hull_white();
+    Irs5y irs_5y{1'000'000.0, 0.02};
+    Irs3y irs_3y{2'000'000.0, 0.018};
+    ProductHandle product_5y = irs_5y.create();
+    ProductHandle product_3y = irs_3y.create();
+
+    double pillar = 1.0, rate = 0.02;
+    EngineMarketSnapshot market{};
+    market.pillars = &pillar;
+    market.zero_rates = &rate;
+    market.count = 1;
+    market.hazard_rate = 0.02;
+    market.recovery_rate = 0.4;
+
+    EnginePricingContext pricing{};
+    pricing.n_paths = 5000;
+    pricing.n_steps = 208;
+    pricing.seed = 7;
+    EngineExecutionContext execution{};
+    execution.backend = "cpu";
+    execution.precision = "FP64";
+
+    const char* names[] = {"PV"};
+    const EngineProduct* products[] = {product_5y.ptr, product_3y.ptr};
+    CalcBatchResultsHandle many;
+    int rc = engine_abi_calc_many(
+        products, 2, names, 1, model.ptr, &market, &pricing, &execution, &many.entries, &many.count);
+    ASSERT_EQ(rc, 0) << last_error();
+    ASSERT_EQ(many.count, 2u);
+    EXPECT_EQ(many.entries[0].trade_index, 0u);
+    EXPECT_EQ(many.entries[1].trade_index, 1u);
+}
+
+// PLAN.md §7.19: engine_abi_calc_grid explota Trades x Models x Markets.
+TEST(Abi, CalcGridComputesTradesTimesModelsTimesMarkets) {
+    ModelHandle model_1f = create_hull_white();
+    ModelHandle model_2f = create_hull_white_2f();
+    Irs5y irs_a{1'000'000.0, 0.02};
+    Irs5y irs_b{2'000'000.0, 0.018};
+    ProductHandle product_a = irs_a.create();
+    ProductHandle product_b = irs_b.create();
+
+    double pillar_a = 1.0, rate_a = 0.02;
+    double pillar_b = 1.0, rate_b = 0.03;
+    EngineMarketSnapshot market_a{};
+    market_a.pillars = &pillar_a;
+    market_a.zero_rates = &rate_a;
+    market_a.count = 1;
+    market_a.hazard_rate = 0.02;
+    market_a.recovery_rate = 0.4;
+    EngineMarketSnapshot market_b{};
+    market_b.pillars = &pillar_b;
+    market_b.zero_rates = &rate_b;
+    market_b.count = 1;
+    market_b.hazard_rate = 0.05;
+    market_b.recovery_rate = 0.3;
+
+    EnginePricingContext pricing{};
+    pricing.n_paths = 5000;
+    pricing.n_steps = 208;
+    pricing.seed = 7;
+    EngineExecutionContext execution{};
+    execution.backend = "cpu";
+    execution.precision = "FP64";
+
+    const char* names[] = {"PV", "UnilateralCVA"};
+    const EngineProduct* products[] = {product_a.ptr, product_b.ptr};
+    const EngineModel* models[] = {model_1f.ptr, model_2f.ptr};
+    EngineMarketSnapshot markets[] = {market_a, market_b};
+
+    CalcGridResultsHandle grid;
+    int rc = engine_abi_calc_grid(
+        products, 2, names, 2, models, 2, markets, 2, &pricing, &execution, &grid.entries, &grid.count);
+    ASSERT_EQ(rc, 0) << last_error();
+    ASSERT_EQ(grid.count, 8u); // 2 trades x 2 models x 2 markets
+
+    for (std::size_t i = 0; i < grid.count; ++i) {
+        const auto& cell = grid.entries[i];
+        EXPECT_LT(cell.trade_index, 2u);
+        EXPECT_LT(cell.model_index, 2u);
+        EXPECT_LT(cell.market_index, 2u);
+        const EngineCalcResultEntry* pv = find_measure(cell.measures, cell.n_measures, "PV");
+        ASSERT_NE(pv, nullptr);
+        EXPECT_TRUE(pv->result.has_scalar);
+    }
+}
+
+TEST(Abi, CalcGridRejectsEmptyModelsOrMarkets) {
+    ModelHandle model = create_hull_white();
+    Irs5y irs{1'000'000.0, 0.02};
+    ProductHandle product = irs.create();
+
+    double pillar = 1.0, rate = 0.02;
+    EngineMarketSnapshot market{};
+    market.pillars = &pillar;
+    market.zero_rates = &rate;
+    market.count = 1;
+    EnginePricingContext pricing{};
+    pricing.n_paths = 100;
+    pricing.n_steps = 10;
+    pricing.seed = 1;
+    EngineExecutionContext execution{};
+    execution.backend = "cpu";
+    execution.precision = "FP64";
+
+    const char* names[] = {"PV"};
+    const EngineProduct* products[] = {product.ptr};
+    const EngineModel* models[] = {model.ptr};
+
+    CalcGridResultsHandle grid;
+    int rc = engine_abi_calc_grid(
+        products, 1, names, 1, models, 0, &market, 1, &pricing, &execution, &grid.entries, &grid.count);
+    EXPECT_NE(rc, 0);
+    EXPECT_FALSE(last_error().empty());
 }
 
 TEST(Abi, IsGpuBackendAvailableIsBoolLike) {

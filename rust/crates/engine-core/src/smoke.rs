@@ -127,6 +127,9 @@ mod tests {
 
     #[test]
     fn irs_unilateral_cva_smoke_is_nonnegative() {
+        // PLAN.md §7.19: ver `crate::rng_test_lock` -- `B::seed` (burn-ndarray) es un Mutex
+        // global de proceso, no por hilo.
+        let _guard = crate::rng_test_lock::LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let cva = irs_unilateral_cva_5y(0.1, 0.03, 0.01, 0.02, 1_000_000.0, 0.02, 0.4, 2_000, 42);
         assert!(cva >= 0.0, "CVA={cva} debería ser >= 0");
     }

@@ -31,6 +31,9 @@ El resultado es `build/clients/excel/engine_excel.xll`. Solo se construye en Win
 | `ENGINE.CREATE_CONTEXT(params)` | `PricingContext({...})` |
 | `ENGINE.CREATE_EXECUTION(params)` | `ExecutionContext({...})` |
 | `ENGINE.CALC(trade, medidas, modelo, mercado, contexto, ejecucion)` | `Engine().calc(trade, medidas, modelo, market, pricing, execution)` |
+| `ENGINE.CALC_BATCH(trades, medidas, modelo, mercado, contexto, ejecucion)` | `Engine().calc_batch(trades, medidas, modelo, market, pricing, execution)` |
+| `ENGINE.CALC_MANY(trades, medidas, modelo, mercado, contexto, ejecucion)` | `Engine().calc_many(trades, medidas, modelo, market, pricing, execution)` |
+| `ENGINE.CALC_GRID(trades, medidas, modelos, mercados, contexto, ejecucion)` | `Engine().calc_grid(trades, medidas, modelos, markets, pricing, execution)` |
 | `ENGINE.LIST_CALIBRATORS()` | `Engine().list_calibrators()` |
 | `ENGINE.CREATE_CALIBRATOR(nombre)` | `Engine().create_calibrator(nombre)` |
 | `ENGINE.CALIBRATE(calibrador, mercado, estimacion_inicial)` | `Calibrator.calibrate(market, initial_guess)` |
@@ -94,6 +97,48 @@ limitaciones"), `n_paths`, `n_steps` y `seed` (todos requeridos).
 se resuelve una vez, en el momento de crear el contexto, a `"gpu"` si este build tiene
 `GpuBackend` compilado, si no a `"cpu"`) y `precision` (opcional, por defecto `"fp64"`, único
 valor soportado hoy).
+
+## `ENGINE.CALC_BATCH` / `ENGINE.CALC_MANY` / `ENGINE.CALC_GRID` (PLAN.md §7.17/§7.19)
+
+Tres niveles de la API de cálculo por lotes, cada uno construido sobre el anterior. Las tres
+reciben `trades` como una **columna** de handles de trade (`ENGINE.CREATE_PRODUCT`), no un
+handle suelto como `ENGINE.CALC` — mismo mecanismo que ya usa `medidas` (un rango de celdas de
+texto).
+
+- **`ENGINE.CALC_BATCH`** — lote *homogéneo*: todos los `trades` deben ser del mismo tipo de
+  producto y, para `IRSwap`, compartir calendario (`start`/`payment_times`/`accruals`) y traer
+  `fixed_rate` explícito — a diferencia de `ENGINE.CALC`, el lote **no** soporta "a la par"
+  (`fixed_rate` ausente): lanza `#VALUE!` si algún trade lo omite o si los calendarios no
+  coinciden. Vectorizado sin bucle: el tipo corto se simula una única vez para todo el lote.
+- **`ENGINE.CALC_MANY`** — lote *heterogéneo*: misma firma y forma de resultado, pero admite
+  `trades` de tipos/calendarios distintos — los agrupa internamente por `(tipo, calendario)` y
+  llama a `ENGINE.CALC_BATCH` por grupo (grupos de tamaño 1 incluidos), recomponiendo el
+  resultado en el orden de entrada. Nunca falla por heterogeneidad.
+- **`ENGINE.CALC_GRID`** — la explosión de combinaciones **Trades × Modelos × Mercados**:
+  `modelos`/`mercados` son también columnas de handles; por cada par (modelo, mercado) se
+  calcula `ENGINE.CALC_MANY` sobre `trades` entero. `Pricing`/`Compute` son compartidos, no
+  forman parte de la rejilla.
+
+```
+Trades   =A1:A3      (columna de handles ENGINE.CREATE_PRODUCT, cada uno con fixed_rate propio)
+         =ENGINE.CALC_BATCH(Trades, {"PV";"UnilateralCVA"}, Model, Market, Pricing, Compute)
+
+; o, con trades de calendarios distintos:
+         =ENGINE.CALC_MANY(Trades, {"PV"}, Model, Market, Pricing, Compute)
+
+; o, la rejilla completa:
+Models   =B1:B2      (columna de handles ENGINE.CREATE_MODEL)
+Markets  =C1:C2      (columna de handles ENGINE.CREATE_MARKET)
+         =ENGINE.CALC_GRID(Trades, {"PV";"UnilateralCVA"}, Models, Markets, Pricing, Compute)
+```
+
+Las tres devuelven el mismo formato largo que `ENGINE.CALC` (`[MeasureName, Time, Value]`) con
+columnas de índice al frente — `ENGINE.CALC_BATCH`/`ENGINE.CALC_MANY` añaden `TradeIndex`
+(`[TradeIndex, MeasureName, Time, Value]`); `ENGINE.CALC_GRID` añade las tres
+(`[TradeIndex, ModelIndex, MarketIndex, MeasureName, Time, Value]`). Cada índice es la posición
+(0-based) del trade/modelo/mercado correspondiente en la columna de handles de entrada — fácil
+de cruzar de vuelta con `INDICE`/`ÍNDICE` sobre esa misma columna si hace falta el handle o
+cualquier otro dato asociado a esa fila.
 
 ## Backend de cómputo: `ExecutionContext` sustituye el estado global (PLAN.md §7.15)
 
@@ -239,3 +284,15 @@ Excel, mismo motor C++/Rust por debajo). Actualizar esta sección si cambia el c
 - **`xlAutoClose` no desregistra explícitamente las UDFs** (`xlfUnregister`/`xlfSetName`):
   solo libera los handles memoizados. Excel limpia el registro al descargar la DLL; no se ha
   observado que esto deje nombres huérfanos en sesiones normales de trabajo.
+- **`ENGINE.CALC_BATCH`/`ENGINE.CALC_MANY` no soportan `use_par_rate`** (PLAN.md §7.19): cada
+  trade del lote debe traer `fixed_rate` explícito — el primitivo Rust de lote no calcula "a la
+  par" por trade. `ENGINE.CALC_BATCH` además exige el mismo calendario
+  (`start`/`payment_times`/`accruals`) en todos los trades; `ENGINE.CALC_MANY` no tiene esa
+  restricción (agrupa internamente). `ENGINE.CALC_GRID` comparte `Pricing`/`Compute` entre
+  todas las celdas de la rejilla — no forman parte de la explosión de combinaciones.
+- **`DV01` en lote no es una sola pasada de diferenciación automática** (PLAN.md §7.19): con
+  `r0` compartido por todos los trades del lote, una única pasada solo da la *suma* de las
+  sensibilidades, no cada una por separado — `ENGINE.CALC_BATCH`/`ENGINE.CALC_MANY` calculan
+  `DV01` correctamente (una pasada por trade, internamente en Rust), pero sin el ahorro de
+  cómputo que sí tienen `PV`/`ExpectedExposure`/`PFE95`/`UnilateralCVA` en lote — solo evitan
+  los *round-trips* de Excel/C++/FFI, no el propio coste de diferenciar.

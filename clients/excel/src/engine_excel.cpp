@@ -127,6 +127,53 @@ extern "C" __declspec(dllexport) LPXLOPER12 WINAPI xlEngineCalc(
     });
 }
 
+// Nivel 3, lote homogeneo (PLAN.md §7.17/§7.19): "trades" es una COLUMNA de handles de
+// producto (xlbridge::read_string_list, mismo mecanismo que "medidas" en ENGINE.CALC), no un
+// handle suelto -- todos deben ser del mismo tipo/calendario, sin use_par_rate. Resultado en
+// formato largo con una columna TradeIndex al frente (xlbridge::new_calc_batch_result).
+extern "C" __declspec(dllexport) LPXLOPER12 WINAPI xlEngineCalcBatch(
+    LPXLOPER12 trades, LPXLOPER12 measure_names, LPXLOPER12 model, LPXLOPER12 market,
+    LPXLOPER12 pricing, LPXLOPER12 execution
+) {
+    return xlbridge::guarded([&] {
+        return xlbridge::new_calc_batch_result(xlbridge::shared().calc_batch(
+            xlbridge::read_string_list(*trades), xlbridge::read_string_list(*measure_names),
+            xlbridge::read_string(*model), xlbridge::read_string(*market),
+            xlbridge::read_string(*pricing), xlbridge::read_string(*execution)));
+    });
+}
+
+// Nivel 2, lista heterogenea (PLAN.md §7.17/§7.19): misma firma/forma de resultado que
+// ENGINE.CALC_BATCH, pero "trades" puede mezclar tipos/calendarios distintos -- se agrupan
+// internamente, nunca falla por heterogeneidad.
+extern "C" __declspec(dllexport) LPXLOPER12 WINAPI xlEngineCalcMany(
+    LPXLOPER12 trades, LPXLOPER12 measure_names, LPXLOPER12 model, LPXLOPER12 market,
+    LPXLOPER12 pricing, LPXLOPER12 execution
+) {
+    return xlbridge::guarded([&] {
+        return xlbridge::new_calc_batch_result(xlbridge::shared().calc_many(
+            xlbridge::read_string_list(*trades), xlbridge::read_string_list(*measure_names),
+            xlbridge::read_string(*model), xlbridge::read_string(*market),
+            xlbridge::read_string(*pricing), xlbridge::read_string(*execution)));
+    });
+}
+
+// Explosion de combinaciones Trades x Models x Markets (PLAN.md §7.19): "modelos"/"mercados"
+// son tambien columnas de handles (mismo mecanismo). pricing/ejecucion son compartidos, no
+// forman parte de la rejilla. Resultado en formato largo con TradeIndex/ModelIndex/MarketIndex
+// al frente (xlbridge::new_calc_grid_result).
+extern "C" __declspec(dllexport) LPXLOPER12 WINAPI xlEngineCalcGrid(
+    LPXLOPER12 trades, LPXLOPER12 measure_names, LPXLOPER12 models, LPXLOPER12 markets,
+    LPXLOPER12 pricing, LPXLOPER12 execution
+) {
+    return xlbridge::guarded([&] {
+        return xlbridge::new_calc_grid_result(xlbridge::shared().calc_grid(
+            xlbridge::read_string_list(*trades), xlbridge::read_string_list(*measure_names),
+            xlbridge::read_string_list(*models), xlbridge::read_string_list(*markets),
+            xlbridge::read_string(*pricing), xlbridge::read_string(*execution)));
+    });
+}
+
 // Calibración (PLAN.md §7.14): mismo modelo mental que list_models/create_model. El mercado
 // se pasa como handle (ENGINE.CREATE_MARKET, PLAN.md §7.15) en vez de un rango inline; el
 // resultado es una tabla clave/valor pensada para poder pasarse tal cual a
@@ -182,6 +229,24 @@ constexpr FnSpec kFunctions[] = {
         L"Calcula un lote de medidas (PV, DV01, ExpectedExposure, PFE95, UnilateralCVA) sobre "
         L"un trade/modelo/mercado/contexto de valoracion/contexto de ejecucion. Resultado en "
         L"formato largo: [MeasureName, Time, Value]."
+    ),
+    ENGINE_XLL_ENTRY(
+        xlEngineCalcBatch, L"UQQQQQQ", L"ENGINE.CALC_BATCH", L"trades,medidas,modelo,mercado,contexto,ejecucion",
+        L"Como ENGINE.CALC pero para una COLUMNA de trades del mismo tipo/calendario (sin "
+        L"tipo fijo 'a la par'), vectorizado sin bucle. Resultado en formato largo: "
+        L"[TradeIndex, MeasureName, Time, Value]."
+    ),
+    ENGINE_XLL_ENTRY(
+        xlEngineCalcMany, L"UQQQQQQ", L"ENGINE.CALC_MANY", L"trades,medidas,modelo,mercado,contexto,ejecucion",
+        L"Como ENGINE.CALC_BATCH pero admite trades de tipos/calendarios distintos: los agrupa "
+        L"internamente y nunca falla por heterogeneidad. Resultado en el mismo formato largo, "
+        L"en el orden de entrada de trades."
+    ),
+    ENGINE_XLL_ENTRY(
+        xlEngineCalcGrid, L"UQQQQQQ", L"ENGINE.CALC_GRID", L"trades,medidas,modelos,mercados,contexto,ejecucion",
+        L"Calcula la rejilla Trades x Modelos x Mercados (columnas de handles); contexto de "
+        L"valoracion/ejecucion compartidos, no forman parte de la rejilla. Resultado en "
+        L"formato largo: [TradeIndex, ModelIndex, MarketIndex, MeasureName, Time, Value]."
     ),
     ENGINE_XLL_ENTRY(xlEngineListCalibrators, L"U", L"ENGINE.LIST_CALIBRATORS", L"",
                       L"Lista los calibradores registrados en el motor."),

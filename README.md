@@ -44,7 +44,8 @@ The result is one vocabulary and one calculation path across every client.
 | Distribution | Windows wheels, Excel add-in package, and all-in-one Inno Setup installer produced by the release workflow |
 
 `Engine.calc(...)` accepts a batch of measure names. `ExpectedExposure` and `PFE95`, for
-example, reuse one exposure simulation rather than running Monte Carlo twice.
+example, reuse one exposure simulation rather than running Monte Carlo twice. `calc_batch`/
+`calc_many`/`calc_grid` extend that batching across trades, and across models and markets.
 
 ## Architecture
 
@@ -162,6 +163,42 @@ The one-factor calibrator fits `a` and `b`; `sigma` and `r0` remain fixed. The t
 calibrator fits the two mean-reversion speeds (`a` and `b`), while `sigma`, `eta`, `rho`,
 and `r0` remain fixed. The synthetic-market helpers exist for deterministic examples and
 tests; they are not a substitute for a real calibration instrument set.
+
+## Batch and grid calculation
+
+Three layers, each built on the one before, let a single call price a portfolio instead of
+looping over `calc(...)` per trade:
+
+- **`calc_batch`** — a *homogeneous* batch: every trade must share the same product type and,
+  for `IRSwap`, the same schedule (`start`/`payment_times`/`accruals`) and an explicit
+  `fixed_rate` (no par-rate trades in a batch). The short-rate path is simulated once for the
+  whole batch, not once per trade.
+- **`calc_many`** — a *heterogeneous* list: trades may mix schedules or (in the future)
+  product types. They are grouped internally and each group is priced with `calc_batch`;
+  heterogeneity never raises an error.
+- **`calc_grid`** — the full **Trades × Models × Markets** combination: `calc_many` runs once
+  per (model, market) pair. `PricingContext`/`ExecutionContext` are shared, not part of the
+  grid.
+
+All three return one row per trade (and, for `calc_grid`, per model/market too) with its
+index attached explicitly — never a nested list:
+
+```python
+trades = [
+    eng.create_product("IRSwap", {"notional": 1_000_000.0, "fixed_rate": 0.02,
+                                   "payment_times": [1, 2, 3, 4, 5], "accruals": [1] * 5}),
+    eng.create_product("IRSwap", {"notional": 2_500_000.0, "fixed_rate": 0.015,
+                                   "payment_times": [1, 2, 3, 4, 5], "accruals": [1] * 5}),
+]
+
+for row in eng.calc_batch(trades, ["PV", "UnilateralCVA"], model, market, pricing, execution):
+    print(row.trade_index, row.measures["PV"].scalar, row.measures["UnilateralCVA"].scalar)
+```
+
+`DV01` is the one exception to "batching is free": with a shared `r0`, reverse-mode AD gives
+the *sum* of per-trade sensitivities in one backward pass, not each one separately, so the
+batch `DV01` still runs one backward pass per trade internally — it saves the FFI/client
+round-trips, not the differentiation cost itself.
 
 ## Build and test from source
 

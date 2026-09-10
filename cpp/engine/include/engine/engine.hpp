@@ -94,6 +94,40 @@ double irs_hull_white_npv_delta_r0(
     const std::vector<double>& payment_times, const std::vector<double>& accruals
 );
 
+// Lote homogéneo (PLAN.md §7.17/§7.19): las mismas cuatro medidas de arriba vectorizadas sobre
+// N trades del mismo calendario -- notionals/fixed_rates son columnas (un valor por trade), sin
+// use_par_rate (cada trade del lote debe traer su fixed_rate explícito). irs_hull_white_npv_
+// delta_r0_batch NO es una sola pasada backward() para todo el lote -- ver
+// engine_core::api::irs_hull_white_npv_delta_r0_batch (Rust) para el porqué: evita N
+// round-trips de FFI/C++/Python/Excel, no las N pasadas backward en sí.
+std::vector<double> irs_hull_white_npv_batch(
+    double a, double b, double sigma, double r0,
+    const std::vector<double>& notionals, const std::vector<double>& fixed_rates, double start,
+    const std::vector<double>& payment_times, const std::vector<double>& accruals
+);
+std::vector<double> irs_hull_white_npv_delta_r0_batch(
+    double a, double b, double sigma, double r0,
+    const std::vector<double>& notionals, const std::vector<double>& fixed_rates, double start,
+    const std::vector<double>& payment_times, const std::vector<double>& accruals
+);
+std::vector<ExposureProfile> irs_hull_white_exposure_profile_batch(
+    const std::string& backend,
+    double a, double b, double sigma, double r0,
+    const std::vector<double>& notionals, const std::vector<double>& fixed_rates, double start,
+    const std::vector<double>& payment_times,
+    const std::vector<double>& accruals,
+    const std::vector<double>& monitoring_times,
+    std::uint64_t n_steps, std::uint64_t n_paths, std::uint64_t seed
+);
+// `profiles` es el mismo vector que ya devuelve irs_hull_white_exposure_profile_batch -- se
+// pasa de vuelta tal cual, sin recalcular el perfil.
+std::vector<double> unilateral_cva_from_exposure_batch(
+    const std::string& backend,
+    double a, double b, double sigma, double r0,
+    const std::vector<ExposureProfile>& profiles,
+    double hazard_rate, double recovery_rate
+);
+
 // Segundo modelo del motor, Hull-White 2 factores (PLAN.md §7.16, G2++): mismas cuatro
 // funciones que su equivalente de 1 factor arriba (perfil de exposición, CVA a partir de un
 // perfil, NPV determinista y su sensibilidad a r0), con dos parámetros adicionales (`eta`,
@@ -128,6 +162,34 @@ double irs_hull_white_2f_npv_delta_r0(
     double a, double b, double sigma, double eta, double rho, double r0,
     double notional, double fixed_rate, bool use_par_rate, double start,
     const std::vector<double>& payment_times, const std::vector<double>& accruals
+);
+
+// Equivalentes de lote de las cuatro funciones 2F de arriba -- ver las versiones de 1 factor
+// para el porqué de cada una (PLAN.md §7.19).
+std::vector<double> irs_hull_white_2f_npv_batch(
+    double a, double b, double sigma, double eta, double rho, double r0,
+    const std::vector<double>& notionals, const std::vector<double>& fixed_rates, double start,
+    const std::vector<double>& payment_times, const std::vector<double>& accruals
+);
+std::vector<double> irs_hull_white_2f_npv_delta_r0_batch(
+    double a, double b, double sigma, double eta, double rho, double r0,
+    const std::vector<double>& notionals, const std::vector<double>& fixed_rates, double start,
+    const std::vector<double>& payment_times, const std::vector<double>& accruals
+);
+std::vector<ExposureProfile> irs_hull_white_2f_exposure_profile_batch(
+    const std::string& backend,
+    double a, double b, double sigma, double eta, double rho, double r0,
+    const std::vector<double>& notionals, const std::vector<double>& fixed_rates, double start,
+    const std::vector<double>& payment_times,
+    const std::vector<double>& accruals,
+    const std::vector<double>& monitoring_times,
+    std::uint64_t n_steps, std::uint64_t n_paths, std::uint64_t seed
+);
+std::vector<double> unilateral_cva_from_exposure_2f_batch(
+    const std::string& backend,
+    double a, double b, double sigma, double eta, double rho, double r0,
+    const std::vector<ExposureProfile>& profiles,
+    double hazard_rate, double recovery_rate
 );
 
 } // namespace engine

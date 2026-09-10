@@ -101,6 +101,145 @@ engine::CalcResult HandleRegistry::calc(
     );
 }
 
+namespace {
+
+// Resuelve una columna de handles de producto (PLAN.md §7.19) contra el mapa memoizado --
+// compartido por calc_batch/calc_many/calc_grid, mismo mensaje de error que ya usa calc() por
+// handle individual.
+std::vector<const engine::IProduct*> resolve_products(
+    const std::unordered_map<std::string, std::unique_ptr<engine::IProduct>>& products,
+    const std::vector<std::string>& handles
+) {
+    std::vector<const engine::IProduct*> out;
+    out.reserve(handles.size());
+    for (const std::string& handle : handles) {
+        auto it = products.find(handle);
+        if (it == products.end()) {
+            throw std::out_of_range("xlbridge: handle de producto desconocido: " + handle);
+        }
+        out.push_back(it->second.get());
+    }
+    return out;
+}
+
+std::vector<const engine::IModel*> resolve_models(
+    const std::unordered_map<std::string, std::unique_ptr<engine::IModel>>& models, const std::vector<std::string>& handles
+) {
+    std::vector<const engine::IModel*> out;
+    out.reserve(handles.size());
+    for (const std::string& handle : handles) {
+        auto it = models.find(handle);
+        if (it == models.end()) {
+            throw std::out_of_range("xlbridge: handle de modelo desconocido: " + handle);
+        }
+        out.push_back(it->second.get());
+    }
+    return out;
+}
+
+std::vector<engine::MarketSnapshot> resolve_markets(
+    const std::unordered_map<std::string, engine::MarketSnapshot>& markets, const std::vector<std::string>& handles
+) {
+    std::vector<engine::MarketSnapshot> out;
+    out.reserve(handles.size());
+    for (const std::string& handle : handles) {
+        auto it = markets.find(handle);
+        if (it == markets.end()) {
+            throw std::out_of_range("xlbridge: handle de mercado desconocido: " + handle);
+        }
+        out.push_back(it->second);
+    }
+    return out;
+}
+
+} // namespace
+
+engine::CalcBatchResult HandleRegistry::calc_batch(
+    const std::vector<std::string>& product_handles,
+    const std::vector<std::string>& measure_names,
+    const std::string& model_handle,
+    const std::string& market_handle,
+    const std::string& pricing_handle,
+    const std::string& execution_handle
+) const {
+    auto model_it = models_.find(model_handle);
+    if (model_it == models_.end()) {
+        throw std::out_of_range("xlbridge: handle de modelo desconocido: " + model_handle);
+    }
+    auto market_it = markets_.find(market_handle);
+    if (market_it == markets_.end()) {
+        throw std::out_of_range("xlbridge: handle de mercado desconocido: " + market_handle);
+    }
+    auto pricing_it = pricing_contexts_.find(pricing_handle);
+    if (pricing_it == pricing_contexts_.end()) {
+        throw std::out_of_range("xlbridge: handle de contexto de valoracion desconocido: " + pricing_handle);
+    }
+    auto execution_it = execution_contexts_.find(execution_handle);
+    if (execution_it == execution_contexts_.end()) {
+        throw std::out_of_range("xlbridge: handle de contexto de ejecucion desconocido: " + execution_handle);
+    }
+
+    return engine::calc_batch(
+        registries_, resolve_products(products_, product_handles), measure_names, *model_it->second,
+        market_it->second, pricing_it->second, execution_it->second
+    );
+}
+
+engine::CalcBatchResult HandleRegistry::calc_many(
+    const std::vector<std::string>& product_handles,
+    const std::vector<std::string>& measure_names,
+    const std::string& model_handle,
+    const std::string& market_handle,
+    const std::string& pricing_handle,
+    const std::string& execution_handle
+) const {
+    auto model_it = models_.find(model_handle);
+    if (model_it == models_.end()) {
+        throw std::out_of_range("xlbridge: handle de modelo desconocido: " + model_handle);
+    }
+    auto market_it = markets_.find(market_handle);
+    if (market_it == markets_.end()) {
+        throw std::out_of_range("xlbridge: handle de mercado desconocido: " + market_handle);
+    }
+    auto pricing_it = pricing_contexts_.find(pricing_handle);
+    if (pricing_it == pricing_contexts_.end()) {
+        throw std::out_of_range("xlbridge: handle de contexto de valoracion desconocido: " + pricing_handle);
+    }
+    auto execution_it = execution_contexts_.find(execution_handle);
+    if (execution_it == execution_contexts_.end()) {
+        throw std::out_of_range("xlbridge: handle de contexto de ejecucion desconocido: " + execution_handle);
+    }
+
+    return engine::calc_many(
+        registries_, resolve_products(products_, product_handles), measure_names, *model_it->second,
+        market_it->second, pricing_it->second, execution_it->second
+    );
+}
+
+engine::CalcGridResult HandleRegistry::calc_grid(
+    const std::vector<std::string>& product_handles,
+    const std::vector<std::string>& measure_names,
+    const std::vector<std::string>& model_handles,
+    const std::vector<std::string>& market_handles,
+    const std::string& pricing_handle,
+    const std::string& execution_handle
+) const {
+    auto pricing_it = pricing_contexts_.find(pricing_handle);
+    if (pricing_it == pricing_contexts_.end()) {
+        throw std::out_of_range("xlbridge: handle de contexto de valoracion desconocido: " + pricing_handle);
+    }
+    auto execution_it = execution_contexts_.find(execution_handle);
+    if (execution_it == execution_contexts_.end()) {
+        throw std::out_of_range("xlbridge: handle de contexto de ejecucion desconocido: " + execution_handle);
+    }
+
+    return engine::calc_grid(
+        registries_, resolve_products(products_, product_handles), measure_names,
+        resolve_models(models_, model_handles), resolve_markets(markets_, market_handles),
+        pricing_it->second, execution_it->second
+    );
+}
+
 engine::CalibrationResult HandleRegistry::calibrate(
     const std::string& calibrator_handle, const std::string& market_handle, const XLOPER12& initial_guess_arg
 ) const {

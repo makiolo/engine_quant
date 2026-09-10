@@ -118,7 +118,111 @@ double compute_npv_delta_r0(const IModel& model, const IrSwapProduct& irs_produc
     throw std::invalid_argument("Dv01Measure: modelo no soportado: " + model.type_name());
 }
 
+// Columnas notional/fixed_rate del lote (PLAN.md §7.19) -- el resto del calendario
+// (start/payment_times/accruals) se toma del primer trade, ya validado igual en todos por el
+// llamante (`engine::calc_batch`).
+void columnarize(const std::vector<const IrSwapProduct*>& irs_products, std::vector<double>& notionals, std::vector<double>& fixed_rates) {
+    notionals.reserve(irs_products.size());
+    fixed_rates.reserve(irs_products.size());
+    for (const auto* p : irs_products) {
+        notionals.push_back(p->notional());
+        fixed_rates.push_back(p->fixed_rate());
+    }
+}
+
 } // namespace
+
+std::vector<ExposureProfile> compute_exposure_profile_batch(
+    const IModel& model, const std::vector<const IrSwapProduct*>& irs_products,
+    const PricingContext& pricing, const ExecutionContext& execution
+) {
+    const IrSwapProduct& first = *irs_products.front();
+    const std::vector<double> monitoring_times = reset_dates(first);
+    std::vector<double> notionals, fixed_rates;
+    columnarize(irs_products, notionals, fixed_rates);
+
+    if (const auto* hw1 = dynamic_cast<const HullWhite1FModel*>(&model)) {
+        return irs_hull_white_exposure_profile_batch(
+            execution.backend(),
+            hw1->a(), hw1->b(), hw1->sigma(), hw1->r0(),
+            notionals, fixed_rates,
+            first.start(), first.payment_times(), first.accruals(),
+            monitoring_times,
+            pricing.n_steps(), pricing.n_paths(), pricing.seed()
+        );
+    }
+    if (const auto* hw2 = dynamic_cast<const HullWhite2FModel*>(&model)) {
+        return irs_hull_white_2f_exposure_profile_batch(
+            execution.backend(),
+            hw2->a(), hw2->b(), hw2->sigma(), hw2->eta(), hw2->rho(), hw2->r0(),
+            notionals, fixed_rates,
+            first.start(), first.payment_times(), first.accruals(),
+            monitoring_times,
+            pricing.n_steps(), pricing.n_paths(), pricing.seed()
+        );
+    }
+    throw std::invalid_argument("ExposureProfileMeasure: modelo no soportado (lote): " + model.type_name());
+}
+
+std::vector<double> compute_cva_from_exposure_batch(
+    const IModel& model, const ExecutionContext& execution,
+    const std::vector<ExposureProfile>& profiles,
+    double hazard_rate, double recovery_rate
+) {
+    if (const auto* hw1 = dynamic_cast<const HullWhite1FModel*>(&model)) {
+        return unilateral_cva_from_exposure_batch(
+            execution.backend(), hw1->a(), hw1->b(), hw1->sigma(), hw1->r0(),
+            profiles, hazard_rate, recovery_rate
+        );
+    }
+    if (const auto* hw2 = dynamic_cast<const HullWhite2FModel*>(&model)) {
+        return unilateral_cva_from_exposure_2f_batch(
+            execution.backend(), hw2->a(), hw2->b(), hw2->sigma(), hw2->eta(), hw2->rho(), hw2->r0(),
+            profiles, hazard_rate, recovery_rate
+        );
+    }
+    throw std::invalid_argument("UnilateralCvaMeasure: modelo no soportado (lote): " + model.type_name());
+}
+
+std::vector<double> compute_npv_batch(const IModel& model, const std::vector<const IrSwapProduct*>& irs_products) {
+    const IrSwapProduct& first = *irs_products.front();
+    std::vector<double> notionals, fixed_rates;
+    columnarize(irs_products, notionals, fixed_rates);
+
+    if (const auto* hw1 = dynamic_cast<const HullWhite1FModel*>(&model)) {
+        return irs_hull_white_npv_batch(
+            hw1->a(), hw1->b(), hw1->sigma(), hw1->r0(),
+            notionals, fixed_rates, first.start(), first.payment_times(), first.accruals()
+        );
+    }
+    if (const auto* hw2 = dynamic_cast<const HullWhite2FModel*>(&model)) {
+        return irs_hull_white_2f_npv_batch(
+            hw2->a(), hw2->b(), hw2->sigma(), hw2->eta(), hw2->rho(), hw2->r0(),
+            notionals, fixed_rates, first.start(), first.payment_times(), first.accruals()
+        );
+    }
+    throw std::invalid_argument("PresentValueMeasure: modelo no soportado (lote): " + model.type_name());
+}
+
+std::vector<double> compute_npv_delta_r0_batch(const IModel& model, const std::vector<const IrSwapProduct*>& irs_products) {
+    const IrSwapProduct& first = *irs_products.front();
+    std::vector<double> notionals, fixed_rates;
+    columnarize(irs_products, notionals, fixed_rates);
+
+    if (const auto* hw1 = dynamic_cast<const HullWhite1FModel*>(&model)) {
+        return irs_hull_white_npv_delta_r0_batch(
+            hw1->a(), hw1->b(), hw1->sigma(), hw1->r0(),
+            notionals, fixed_rates, first.start(), first.payment_times(), first.accruals()
+        );
+    }
+    if (const auto* hw2 = dynamic_cast<const HullWhite2FModel*>(&model)) {
+        return irs_hull_white_2f_npv_delta_r0_batch(
+            hw2->a(), hw2->b(), hw2->sigma(), hw2->eta(), hw2->rho(), hw2->r0(),
+            notionals, fixed_rates, first.start(), first.payment_times(), first.accruals()
+        );
+    }
+    throw std::invalid_argument("Dv01Measure: modelo no soportado (lote): " + model.type_name());
+}
 
 MeasureResult ExposureProfileMeasure::evaluate(
     const IModel& model, const IProduct& product, const MarketSnapshot&,

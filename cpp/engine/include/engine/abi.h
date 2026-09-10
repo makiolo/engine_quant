@@ -223,6 +223,83 @@ ENGINE_ABI_API int engine_abi_calc(
 );
 ENGINE_ABI_API void engine_abi_free_calc_results(EngineCalcResultEntry* entries, size_t count);
 
+/* --- ENGINE.CALC_BATCH / ENGINE.CALC_MANY / ENGINE.CALC_GRID (PLAN.md §7.17/§7.19) --------
+ * Tres niveles de la API de calculo por lotes: calc_batch (homogeneo -- todos los `products`
+ * deben ser del mismo tipo registrado y, para IRSwap, compartir calendario y traer fixed_rate
+ * explicito, sin use_par_rate) y calc_many (heterogeneo -- agrupa internamente por tipo +
+ * calendario y llama a calc_batch por grupo, nunca falla por heterogeneidad) devuelven la
+ * MISMA forma: una fila por trade con su indice explicito. calc_grid explota products x
+ * models x markets (PricingContext/ExecutionContext compartidos, no forman parte de la
+ * rejilla), una fila por (trade, model, market).
+ *
+ * `products`/`models` son arrays de PUNTEROS a handles opacos ya creados (const EngineProduct*
+ * const*, const EngineModel* const*) -- primera vez que esta ABI recibe un array de handles en
+ * vez de uno solo, mismo patron array+count que el resto (EngineParam*, measure_names).
+ * `markets` es un array de EngineMarketSnapshot por VALOR (struct plano, no handle). */
+typedef struct EngineCalcBatchResultEntry {
+    size_t trade_index;
+    EngineCalcResultEntry* measures; /* array owned por la libreria, n_measures largo */
+    size_t n_measures;
+} EngineCalcBatchResultEntry;
+
+/* Devuelve 0 en exito (`*out_entries`/`*out_count` rellenos, liberar con
+ * engine_abi_free_calc_batch_results) o != 0 en error (products vacio o con NULL, tipo de
+ * producto no soportado para lote, calendarios distintos entre trades, algun trade con
+ * use_par_rate, nombre de medida desconocido -- ver engine_abi_last_error). */
+ENGINE_ABI_API int engine_abi_calc_batch(
+    const EngineProduct** products,
+    size_t n_products,
+    const char** measure_names,
+    size_t n_measure_names,
+    const EngineModel* model,
+    const EngineMarketSnapshot* market,
+    const EnginePricingContext* pricing,
+    const EngineExecutionContext* execution,
+    EngineCalcBatchResultEntry** out_entries,
+    size_t* out_count
+);
+/* Misma firma que engine_abi_calc_batch; a diferencia de ella, acepta products de tipos/
+ * calendarios distintos (los agrupa internamente) y nunca falla por heterogeneidad. */
+ENGINE_ABI_API int engine_abi_calc_many(
+    const EngineProduct** products,
+    size_t n_products,
+    const char** measure_names,
+    size_t n_measure_names,
+    const EngineModel* model,
+    const EngineMarketSnapshot* market,
+    const EnginePricingContext* pricing,
+    const EngineExecutionContext* execution,
+    EngineCalcBatchResultEntry** out_entries,
+    size_t* out_count
+);
+ENGINE_ABI_API void engine_abi_free_calc_batch_results(EngineCalcBatchResultEntry* entries, size_t count);
+
+typedef struct EngineCalcGridResultEntry {
+    size_t trade_index;
+    size_t model_index;
+    size_t market_index;
+    EngineCalcResultEntry* measures;
+    size_t n_measures;
+} EngineCalcGridResultEntry;
+
+/* Devuelve 0 en exito o != 0 en error (products/models/markets vacios, mismos errores que
+ * engine_abi_calc_many por cada combinacion model x market -- ver engine_abi_last_error). */
+ENGINE_ABI_API int engine_abi_calc_grid(
+    const EngineProduct** products,
+    size_t n_products,
+    const char** measure_names,
+    size_t n_measure_names,
+    const EngineModel** models,
+    size_t n_models,
+    const EngineMarketSnapshot* markets,
+    size_t n_markets,
+    const EnginePricingContext* pricing,
+    const EngineExecutionContext* execution,
+    EngineCalcGridResultEntry** out_entries,
+    size_t* out_count
+);
+ENGINE_ABI_API void engine_abi_free_calc_grid_results(EngineCalcGridResultEntry* entries, size_t count);
+
 ENGINE_ABI_API int engine_abi_is_gpu_backend_available(void);
 
 /* --- Errores --------------------------------------------------------------------------

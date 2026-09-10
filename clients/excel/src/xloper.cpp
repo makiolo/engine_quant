@@ -334,6 +334,111 @@ XLOPER12* new_calc_result(const engine::CalcResult& result) {
     return out;
 }
 
+namespace {
+
+// Numero de filas que ocupa un engine::CalcResult en formato largo (una por medida escalar,
+// una por fecha de las de perfil) -- compartido por new_calc_batch_result/new_calc_grid_result
+// (PLAN.md §7.19), mismo criterio que ya usa new_calc_result inline.
+std::size_t calc_result_row_count(const engine::CalcResult& result) {
+    std::size_t n = 0;
+    for (const auto& entry : result) n += entry.result.has_scalar ? 1 : entry.result.times.size();
+    return n;
+}
+
+// Escribe las columnas [MeasureName, Time, Value] de un CalcResult en `cells`, empezando en la
+// fila `start_row` y en la columna `index_columns` (las columnas de indice -- TradeIndex, o
+// TradeIndex+ModelIndex+MarketIndex -- ya escritas a su izquierda por el llamante). Devuelve la
+// fila siguiente libre. `total_columns` es el ancho total de la tabla (para el stride
+// row*total_columns).
+RW write_calc_result_rows(
+    XLOPER12* cells, RW start_row, COL total_columns, COL index_columns, const engine::CalcResult& result
+) {
+    RW row = start_row;
+    for (const auto& entry : result) {
+        auto write_name = [&](RW r) {
+            std::vector<XCHAR> buf = to_xl_string_buffer(entry.measure_name);
+            XCHAR* owned = new XCHAR[buf.size()];
+            std::copy(buf.begin(), buf.end(), owned);
+            cells[r * total_columns + index_columns + 0].xltype = xltypeStr;
+            cells[r * total_columns + index_columns + 0].val.str = owned;
+        };
+
+        if (entry.result.has_scalar) {
+            write_name(row);
+            cells[row * total_columns + index_columns + 1].xltype = xltypeNil;
+            cells[row * total_columns + index_columns + 2].xltype = xltypeNum;
+            cells[row * total_columns + index_columns + 2].val.num = entry.result.scalar;
+            ++row;
+        } else {
+            for (std::size_t i = 0; i < entry.result.times.size(); ++i) {
+                write_name(row);
+                cells[row * total_columns + index_columns + 1].xltype = xltypeNum;
+                cells[row * total_columns + index_columns + 1].val.num = entry.result.times[i];
+                cells[row * total_columns + index_columns + 2].xltype = xltypeNum;
+                cells[row * total_columns + index_columns + 2].val.num = entry.result.primary[i];
+                ++row;
+            }
+        }
+    }
+    return row;
+}
+
+} // namespace
+
+XLOPER12* new_calc_batch_result(const engine::CalcBatchResult& result) {
+    RW total_rows = 0;
+    for (const auto& entry : result) total_rows += static_cast<RW>(calc_result_row_count(entry.measures));
+    if (total_rows == 0) return new_error(xlerrNA);
+
+    constexpr COL kColumns = 4; // TradeIndex, MeasureName, Time, Value
+    XLOPER12* cells = new XLOPER12[static_cast<std::size_t>(total_rows) * kColumns]{};
+    RW row = 0;
+    for (const auto& entry : result) {
+        RW rows_for_trade = static_cast<RW>(calc_result_row_count(entry.measures));
+        for (RW r = row; r < row + rows_for_trade; ++r) {
+            cells[r * kColumns + 0].xltype = xltypeNum;
+            cells[r * kColumns + 0].val.num = static_cast<double>(entry.trade_index);
+        }
+        row = write_calc_result_rows(cells, row, kColumns, 1, entry.measures);
+    }
+
+    XLOPER12* out = new XLOPER12{};
+    out->xltype = xltypeMulti | xlbitDLLFree;
+    out->val.array.rows = total_rows;
+    out->val.array.columns = kColumns;
+    out->val.array.lparray = cells;
+    return out;
+}
+
+XLOPER12* new_calc_grid_result(const engine::CalcGridResult& result) {
+    RW total_rows = 0;
+    for (const auto& entry : result) total_rows += static_cast<RW>(calc_result_row_count(entry.measures));
+    if (total_rows == 0) return new_error(xlerrNA);
+
+    constexpr COL kColumns = 6; // TradeIndex, ModelIndex, MarketIndex, MeasureName, Time, Value
+    XLOPER12* cells = new XLOPER12[static_cast<std::size_t>(total_rows) * kColumns]{};
+    RW row = 0;
+    for (const auto& entry : result) {
+        RW rows_for_cell = static_cast<RW>(calc_result_row_count(entry.measures));
+        for (RW r = row; r < row + rows_for_cell; ++r) {
+            cells[r * kColumns + 0].xltype = xltypeNum;
+            cells[r * kColumns + 0].val.num = static_cast<double>(entry.trade_index);
+            cells[r * kColumns + 1].xltype = xltypeNum;
+            cells[r * kColumns + 1].val.num = static_cast<double>(entry.model_index);
+            cells[r * kColumns + 2].xltype = xltypeNum;
+            cells[r * kColumns + 2].val.num = static_cast<double>(entry.market_index);
+        }
+        row = write_calc_result_rows(cells, row, kColumns, 3, entry.measures);
+    }
+
+    XLOPER12* out = new XLOPER12{};
+    out->xltype = xltypeMulti | xlbitDLLFree;
+    out->val.array.rows = total_rows;
+    out->val.array.columns = kColumns;
+    out->val.array.lparray = cells;
+    return out;
+}
+
 XLOPER12* new_calibration_result(const engine::CalibrationResult& result) {
     engine::Params rows = result.optimal_params;
     rows.emplace("rmse", result.rmse);

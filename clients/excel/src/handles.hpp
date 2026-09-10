@@ -75,6 +75,39 @@ public:
         const std::string& execution_handle
     ) const;
 
+    // Nivel 3, lote homogeneo (PLAN.md §7.17/§7.19): product_handles debe ser una columna de
+    // handles del mismo tipo/calendario, sin use_par_rate -- ver engine::calc_batch.
+    engine::CalcBatchResult calc_batch(
+        const std::vector<std::string>& product_handles,
+        const std::vector<std::string>& measure_names,
+        const std::string& model_handle,
+        const std::string& market_handle,
+        const std::string& pricing_handle,
+        const std::string& execution_handle
+    ) const;
+
+    // Nivel 2, lista heterogenea (PLAN.md §7.17/§7.19): misma forma que calc_batch, pero
+    // product_handles puede mezclar tipos/calendarios distintos -- ver engine::calc_many.
+    engine::CalcBatchResult calc_many(
+        const std::vector<std::string>& product_handles,
+        const std::vector<std::string>& measure_names,
+        const std::string& model_handle,
+        const std::string& market_handle,
+        const std::string& pricing_handle,
+        const std::string& execution_handle
+    ) const;
+
+    // Explosion de combinaciones Trades x Models x Markets (PLAN.md §7.19): pricing/execution
+    // son compartidos, no forman parte de la rejilla -- ver engine::calc_grid.
+    engine::CalcGridResult calc_grid(
+        const std::vector<std::string>& product_handles,
+        const std::vector<std::string>& measure_names,
+        const std::vector<std::string>& model_handles,
+        const std::vector<std::string>& market_handles,
+        const std::string& pricing_handle,
+        const std::string& execution_handle
+    ) const;
+
     // market_handle: handle devuelto por create_market (ya no un rango inline -- un
     // MarketSnapshot no polimórfico se memoiza igual que Model/Product, PLAN.md §7.15).
     // initial_guess_arg: mismo formato clave/valor que params_arg en el resto de create_*.

@@ -164,6 +164,10 @@ mod tests {
     /// del estimador (no un número arbitrario).
     #[test]
     fn monte_carlo_bond_price_converges_to_analytic_formula() {
+        // PLAN.md §7.19: `B::seed` (burn-ndarray) usa un Mutex global de proceso, no uno por
+        // hilo -- este lock evita que otro test sembrado (`cargo test` corre en paralelo por
+        // defecto) pise este RNG a mitad de simulación. Ver `crate::rng_test_lock`.
+        let _guard = crate::rng_test_lock::LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let model = reference_model();
         let r0 = 0.02;
         let maturity = 5.0;

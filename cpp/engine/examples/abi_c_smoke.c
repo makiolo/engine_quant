@@ -281,6 +281,67 @@ int main(void) {
         printf("error esperado al pedir una medida inexistente: %.*s\n", (int) error_len, error_buf);
     }
 
+    /* engine_abi_calc_batch (PLAN.md §7.17/§7.19): lote homogeneo -- 3 swaps del mismo
+     * calendario, cada uno con su propio notional/fixed_rate explicito (sin use_par_rate,
+     * que el lote no soporta), vectorizado sin bucle escalar. EngineProduct** es un patron
+     * nuevo en esta ABI (hasta ahora un handle se pasaba de uno en uno). */
+    {
+        double batch_notionals[3] = {1000000.0, 2500000.0, 500000.0};
+        double batch_fixed_rates[3] = {0.02, 0.015, 0.025};
+        EngineProduct* batch_products[3];
+        const EngineProduct* batch_products_const[3];
+        EngineParam batch_irs_params[4];
+        const char* batch_measure_names[3] = {"PV", "ExpectedExposure", "UnilateralCVA"};
+        EngineCalcBatchResultEntry* batch_entries = NULL;
+        size_t batch_count = 0;
+        int bi;
+
+        for (bi = 0; bi < 3; ++bi) {
+            batch_irs_params[0].key = "notional";
+            batch_irs_params[0].kind = ENGINE_PARAM_DOUBLE;
+            batch_irs_params[0].scalar = batch_notionals[bi];
+            batch_irs_params[1].key = "fixed_rate";
+            batch_irs_params[1].kind = ENGINE_PARAM_DOUBLE;
+            batch_irs_params[1].scalar = batch_fixed_rates[bi];
+            batch_irs_params[2].key = "payment_times";
+            batch_irs_params[2].kind = ENGINE_PARAM_VECTOR;
+            batch_irs_params[2].values = payment_times;
+            batch_irs_params[2].count = 5;
+            batch_irs_params[3].key = "accruals";
+            batch_irs_params[3].kind = ENGINE_PARAM_VECTOR;
+            batch_irs_params[3].values = accruals;
+            batch_irs_params[3].count = 5;
+
+            batch_products[bi] = engine_abi_create_product("IRSwap", batch_irs_params, 4);
+            if (!batch_products[bi]) return fail("engine_abi_create_product (lote)");
+            batch_products_const[bi] = batch_products[bi];
+        }
+
+        if (engine_abi_calc_batch(
+                batch_products_const, 3, batch_measure_names, 3, model, &market, &pricing, &execution,
+                &batch_entries, &batch_count
+            ) != 0) {
+            for (bi = 0; bi < 3; ++bi) engine_abi_free_product(batch_products[bi]);
+            return fail("engine_abi_calc_batch");
+        }
+
+        for (bi = 0; bi < (int) batch_count; ++bi) {
+            const EngineCalcResultEntry* pv_row = NULL;
+            size_t k;
+            for (k = 0; k < batch_entries[bi].n_measures; ++k) {
+                if (strcmp(batch_entries[bi].measures[k].measure_name, "PV") == 0) {
+                    pv_row = &batch_entries[bi].measures[k];
+                }
+            }
+            printf(
+                "lote trade_index=%zu PV=%.4f\n", batch_entries[bi].trade_index, pv_row ? pv_row->result.scalar : 0.0
+            );
+        }
+
+        engine_abi_free_calc_batch_results(batch_entries, batch_count);
+        for (bi = 0; bi < 3; ++bi) engine_abi_free_product(batch_products[bi]);
+    }
+
     engine_abi_free_product(product);
     engine_abi_free_model(model);
 

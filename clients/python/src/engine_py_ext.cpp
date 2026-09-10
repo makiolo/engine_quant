@@ -102,9 +102,62 @@ public:
         return out;
     }
 
+    // Nivel 3, lote homogéneo (PLAN.md §7.17/§7.19): `products` debe ser del mismo tipo
+    // registrado y, para IRSwap, compartir calendario y traer fixed_rate explícito (sin
+    // use_par_rate) -- ver engine::calc_batch. Devuelve list[BatchResult], no una lista
+    // anidada: cada fila lleva su trade_index explícito, misma filosofía en las cinco capas.
+    std::vector<engine::CalcBatchResultEntry> calc_batch(
+        const std::vector<const engine::IProduct*>& products,
+        const std::vector<std::string>& measure_names,
+        const engine::IModel& model,
+        const engine::MarketSnapshot& market,
+        const engine::PricingContext& pricing,
+        const engine::ExecutionContext& execution
+    ) const {
+        return engine::calc_batch(registries_, products, measure_names, model, market, pricing, execution);
+    }
+
+    // Nivel 2, lista heterogénea (PLAN.md §7.17/§7.19): misma forma de resultado que
+    // calc_batch, pero products puede mezclar tipos/calendarios distintos -- se agrupan
+    // internamente y nunca falla por heterogeneidad (ver engine::calc_many).
+    std::vector<engine::CalcBatchResultEntry> calc_many(
+        const std::vector<const engine::IProduct*>& products,
+        const std::vector<std::string>& measure_names,
+        const engine::IModel& model,
+        const engine::MarketSnapshot& market,
+        const engine::PricingContext& pricing,
+        const engine::ExecutionContext& execution
+    ) const {
+        return engine::calc_many(registries_, products, measure_names, model, market, pricing, execution);
+    }
+
+    // Explosión de combinaciones Trades x Models x Markets (PLAN.md §7.19): pricing/execution
+    // son compartidos, no forman parte de la rejilla -- ver engine::calc_grid.
+    std::vector<engine::CalcGridResultEntry> calc_grid(
+        const std::vector<const engine::IProduct*>& products,
+        const std::vector<std::string>& measure_names,
+        const std::vector<const engine::IModel*>& models,
+        const std::vector<engine::MarketSnapshot>& markets,
+        const engine::PricingContext& pricing,
+        const engine::ExecutionContext& execution
+    ) const {
+        return engine::calc_grid(registries_, products, measure_names, models, markets, pricing, execution);
+    }
+
 private:
     engine::Registries registries_;
 };
+
+// Traduce un engine::CalcResult (usado dentro de BatchResult/GridResult) a un dict
+// {nombre_medida: MeasureResult} -- misma forma que ya devuelve Engine.calc, extraída aquí
+// para no duplicarla entre BatchResult y GridResult (PLAN.md §7.19).
+nb::dict calc_result_to_dict(const engine::CalcResult& result) {
+    nb::dict out;
+    for (const auto& entry : result) {
+        out[entry.measure_name.c_str()] = entry.result;
+    }
+    return out;
+}
 
 } // namespace
 
@@ -193,6 +246,32 @@ NB_MODULE(engine, m) {
         .def("__repr__", [](const engine::MeasureResult& self) {
             return "<MeasureResult times=" + std::to_string(self.times.size()) +
                    " has_scalar=" + (self.has_scalar ? std::string("True") : std::string("False")) + ">";
+        });
+
+    // --- calc_batch / calc_many / calc_grid (PLAN.md §7.17/§7.19) ---
+    // Cada fila lleva su(s) índice(s) explícito(s) -- nunca una lista anidada -- misma
+    // filosofía en las cinco capas (C++/C ABI/Python/Excel).
+
+    nb::class_<engine::CalcBatchResultEntry>(m, "BatchResult")
+        .def_ro("trade_index", &engine::CalcBatchResultEntry::trade_index)
+        .def_prop_ro(
+            "measures", [](const engine::CalcBatchResultEntry& self) { return calc_result_to_dict(self.measures); }
+        )
+        .def("__repr__", [](const engine::CalcBatchResultEntry& self) {
+            return "<BatchResult trade_index=" + std::to_string(self.trade_index) + ">";
+        });
+
+    nb::class_<engine::CalcGridResultEntry>(m, "GridResult")
+        .def_ro("trade_index", &engine::CalcGridResultEntry::trade_index)
+        .def_ro("model_index", &engine::CalcGridResultEntry::model_index)
+        .def_ro("market_index", &engine::CalcGridResultEntry::market_index)
+        .def_prop_ro(
+            "measures", [](const engine::CalcGridResultEntry& self) { return calc_result_to_dict(self.measures); }
+        )
+        .def("__repr__", [](const engine::CalcGridResultEntry& self) {
+            return "<GridResult trade_index=" + std::to_string(self.trade_index) +
+                   " model_index=" + std::to_string(self.model_index) +
+                   " market_index=" + std::to_string(self.market_index) + ">";
         });
 
     // --- Market / PricingContext / ExecutionContext (PLAN.md §7.15) ---
@@ -337,5 +416,45 @@ NB_MODULE(engine, m) {
             "MeasureResult} en el mismo orden que measure_names.\n\n"
             ">>> eng.calc(trade, ['PV', 'DV01', 'ExpectedExposure', 'PFE95', 'UnilateralCVA'],\n"
             "...          model, market, pricing, execution)"
+        )
+        .def(
+            "calc_batch",
+            &Engine::calc_batch,
+            nb::arg("products"),
+            nb::arg("measure_names"),
+            nb::arg("model"),
+            nb::arg("market"),
+            nb::arg("pricing"),
+            nb::arg("execution"),
+            "Nivel 3 (PLAN.md §7.17/§7.19): calcula measure_names para una LISTA de trades del "
+            "mismo tipo/calendario, vectorizado sin bucle -- cada trade de IRSwap debe traer "
+            "fixed_rate explicito (sin use_par_rate). Devuelve list[BatchResult], una fila por "
+            "trade en el mismo orden que products."
+        )
+        .def(
+            "calc_many",
+            &Engine::calc_many,
+            nb::arg("products"),
+            nb::arg("measure_names"),
+            nb::arg("model"),
+            nb::arg("market"),
+            nb::arg("pricing"),
+            nb::arg("execution"),
+            "Nivel 2 (PLAN.md §7.17/§7.19): igual que calc_batch pero products puede mezclar "
+            "tipos/calendarios distintos -- se agrupan internamente (nunca falla por "
+            "heterogeneidad) y el resultado se devuelve en el orden de entrada original."
+        )
+        .def(
+            "calc_grid",
+            &Engine::calc_grid,
+            nb::arg("products"),
+            nb::arg("measure_names"),
+            nb::arg("models"),
+            nb::arg("markets"),
+            nb::arg("pricing"),
+            nb::arg("execution"),
+            "Explosion de combinaciones Trades x Models x Markets (PLAN.md §7.19): por cada "
+            "par (modelo, mercado), llama a calc_many sobre products entero. pricing/execution "
+            "son compartidos, no forman parte de la rejilla. Devuelve list[GridResult]."
         );
 }
