@@ -58,6 +58,15 @@ public:
         double hazard_rate = 0.0, double recovery_rate = 0.0
     );
 
+    // Equivalente de dos factores de synthetic_from_hull_white (PLAN.md §7.16/§7.18): fabrica
+    // un MarketSnapshot leyendo la propia fórmula cerrada de HullWhite2F
+    // (engine::hull_white_2f_zero_coupon_bond, factores latentes en su valor inicial) en los
+    // pillars dados.
+    static MarketSnapshot synthetic_from_hull_white_2f(
+        double a, double b, double sigma, double eta, double rho, double r0, const std::vector<double>& pillars,
+        double hazard_rate = 0.0, double recovery_rate = 0.0
+    );
+
 private:
     std::vector<double> pillars_;
     std::vector<double> zero_rates_;

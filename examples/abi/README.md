@@ -18,6 +18,14 @@ de estos cinco falla sus invariantes, algo se rompió en la traducción C ABI �
 `engine::Registries`/`engine::calc` para ese lenguaje/librería concreto, no en el motor (que ya
 validan los demás).
 
+El ejemplo en C (único de los cinco actualizado en PLAN.md §7.18, ver "## C" más abajo) añade
+además la calibración genérica de los dos modelos del motor
+(`engine_abi_create_calibrator`/`engine_abi_calibrate`, uno por `HullWhite1F` y `HullWhite2F`)
+hasta pasar el resultado a `engine_abi_create_model` -- cerrando el círculo Mercado → calibrar
+→ Modelo calibrado también desde esta ABI. El resto de lenguajes seguirían exactamente el
+mismo patrón (mismo `EngineCalibrator` opaco que `EngineModel`/`EngineProduct`), no repetido
+aquí por acotar el alcance.
+
 ## Requisito común: compilar `engine_abi` primero
 
 Los cuatro ejemplos enlazan/cargan `engine_abi.dll` (Windows) o `libengine_abi.so`/`.dylib`

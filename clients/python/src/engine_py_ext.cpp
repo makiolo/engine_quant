@@ -139,6 +139,21 @@ NB_MODULE(engine, m) {
     );
 
     m.def(
+        "hull_white_2f_zero_coupon_bond",
+        &engine::hull_white_2f_zero_coupon_bond,
+        nb::arg("a"),
+        nb::arg("b"),
+        nb::arg("sigma"),
+        nb::arg("eta"),
+        nb::arg("rho"),
+        nb::arg("r0"),
+        nb::arg("maturity"),
+        "Equivalente de dos factores de hull_white_zero_coupon_bond (PLAN.md §7.18): precio "
+        "del bono cero-cupon de HullWhite2F/G2++ con los dos factores latentes en su valor "
+        "inicial (x_0 = y_0 = 0)."
+    );
+
+    m.def(
         "irs_unilateral_cva_5y",
         &engine::irs_unilateral_cva_5y,
         nb::arg("a"),
@@ -214,6 +229,22 @@ NB_MODULE(engine, m) {
             "Mercado 'falso': fabrica un MarketSnapshot leyendo la propia formula cerrada de "
             "HullWhite1F en los pillars dados -- util para probar/demostrar calibrate() sin "
             "depender de datos de mercado reales."
+        )
+        .def_static(
+            "synthetic_from_hull_white_2f",
+            &engine::MarketSnapshot::synthetic_from_hull_white_2f,
+            nb::arg("a"),
+            nb::arg("b"),
+            nb::arg("sigma"),
+            nb::arg("eta"),
+            nb::arg("rho"),
+            nb::arg("r0"),
+            nb::arg("pillars"),
+            nb::arg("hazard_rate") = 0.0,
+            nb::arg("recovery_rate") = 0.0,
+            "Equivalente de dos factores de synthetic_from_hull_white (PLAN.md §7.18): "
+            "fabrica un MarketSnapshot leyendo la propia formula cerrada de HullWhite2F/G2++ "
+            "en los pillars dados."
         )
         .def("__repr__", [](const engine::MarketSnapshot& self) {
             return "<MarketSnapshot pillars=" + std::to_string(self.pillars().size()) + ">";

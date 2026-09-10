@@ -119,7 +119,7 @@ el perfil de exposición Monte Carlo difiere en ruido estadístico (variación t
 en el caso de §5.2), no en la lógica de valoración. No usar el mismo `seed` en ambos backends
 como prueba de reproducibilidad exacta.
 
-## Market y calibración (PLAN.md §7.14, §7.15)
+## Market y calibración (PLAN.md §7.14, §7.15, §7.18)
 
 A diferencia de antes de §7.15, `ENGINE.CALIBRATE` toma el mercado como **handle**
 (`ENGINE.CREATE_MARKET`), igual que modelo/producto — ya no como rango inline:
@@ -130,19 +130,35 @@ A diferencia de antes de §7.15, `ENGINE.CALIBRATE` toma el mercado como **handl
 =ENGINE.CALIBRATE(<handle calibrador>, Market, <estimacion inicial>)
 ```
 
-`estimacion_inicial` es un rango clave/valor normal (`a`, `b`, `sigma`, `r0`) — mismo formato
-que `CREATE_MODEL`. Solo `a`/`b` se calibran (`sigma`/`r0` se devuelven tal cual se pasaron,
-ver `rust/crates/engine-core/src/calibration.rs` para el porqué: `sigma` solo entra en el
-precio del bono cero-cupón como un efecto de segundo orden, mal identificado contra
-únicamente una curva de descuento — en la práctica se calibra con swaptions/caps, fuera de
-alcance de esta fase). El resultado "derrama" una tabla clave/valor (`a`, `b`, `sigma`, `r0`,
-`rmse`, `iterations`, `converged`) que **se puede pasar tal cual como el `params` de
-`ENGINE.CREATE_MODEL`**: las claves de diagnóstico (`rmse`/`iterations`/`converged`) se
-ignoran, cerrando el círculo Mercado → calibrar → Modelo calibrado en dos fórmulas:
+`ENGINE.CREATE_CALIBRATOR`/`ENGINE.CALIBRATE` son genéricas por nombre, igual que
+`ENGINE.CREATE_MODEL`/`ENGINE.CREATE_PRODUCT`: el motor tiene **dos** calibradores hoy
+(PLAN.md §7.18), uno por modelo, y no son el mismo código con el nombre cambiado —
+
+- `"HullWhite1F"`: `estimacion_inicial` es un rango clave/valor con `a`, `b`, `sigma`, `r0`
+  (mismo formato que `CREATE_MODEL("HullWhite1F", ...)`); solo `a`/`b` se calibran.
+- `"HullWhite2F"` (G2++): `estimacion_inicial` lleva `a`, `b`, `sigma`, `eta`, `rho`, `r0`
+  (mismo formato que `CREATE_MODEL("HullWhite2F", ...)`); también solo `a`/`b` se calibran,
+  pero aquí ambos son velocidades de reversión (las dos deben ser positivas) — a diferencia
+  de `HullWhite1F`, donde `b` es un nivel de largo plazo sin restricción de signo.
+
+En los dos casos, el resto de parámetros (`sigma`/`r0`, y en G2++ también `eta`/`rho`) se
+devuelven tal cual se pasaron (ver `rust/crates/engine-core/src/calibration.rs` para el
+porqué: esos parámetros solo entran en el precio del bono cero-cupón como un efecto de
+segundo orden, mal identificados contra únicamente una curva de descuento — en la práctica
+se calibran con swaptions/caps, fuera de alcance de esta fase). El resultado "derrama" una
+tabla clave/valor (los parámetros del modelo correspondiente más `rmse`, `iterations`,
+`converged`) que **se puede pasar tal cual como el `params` de `ENGINE.CREATE_MODEL`**: las
+claves de diagnóstico se ignoran, cerrando el círculo Mercado → calibrar → Modelo calibrado
+en dos fórmulas, igual para cualquiera de los dos modelos:
 
 ```
 =ENGINE.CALIBRATE(<calibrador>, <mercado>, <estimacion inicial>)   -> celda A1, "derrama" hacia abajo
 =ENGINE.CREATE_MODEL("HullWhite1F", A1#)                            -> el mismo rango derramado, referenciado con #
+
+; o, para el segundo modelo, sin ningún otro cambio de fórmula:
+=ENGINE.CREATE_CALIBRATOR("HullWhite2F")                            -> celda B1
+=ENGINE.CALIBRATE(B1, <mercado>, <estimacion inicial HullWhite2F>)  -> celda B2, "derrama" hacia abajo
+=ENGINE.CREATE_MODEL("HullWhite2F", B2#)
 ```
 
 ## Verificación manual (PLAN.md §5.6, capa 4: equivalencia entre clientes)

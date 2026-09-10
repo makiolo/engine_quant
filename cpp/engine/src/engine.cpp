@@ -27,6 +27,10 @@ double hull_white_zero_coupon_bond_delta_r0(double a, double b, double sigma, do
     return ffi::hull_white_zero_coupon_bond_delta_r0(a, b, sigma, r0, t, maturity);
 }
 
+double hull_white_2f_zero_coupon_bond(double a, double b, double sigma, double eta, double rho, double r0, double maturity) {
+    return ffi::hull_white_2f_zero_coupon_bond(a, b, sigma, eta, rho, r0, maturity);
+}
+
 double irs_unilateral_cva_5y(
     double a,
     double b,

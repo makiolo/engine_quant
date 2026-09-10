@@ -65,6 +65,45 @@ def test_calibrator_recovers_known_parameters_and_feeds_create_model():
     assert calibrated_model.type_name == "HullWhite1F"
 
 
+def test_synthetic_from_hull_white_2f_reproduces_the_models_own_prices():
+    a, b, sigma, eta, rho, r0 = 0.1, 0.2, 0.01, 0.012, -0.7, 0.03
+    pillars = [1.0, 2.0, 5.0, 10.0]
+    market = engine.MarketSnapshot.synthetic_from_hull_white_2f(a, b, sigma, eta, rho, r0, pillars)
+
+    for t in pillars:
+        expected = engine.hull_white_2f_zero_coupon_bond(a, b, sigma, eta, rho, r0, t)
+        assert abs(market.discount_factor(t) - expected) < 1e-9
+
+
+def test_calibrator_hull_white_2f_recovers_known_parameters_and_feeds_create_model():
+    # Segundo calibrador del motor (PLAN.md §7.18): mismo mecanismo generico
+    # (Engine.create_calibrator/Calibrator.calibrate por nombre) que HullWhite1F, sin ningun
+    # cambio en el binding -- solo cambia el nombre y las claves de la estimacion inicial.
+    eng = engine.Engine()
+    assert "HullWhite2F" in eng.list_calibrators()
+
+    true_a, true_b, sigma, eta, rho, r0 = 0.15, 0.25, 0.008, 0.01, -0.6, 0.02
+    pillars = [0.5, 1.0, 2.0, 3.0, 5.0, 7.0, 10.0, 15.0, 20.0, 30.0]
+    market = engine.MarketSnapshot.synthetic_from_hull_white_2f(true_a, true_b, sigma, eta, rho, r0, pillars)
+
+    calibrator = eng.create_calibrator("HullWhite2F")
+    # Estimación inicial deliberadamente lejos de los parámetros "verdaderos".
+    result = calibrator.calibrate(market, {"a": 0.4, "b": 0.05, "sigma": sigma, "eta": eta, "rho": rho, "r0": r0})
+
+    assert result.converged, f"no convergió: rmse={result.rmse} iterations={result.iterations}"
+    assert abs(result.optimal_params["a"] - true_a) < 1e-4
+    assert abs(result.optimal_params["b"] - true_b) < 1e-4
+    assert result.optimal_params["sigma"] == sigma
+    assert result.optimal_params["eta"] == eta
+    assert result.optimal_params["rho"] == rho
+    assert result.optimal_params["r0"] == r0
+
+    # El resultado debe poder alimentar directamente create_model -- cerrar el círculo
+    # Market -> calibrar -> Model calibrado.
+    calibrated_model = eng.create_model("HullWhite2F", result.optimal_params)
+    assert calibrated_model.type_name == "HullWhite2F"
+
+
 def test_create_unknown_calibrator_raises_index_error():
     eng = engine.Engine()
     try:
@@ -80,5 +119,7 @@ if __name__ == "__main__":
     test_market_snapshot_rejects_non_increasing_pillars()
     test_synthetic_from_hull_white_reproduces_the_models_own_prices()
     test_calibrator_recovers_known_parameters_and_feeds_create_model()
+    test_synthetic_from_hull_white_2f_reproduces_the_models_own_prices()
+    test_calibrator_hull_white_2f_recovers_known_parameters_and_feeds_create_model()
     test_create_unknown_calibrator_raises_index_error()
     print("OK: tests de Market/Calibrator (equivalente a test_calibration.cpp) pasaron")

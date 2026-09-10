@@ -93,6 +93,52 @@ TEST(Calibrator, HullWhite1FRecoversKnownParametersFromASyntheticMarket) {
     EXPECT_EQ(calibrated_model->type_name(), "HullWhite1F");
 }
 
+TEST(Market, SyntheticFromHullWhite2fReproducesTheModelsOwnPrices) {
+    double a = 0.1, b = 0.2, sigma = 0.01, eta = 0.012, rho = -0.7, r0 = 0.03;
+    std::vector<double> pillars{1.0, 2.0, 5.0, 10.0};
+    MarketSnapshot market = MarketSnapshot::synthetic_from_hull_white_2f(a, b, sigma, eta, rho, r0, pillars);
+
+    for (double t : pillars) {
+        double expected = engine::hull_white_2f_zero_coupon_bond(a, b, sigma, eta, rho, r0, t);
+        EXPECT_NEAR(market.discount_factor(t), expected, 1e-9) << "t=" << t;
+    }
+}
+
+TEST(Registry, RegisterBuiltinsPopulatesHullWhite2fCalibrator) {
+    Registries registries;
+    register_builtins(registries);
+
+    EXPECT_TRUE(registries.calibrators.contains("HullWhite2F"));
+}
+
+TEST(Calibrator, HullWhite2FRecoversKnownParametersFromASyntheticMarket) {
+    Registries registries;
+    register_builtins(registries);
+
+    double true_a = 0.15, true_b = 0.25, sigma = 0.008, eta = 0.01, rho = -0.6, r0 = 0.02;
+    std::vector<double> pillars{0.5, 1.0, 2.0, 3.0, 5.0, 7.0, 10.0, 15.0, 20.0, 30.0};
+    MarketSnapshot market = MarketSnapshot::synthetic_from_hull_white_2f(true_a, true_b, sigma, eta, rho, r0, pillars);
+
+    auto calibrator = registries.calibrators.create("HullWhite2F");
+    // Estimación inicial deliberadamente lejos de los parámetros "verdaderos".
+    Params initial_guess{{"a", 0.4}, {"b", 0.05}, {"sigma", sigma}, {"eta", eta}, {"rho", rho}, {"r0", r0}};
+
+    engine::CalibrationResult result = calibrator->calibrate(market, initial_guess);
+
+    EXPECT_TRUE(result.converged) << "rmse=" << result.rmse << " iterations=" << result.iterations;
+    EXPECT_NEAR(std::get<double>(result.optimal_params.at("a")), true_a, 1e-4);
+    EXPECT_NEAR(std::get<double>(result.optimal_params.at("b")), true_b, 1e-4);
+    EXPECT_EQ(std::get<double>(result.optimal_params.at("sigma")), sigma);
+    EXPECT_EQ(std::get<double>(result.optimal_params.at("eta")), eta);
+    EXPECT_EQ(std::get<double>(result.optimal_params.at("rho")), rho);
+    EXPECT_EQ(std::get<double>(result.optimal_params.at("r0")), r0);
+
+    // El resultado debe poder alimentar directamente Registry<IModel>::create -- ese es el
+    // punto de calibrar: cerrar el círculo Market -> calibrar -> Model calibrado.
+    auto calibrated_model = registries.models.create("HullWhite2F", result.optimal_params);
+    EXPECT_EQ(calibrated_model->type_name(), "HullWhite2F");
+}
+
 TEST(Calibrator, CreateUnknownCalibratorThrows) {
     Registries registries;
     register_builtins(registries);

@@ -26,6 +26,20 @@ mod ffi {
         converged: bool,
     }
 
+    /// Equivalente de dos factores de `HullWhiteCalibrationResult` (PLAN.md §7.18:
+    /// `crate::calibration::HullWhite2FCalibrationResult`).
+    struct HullWhite2FCalibrationResult {
+        a: f64,
+        b: f64,
+        sigma: f64,
+        eta: f64,
+        rho: f64,
+        r0: f64,
+        rmse: f64,
+        iterations: u32,
+        converged: bool,
+    }
+
     extern "Rust" {
         fn ping() -> f64;
 
@@ -199,6 +213,25 @@ mod ffi {
             sigma: f64,
             r0: f64,
         ) -> HullWhiteCalibrationResult;
+
+        // Equivalente de dos factores (PLAN.md §7.18): calibra a/b de HullWhite2F, ver
+        // engine_core::calibration para el porqué del resto de parámetros fijos.
+        fn calibrate_hull_white_2f(
+            pillars: Vec<f64>,
+            zero_rates: Vec<f64>,
+            initial_a: f64,
+            initial_b: f64,
+            sigma: f64,
+            eta: f64,
+            rho: f64,
+            r0: f64,
+        ) -> HullWhite2FCalibrationResult;
+
+        // Precio del bono cero-cupón de HullWhite2F con los dos factores latentes en su valor
+        // inicial (PLAN.md §7.18) -- equivalente de dos factores de
+        // hull_white_zero_coupon_bond, usado por engine::MarketSnapshot::
+        // synthetic_from_hull_white_2f en C++ para fabricar un mercado sin datos reales.
+        fn hull_white_2f_zero_coupon_bond(a: f64, b: f64, sigma: f64, eta: f64, rho: f64, r0: f64, maturity: f64) -> f64;
     }
 }
 
@@ -451,4 +484,33 @@ fn calibrate_hull_white(
         iterations: result.iterations,
         converged: result.converged,
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn calibrate_hull_white_2f(
+    pillars: Vec<f64>,
+    zero_rates: Vec<f64>,
+    initial_a: f64,
+    initial_b: f64,
+    sigma: f64,
+    eta: f64,
+    rho: f64,
+    r0: f64,
+) -> ffi::HullWhite2FCalibrationResult {
+    let result = engine_core::api::calibrate_hull_white_2f(pillars, zero_rates, initial_a, initial_b, sigma, eta, rho, r0);
+    ffi::HullWhite2FCalibrationResult {
+        a: result.a,
+        b: result.b,
+        sigma: result.sigma,
+        eta: result.eta,
+        rho: result.rho,
+        r0: result.r0,
+        rmse: result.rmse,
+        iterations: result.iterations,
+        converged: result.converged,
+    }
+}
+
+fn hull_white_2f_zero_coupon_bond(a: f64, b: f64, sigma: f64, eta: f64, rho: f64, r0: f64, maturity: f64) -> f64 {
+    engine_core::smoke::hull_white_2f_zero_coupon_bond(a, b, sigma, eta, rho, r0, maturity)
 }

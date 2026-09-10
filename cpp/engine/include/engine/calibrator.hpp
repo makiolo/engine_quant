@@ -45,4 +45,19 @@ public:
     CalibrationResult calibrate(const MarketSnapshot& market, const Params& initial_guess) const override;
 };
 
+// Segundo calibrador del motor (PLAN.md §7.18), para HullWhite2F/G2++ -- no es
+// HullWhite1FCalibrator con el nombre cambiado: calibra "a"/"b" (las dos velocidades de
+// reversión, ambas positivas) en vez de "a" (velocidad) + "b" (nivel de largo plazo).
+// initial_guess: "a", "b" (double, estimación inicial -- se calibran), "sigma", "eta", "rho",
+// "r0" (double, no se calibran -- mismo motivo que HullWhite1FCalibrator, ver
+// engine_core::calibration para el porqué se extiende a eta/rho).
+class HullWhite2FCalibrator : public ICalibrator {
+public:
+    explicit HullWhite2FCalibrator(const Params&) {}
+
+    std::string type_name() const override { return "HullWhite2F"; }
+
+    CalibrationResult calibrate(const MarketSnapshot& market, const Params& initial_guess) const override;
+};
+
 } // namespace engine

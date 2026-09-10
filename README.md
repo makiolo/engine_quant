@@ -71,9 +71,11 @@ This repo is not a finished production platform yet; it is a deliberately staged
 
 The current implementation focuses on a core use case:
 
-- Hull-White 1-factor model
+- two short-rate models: Hull-White 1-factor and Hull-White 2-factor (G2++)
 - interest rate swap (IRS) product
-- exposure profile and unilateral CVA metrics
+- exposure profile, PV/DV01, and unilateral CVA metrics
+- a calibrator per model (`HullWhite1F`/`HullWhite2F`), fitting model parameters to a
+  `MarketSnapshot` (real or fabricated) by damped Gauss-Newton with an AAD-computed Jacobian
 - Python and C++ access through the same registry abstraction
 - Excel XLL support in the same design philosophy
 
@@ -140,6 +142,46 @@ That is not just a toy example: it captures a realistic XVA workflow in a compac
 
 This is exactly the kind of data used to estimate CVA, exposure management limits, and counterparty risk over time.
 
+## Example: calibration
+
+Instead of picking model parameters by hand, a calibrator fits them to a `MarketSnapshot` —
+here a fabricated one (`synthetic_from_hull_white*`), useful for testing/demoing calibration
+without depending on real market data. `Engine.create_calibrator`/`Calibrator.calibrate` are
+fully generic by name, exactly like `create_model`/`create_product`: adding `HullWhite2F`'s
+calibrator required zero changes to this API surface, only a new registration in C++
+`bootstrap.cpp`.
+
+```python
+import engine
+
+eng = engine.Engine()
+
+# HullWhite1F: calibrates (a, b); sigma/r0 stay fixed inputs.
+market_1f = engine.MarketSnapshot.synthetic_from_hull_white(a=0.15, b=0.025, sigma=0.008, r0=0.02,
+                                                             pillars=[0.5, 1, 2, 3, 5, 7, 10, 15, 20, 30])
+calibrator_1f = eng.create_calibrator("HullWhite1F")
+result_1f = calibrator_1f.calibrate(market_1f, {"a": 0.3, "b": 0.01, "sigma": 0.008, "r0": 0.02})
+model_1f = eng.create_model("HullWhite1F", result_1f.optimal_params)  # Market -> calibrate -> Model
+
+# HullWhite2F/G2++: calibrates (a, b), the two mean-reversion speeds; sigma/eta/rho/r0 fixed.
+market_2f = engine.MarketSnapshot.synthetic_from_hull_white_2f(a=0.15, b=0.25, sigma=0.008, eta=0.01,
+                                                                rho=-0.6, r0=0.02,
+                                                                pillars=[0.5, 1, 2, 3, 5, 7, 10, 15, 20, 30])
+calibrator_2f = eng.create_calibrator("HullWhite2F")
+result_2f = calibrator_2f.calibrate(market_2f, {"a": 0.4, "b": 0.05, "sigma": 0.008, "eta": 0.01, "rho": -0.6, "r0": 0.02})
+model_2f = eng.create_model("HullWhite2F", result_2f.optimal_params)
+
+print(result_1f.rmse, result_1f.converged)
+print(result_2f.rmse, result_2f.converged)
+```
+
+The two calibrators are not the same code with renamed fields: `HullWhite1F`'s `b` is a
+long-run level (any sign), while `HullWhite2F`'s `b` is the second factor's mean-reversion
+speed (must be positive, like `a`) — each calibrator reparametrizes only what it needs to keep
+the optimizer unconstrained. Same story in the C ABI: `engine_abi_create_calibrator("HullWhite2F")`
++ `engine_abi_calibrate(...)` reuse the exact same generic handle-based calls as the model above
+it, and in Excel: `ENGINE.CREATE_CALIBRATOR("HullWhite2F")` + `ENGINE.CALIBRATE(...)`.
+
 ## Example: Excel
 
 The project consciously keeps the same semantics in Excel as in Python.
@@ -203,6 +245,17 @@ The project plan in `PLAN.md` outlines a progressive roadmap:
   objects and a single `ENGINE.CALC` batching PV/DV01/ExpectedExposure/PFE95/UnilateralCVA in
   one call, replacing the old `CREATE_MEASURE`+`EVALUATE` pair and the global backend state of
   phase 5, across all five layers (`PLAN.md` §7.15)
+- phase 7.16: second model, Hull-White 2-factor (G2++) — a `ShortRateModel` trait unifies
+  both models in Rust so `IrSwap`/`ENGINE.CALC` never special-case which one they're pricing
+  (`PLAN.md` §7.16)
+- phase 7.17: three levels of a future batch-calculation API (scalar / heterogeneous vector /
+  homogeneous batch) — only the Rust-level homogeneous batch is implemented so far, ahead of a
+  second real product (`PLAN.md` §7.17)
+- phase 7.18: second calibrator, for `HullWhite2F` — a different parameter subset than
+  `HullWhite1F`'s (both mean-reversion speeds vs. speed + long-run level), plus generalizing
+  the C ABI's calibration surface from a `HullWhite1F`-specific function to a generic
+  handle-based `engine_abi_create_calibrator`/`engine_abi_calibrate` (ABI version bumped to 3),
+  across all five layers (`PLAN.md` §7.18)
 - future phases: broader XVA metrics, more products
 
 ## Why this might get attention

@@ -17,6 +17,13 @@ double ping();
 // punta con lógica de negocio real detrás, no solo `ping()`.
 double hull_white_zero_coupon_bond(double a, double b, double sigma, double r0, double t, double maturity);
 double hull_white_zero_coupon_bond_delta_r0(double a, double b, double sigma, double r0, double t, double maturity);
+
+// Equivalente de dos factores (PLAN.md §7.16/§7.18): precio del bono cero-cupón de
+// HullWhite2F/G2++ con los dos factores latentes en su valor inicial (x_0 = y_0 = 0, ver
+// engine_core::models::hull_white_2f). Usado por
+// engine::MarketSnapshot::synthetic_from_hull_white_2f para fabricar un mercado sin depender
+// de datos reales, igual que hull_white_zero_coupon_bond ya hace para HullWhite1F.
+double hull_white_2f_zero_coupon_bond(double a, double b, double sigma, double eta, double rho, double r0, double maturity);
 double irs_unilateral_cva_5y(
     double a,
     double b,

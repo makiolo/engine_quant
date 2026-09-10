@@ -1,7 +1,7 @@
 # XVA Engine — Plan de Arquitectura
 
 > Documento vivo. Se construye de forma incremental, sección a sección.
-> Estado: **v0.14 — Fase 4 completada (cliente Excel vía XLL sobre el registry C++) +
+> Estado: **v0.17 — Fase 4 completada (cliente Excel vía XLL sobre el registry C++) +
 > empaquetado/distribución (wheel Python + XLL autocontenidos, release automática en CI, §7.9)
 > + instalador Windows todo-en-uno (wizard .exe, §7.10) + Fase 5 completada (backend GPU
 > ejercitado con benchmarks reales, se mantiene opcional, §7.11; la selección de backend como
@@ -13,6 +13,13 @@
 > la API pública — `Trade`/`Model`/`Market`/`PricingContext`/`ExecutionContext` +
 > `ENGINE.CALC` (PV/DV01/ExpectedExposure/PFE95/UnilateralCVA en una sola llamada),
 > sustituyendo por completo `CREATE_MEASURE`+`EVALUATE` y el backend global de §7.12, en las
+> cinco capas + Fase 7.16: segundo modelo, Hull-White 2 factores (G2++), unificado con
+> `HullWhite1F` bajo el mismo `ENGINE.CALC`/registry sin distinguir clientes + Fase 7.17:
+> primer nivel (homogéneo, en Rust) de una futura API de cálculo por lotes + Fase 7.18:
+> segundo calibrador del motor, para `HullWhite2F` (subconjunto de parámetros distinto al de
+> `HullWhite1F`), más generalización de la calibración en la C ABI de una función específica
+> (`engine_abi_calibrate_hull_white`) a un `EngineCalibrator` opaco genérico
+> (`engine_abi_create_calibrator`/`engine_abi_calibrate`, versión de ABI subida a 3), en las
 > cinco capas**
 
 ## 1. Visión
@@ -253,6 +260,20 @@ añade en cuanto exista más de un cliente.
    una vez, compartiendo cómputo Monte Carlo entre medidas relacionadas — sustituye por
    completo `ENGINE.CREATE_MEASURE`+`ENGINE.EVALUATE` y el backend global de proceso de §7.12,
    en las cinco capas (ver §7.15).
+10. **Fase 7.16** ✅ — Segundo modelo del motor: Hull-White de 2 factores (G2++), unificado
+    con `HullWhite1F` bajo el mismo `IMeasure`/`ENGINE.CALC`/registry sin que ningún cliente
+    (Python/Excel/C ABI) tenga que distinguirlos (ver §7.16).
+11. **Fase 7.17** ✅ (parcial) — Vocabulario de tres niveles para una futura API de cálculo por
+    lotes (scalar / heterogéneo / homogéneo); solo el nivel 3 (homogéneo, en Rust) está
+    implementado, a la espera de un segundo producto real que justifique el nivel 2 (ver
+    §7.17).
+12. **Fase 7.18** ✅ — Segundo calibrador del motor, para `HullWhite2F` (calibra `a`/`b`, las
+    dos velocidades de reversión — subconjunto distinto al de `HullWhite1F`, donde `b` es un
+    nivel de largo plazo), más generalización de la calibración en la C ABI: de una función
+    específica de `HullWhite1F` (`engine_abi_calibrate_hull_white`) a un `EngineCalibrator`
+    opaco genérico (`engine_abi_create_calibrator`/`engine_abi_calibrate`, mismo patrón que
+    `EngineModel`/`EngineProduct`), subiendo la versión de la ABI de 2 a 3 — Python y Excel ya
+    eran genéricos por nombre desde §7.14, así que no necesitaron ningún cambio (ver §7.18).
 
 ## 7. Estructura de repos/carpetas (Fase 0)
 
@@ -1622,6 +1643,119 @@ implementado sin un caso de uso real que lo exija.
 Cambio limitado a Rust: no se ha tocado C++/C ABI/Python/Excel en esta fase (ver "Alcance de
 esta fase" arriba) -- `cmake --build`/`ctest`/tests Python/Excel no aplican todavía.
 
+## 7.18 Segundo calibrador del motor (`HullWhite2F`) + calibración genérica en la C ABI
+
+### Motivación
+
+§7.14 cerró con una limitación documentada explícitamente: "no existe `ICalibrator` para
+`HullWhite2F`" y la C ABI de calibración se dejó a propósito específica de `HullWhite1F`
+(`EngineHullWhiteCalibration`/`engine_abi_calibrate_hull_white`), razonando que "con un solo
+calibrador implementado no hay genericidad real que ganar todavía... se añadirá cuando exista
+un segundo". Esta fase añade ese segundo calibrador y, con dos ya registrados, ejecuta esa
+generalización pendiente en la C ABI -- Python y Excel no la necesitaban: ambos ya consumían
+`Registry<ICalibrator>` por nombre desde §7.14 (`Engine.create_calibrator`/
+`ENGINE.CREATE_CALIBRATOR`), así que un segundo calibrador les llega gratis, sin tocar ningún
+binding, exactamente como ya pasó con `HullWhite2F` como *modelo* en §7.16.
+
+### Diseño
+
+**Dos calibradores, no el mismo código con los nombres cambiados**
+(`rust/crates/engine-core/src/calibration.rs`): `calibrate_hull_white` (`HullWhite1F`) calibra
+`a` (velocidad de reversión, reparametrizada sobre `ln(a)` para positividad) y `b` (nivel de
+reversión de largo plazo, sin restricción de signo -- Vasicek). `calibrate_hull_white_2f`
+(`HullWhite2F`/G2++) calibra `a` y `b`, las velocidades de reversión de **ambos** factores
+latentes -- en G2++ el nivel de largo plazo lo fija por completo `r0`/`phi0`, y `b` aquí no es
+un nivel: es una velocidad de reversión igual que `a`, así que las dos se reparametrizan sobre
+su logaritmo (a diferencia de `calibrate_hull_white`, donde solo `a` lo necesita). En ambos
+casos `sigma`/`r0` (y en G2++ también `eta`/`rho`) se toman como datos de entrada, mismo
+razonamiento ya documentado en §7.14 para `sigma`: son efectos de segundo orden sobre el precio
+del bono cero-cupón (convexidad), mal identificados contra una única curva de descuento sin
+instrumentos de volatilidad (swaptions/caps) -- para `rho`, con más motivo todavía: no hay
+forma de identificar una correlación entre dos factores latentes desde una curva de descuento
+observada, hagan falta o no esos instrumentos.
+
+**Levenberg-Marquardt extraído a un helper genérico de 2 parámetros**
+(`levenberg_marquardt_2p`), reutilizado por ambos calibradores -- lo único que de verdad
+difiere entre modelos (construir `HullWhite1F` vs. `HullWhite2F`, sobre qué parámetro(s)
+reparametrizar) vive en cada función pública vía closures (`price_fn`/
+`residuals_and_jacobian_fn`), no en el bucle de amortiguación -- mismo espíritu de extracción
+que `crate::exposure::ee_pfe`/`unilateral_cva_with_discount` en §7.16. `MarketSnapshot` gana
+`synthetic_from_hull_white_2f` (equivalente de dos factores de `synthetic_from_hull_white`,
+§7.14) y `crate::smoke` gana `hull_white_2f_zero_coupon_bond` (`f64` puro, mismo patrón que
+`hull_white_zero_coupon_bond`) para fabricarlo.
+
+**Registry C++**: `HullWhite2FCalibrator` (`cpp/engine/include/engine/calibrator.hpp`/`.cpp`),
+una clase más de `ICalibrator`, registrada en `bootstrap.cpp` junto a `HullWhite1FCalibrator`
+(`registries.calibrators.register_type<HullWhite2FCalibrator>("HullWhite2F")`) -- sin tocar
+`Registry<T>` ni ningún otro registry, mismo patrón que `HullWhite2FModel` en §7.16.
+`MarketSnapshot::synthetic_from_hull_white_2f` y `engine::hull_white_2f_zero_coupon_bond`
+(nueva función libre en `engine.hpp`/`.cpp`, bridgeando a la nueva función de `engine-ffi`) se
+añaden en paralelo a sus equivalentes de `HullWhite1F`.
+
+**C ABI generalizada (PLAN.md §5.5, ABI sube de versión 2 a 3)**: se elimina
+`EngineHullWhiteCalibration`/`engine_abi_calibrate_hull_white` (específicos de `HullWhite1F`,
+sin consumidores reales fuera de este árbol -- ni distribuidos en ninguna release, §7.13) en
+favor de un handle opaco más, `EngineCalibrator`, con el mismo patrón que `EngineModel`/
+`EngineProduct`:
+
+- `engine_abi_list_calibrators`/`engine_abi_create_calibrator(name)`/
+  `engine_abi_free_calibrator` -- mismo trío que ya existía para modelos/productos.
+- `EngineCalibrationResult` devuelve `optimal_params` como un array de `EngineParam` owned por
+  la librería (`engine_abi_free_calibration_result`) -- el mismo bag de parámetros que ya
+  consume `engine_abi_create_model`, para poder pasarlo ahí directamente sin traducción,
+  cerrando el círculo Mercado → calibrar → Modelo calibrado también desde la ABI en C.
+- `engine_abi_calibrate(calibrator, market, initial_guess, n_initial_guess, out_result)`
+  sustituye a `engine_abi_calibrate_hull_white`: qué claves de `initial_guess` hacen falta (y
+  cuáles de ellas se calibran de verdad) depende de qué `calibrator` sea, documentado en el
+  header junto a cada `ICalibrator` concreto, no en la firma de la función -- esa es
+  precisamente la genericidad que §7.14 dejó pendiente hasta que existiera un segundo
+  calibrador.
+
+Bump de versión (2 → 3) justificado: se elimina una función y un struct ya publicados
+(`engine_abi_calibrate_hull_white`/`EngineHullWhiteCalibration`), no solo se añade algo nuevo
+-- mismo criterio que ya fijó la subida de 1 a 2 en §7.15. Ningún ejemplo de `examples/abi/`
+consumía todavía la calibración (§7.13/§7.16 no la ejercitaban), así que no hay ninguna
+regresión de compatibilidad real que gestionar, solo la propia definición de la ABI.
+
+**Cero cambios en Python/Excel** (a diferencia de la C ABI): `Engine.create_calibrator`/
+`Calibrator.calibrate` (nanobind) y `ENGINE.CREATE_CALIBRATOR`/`ENGINE.CALIBRATE` (Excel) ya
+eran completamente genéricos por nombre desde §7.14 -- `HullWhite2F` como calibrador quedó
+disponible en los dos clientes en cuanto se registró en `bootstrap.cpp`, confirmado con un test
+nuevo en cada uno (`test_calibration.py`, `test_xloper.cpp`) que reproduce el mismo caso que
+`Calibrator.HullWhite2FRecoversKnownParametersFromASyntheticMarket` en C++. Python gana además
+los dos bindings de datos que sí hacían falta para fabricar el mercado de prueba
+(`engine.hull_white_2f_zero_coupon_bond`, `MarketSnapshot.synthetic_from_hull_white_2f`) --
+equivalentes de los que ya existían para `HullWhite1F`.
+
+**Ejemplos en las cinco capas** (pedido explícito de esta fase, más allá de solo tests):
+`rust/crates/engine-core/examples/calibrate_models.rs` (calibra ambos modelos y reconstruye
+cada uno desde su `CalibrationResult`); `cpp/engine/examples/abi_c_smoke.c` (extendido, no un
+fichero nuevo, con el mismo recorrido de calibración genérica vía `EngineCalibrator` para los
+dos modelos); una nueva sección "Calibración" en `clients/python/notebooks/demo_registry.ipynb`
+(ambos modelos, con el mismo código verificado también en `test_calibration.py`); una nueva
+sección en `clients/excel/README.md` documentando `ENGINE.CREATE_CALIBRATOR("HullWhite2F")` +
+`ENGINE.CALIBRATE` con las claves propias de ese modelo. El README raíz del repo gana también
+un ejemplo de calibración de ambos modelos junto al de `ENGINE.CALC` ya existente.
+
+### Verificación
+
+Mismo caso de referencia que §7.14 pero con parámetros propios de G2++
+(`true_a=0.15, true_b=0.25, sigma=0.008, eta=0.01, rho=-0.6, r0=0.02`, pillars de 0.5 a 30
+años, estimación inicial `a=0.4, b=0.05` deliberadamente lejana): recupera `a`/`b` dentro de
+`1e-4` del valor verdadero, `rmse < 1e-9`, `converged = true` en las cinco capas -- Rust
+(`cargo test --workspace`, 56 tests `engine-core` en verde, 4 nuevos sobre los 52 de §7.17:
+2 en `calibration`, 1 en `market`, 1 en `api`), C++ (`cpp/engine/tests/test_calibration.cpp`, incluido el
+*round-trip* hasta `Registry<IModel>::create`), la C ABI (`cpp/engine/tests/test_abi.cpp`, vía
+el nuevo `EngineCalibrator` genérico, incluido el *round-trip* hasta
+`engine_abi_create_model`), Python (`clients/python/tests/test_calibration.py`, mismo
+*round-trip* hasta `Engine.create_model`) y Excel
+(`clients/excel/tests/test_xloper.cpp::HandleRegistry.CalibrateHullWhite2FRecoversKnownParameters`).
+`cmake --build build` completo + `ctest` (76 tests, todos en verde) sin regresiones en ningún
+test previo -- en particular, `engine_abi_c_smoke.exe` sigue imprimiendo
+`UnilateralCVA = 503.6419...` (el valor dorado de §7.15) sin cambios, confirmando que
+`engine_abi_version()` subir de 2 a 3 no afectó a ninguna otra parte de la superficie ya
+publicada.
+
 ---
 *Próxima iteración: confirmar en la práctica (no se pudo ejecutar GitHub Actions desde este
 entorno de desarrollo) que el job `build-installer` de `.github/workflows/release.yml` (§7.10)
@@ -1637,12 +1771,11 @@ mecanismo pero no en su distribución: `engine/abi.h`/`engine_abi` no se publica
 ninguna release (§7.9 solo empaqueta la wheel y el `.xll`) — decidir si hace falta un artefacto
 propio (zip con `abi.h` + `engine_abi.dll` + `.lib` de import) antes de considerar la
 interoperabilidad externa "usable" por alguien fuera de este repo, no solo "implementada y
-testeada" dentro de él. Sobre la Fase 7 (§7.14): sigue pendiente todo lo que quedó fuera de
-alcance al cerrarla — bootstrapping de `MarketSnapshot` desde instrumentos de mercado crudos
-(depósitos, futuros, swaps) en vez de zero rates ya construidos; calibrar `sigma` contra
-instrumentos de volatilidad (swaptions, caps) en vez de dejarlo fijo; generalizar
-`engine_abi_calibrate_hull_white` a un `engine_abi_calibrate` genérico en cuanto exista un
-segundo `ICalibrator`. Sobre la Fase 7.15: sigue pendiente la calibración vía `ENGINE.CALC`
+testeada" dentro de él. Sobre la Fase 7 (§7.14, ver también §7.18): sigue pendiente todo lo que
+quedó fuera de alcance al cerrarla — bootstrapping de `MarketSnapshot` desde instrumentos de
+mercado crudos (depósitos, futuros, swaps) en vez de zero rates ya construidos; calibrar
+`sigma`/`eta`/`rho` contra instrumentos de volatilidad (swaptions, caps) en vez de dejarlos
+fijos, en ambos calibradores. Sobre la Fase 7.15: sigue pendiente la calibración vía `ENGINE.CALC`
 (hoy `ENGINE.CALIBRATE` es una llamada aparte, no una medida más del lote), la aritmética de
 calendario real para `PricingDate`, el descuento híbrido con la curva de `Market` para
 `PV`/`DV01`, y compartir el perfil de exposición entre `UnilateralCVA` y
@@ -1651,11 +1784,11 @@ resto de la lista de "qué faltaría para valorar un swap de verdad" (day count/
 generación de calendario de pagos, multi-curva descuento vs. proyección, valoración a media
 vida de un swap que ya fijó su cupón actual). CUDA (`burn-cuda`, §5.1) sigue abierto como
 backend adicional si algún día hiciera falta más rendimiento que `wgpu`. Sobre la Fase 7.16
-(segundo modelo, Hull-White 2F/G2++): sigue pendiente un `ICalibrator` para `HullWhite2F`
-(hoy `ENGINE.CALIBRATE` sigue siendo solo Hull-White 1F, ver limitación documentada al cerrar
-la fase), fijar un caso de referencia con valor dorado exacto una vez `HullWhite2F` tenga
-parámetros calibrados a mercado real en vez de solo la referencia de literatura usada en los
-tests, y decidir si vale la pena generalizar `ShortRateModel` (hoy solo expone
+(segundo modelo, Hull-White 2F/G2++): fijar un caso de referencia con valor dorado exacto una
+vez `HullWhite2F` tenga parámetros calibrados a mercado real en vez de solo la referencia de
+literatura usada en los tests (el calibrador de §7.18 es un paso hacia eso, pero sigue
+partiendo de un mercado fabricado, no real), y decidir si vale la pena generalizar
+`ShortRateModel` (hoy solo expone
 `zero_coupon_bond`) para que `expected_exposure_profile`/`unilateral_cva` dejen de estar
 duplicadas por modelo en `exposure.rs` -- la extracción de `ee_pfe`/`unilateral_cva_with_
 discount` en esta fase ya redujo esa duplicación a la parte que de verdad difiere (simulación
@@ -1670,4 +1803,11 @@ generalizar el nivel 3 a lotes con calendarios distintos dentro de un mismo tipo
 sensibilidad vía AAD de un lote completo en una sola pasada backward queda sin probar); y
 medir si vectorizar de verdad compensa en la práctica (benchmark lote vs. bucle escalar,
 mismo espíritu que el benchmark CPU/GPU de §7.11) en vez de asumirlo solo por argumento de
-diseño.*
+diseño. Sobre la Fase 7.18 (segundo calibrador + C ABI genérica): sigue pendiente extender el
+ejemplo de calibración a los otros cuatro lenguajes de `examples/abi/` (C++/Rust/`ctypes`/
+`cffi`, hoy solo el ejemplo en C puro la ejercita); calibrar `HullWhite2F` a partir de un
+`MarketSnapshot` con datos de mercado reales (sigue siendo siempre `synthetic_from_hull_white*`
+en los tests/ejemplos de las cinco capas); y, si algún día existiera un tercer modelo con
+calibrador propio, confirmar que `EngineCalibrationResult`/`export_params` (que hoy sabe
+traducir `double`/`vector<double>`/`bool` de `engine::Params` a `EngineParam`, pero no
+`std::string`) sigue bastando o necesita ampliarse.*

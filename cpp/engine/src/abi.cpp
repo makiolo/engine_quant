@@ -18,6 +18,7 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 namespace {
@@ -69,6 +70,56 @@ engine::Params to_params(const EngineParam* params, std::size_t n_params) {
         }
     }
     return result;
+}
+
+// Inversa de to_params (PLAN.md §7.18): convierte un engine::Params (salida de
+// ICalibrator::calibrate) a un array de EngineParam owned por esta libreria, mismo bag que ya
+// consume engine_abi_create_model -- para que EngineCalibrationResult::optimal_params se
+// pueda pasar directamente ahi sin traduccion adicional del lado del consumidor.
+EngineParam* export_params(const engine::Params& params, std::size_t* out_count) {
+    if (params.empty()) {
+        *out_count = 0;
+        return nullptr;
+    }
+    auto* array = new EngineParam[params.size()]{};
+    std::size_t i = 0;
+    for (const auto& [key, value] : params) {
+        char* key_copy = new char[key.size() + 1];
+        std::memcpy(key_copy, key.data(), key.size() + 1);
+        array[i].key = key_copy;
+
+        std::visit(
+            [&](const auto& v) {
+                using T = std::decay_t<decltype(v)>;
+                if constexpr (std::is_same_v<T, double>) {
+                    array[i].kind = ENGINE_PARAM_DOUBLE;
+                    array[i].scalar = v;
+                } else if constexpr (std::is_same_v<T, bool>) {
+                    array[i].kind = ENGINE_PARAM_BOOL;
+                    array[i].scalar = v ? 1.0 : 0.0;
+                } else if constexpr (std::is_same_v<T, std::vector<double>>) {
+                    array[i].kind = ENGINE_PARAM_VECTOR;
+                    array[i].count = v.size();
+                    if (!v.empty()) {
+                        auto* values_copy = new double[v.size()];
+                        std::memcpy(values_copy, v.data(), v.size() * sizeof(double));
+                        array[i].values = values_copy;
+                    }
+                } else {
+                    // std::string: sin representacion en EngineParam (PLAN.md §5.5: solo
+                    // double/vector<double>/bool) -- ningun ICalibrator produce hoy un
+                    // optimal_params con claves de texto (ExecutionContext es el unico
+                    // consumidor de "backend"/"precision", ajeno a calibracion).
+                    array[i].kind = ENGINE_PARAM_DOUBLE;
+                    array[i].scalar = 0.0;
+                }
+            },
+            value
+        );
+        ++i;
+    }
+    *out_count = params.size();
+    return array;
 }
 
 engine::MarketSnapshot to_market(const EngineMarketSnapshot& m) {
@@ -126,10 +177,13 @@ struct EngineModel {
 struct EngineProduct {
     std::unique_ptr<engine::IProduct> ptr;
 };
+struct EngineCalibrator {
+    std::unique_ptr<engine::ICalibrator> ptr;
+};
 
 extern "C" {
 
-int engine_abi_version(void) { return 2; }
+int engine_abi_version(void) { return 3; }
 
 std::size_t engine_abi_list_models(const char*** out_names) {
     return export_string_list(registries().models.list(), out_names);
@@ -141,6 +195,10 @@ std::size_t engine_abi_list_products(const char*** out_names) {
 
 std::size_t engine_abi_list_measures(const char*** out_names) {
     return export_string_list(engine::calc_measure_names(), out_names);
+}
+
+std::size_t engine_abi_list_calibrators(const char*** out_names) {
+    return export_string_list(registries().calibrators.list(), out_names);
 }
 
 void engine_abi_free_string_list(const char** names, std::size_t count) {
@@ -171,30 +229,40 @@ EngineProduct* engine_abi_create_product(const char* name, const EngineParam* pa
     }
 }
 
+EngineCalibrator* engine_abi_create_calibrator(const char* name) {
+    try {
+        auto calibrator = registries().calibrators.create(name);
+        clear_last_error();
+        return new EngineCalibrator{std::move(calibrator)};
+    } catch (const std::exception& e) {
+        set_last_error(e);
+        return nullptr;
+    }
+}
+
 void engine_abi_free_model(EngineModel* model) { delete model; }
 void engine_abi_free_product(EngineProduct* product) { delete product; }
+void engine_abi_free_calibrator(EngineCalibrator* calibrator) { delete calibrator; }
 
-int engine_abi_calibrate_hull_white(
+int engine_abi_calibrate(
+    const EngineCalibrator* calibrator,
     const EngineMarketSnapshot* market,
-    double initial_a,
-    double initial_b,
-    double sigma,
-    double r0,
-    EngineHullWhiteCalibration* out_result
+    const EngineParam* initial_guess,
+    std::size_t n_initial_guess,
+    EngineCalibrationResult* out_result
 ) {
-    *out_result = EngineHullWhiteCalibration{};
+    *out_result = EngineCalibrationResult{};
     try {
-        if (!market) {
-            throw std::invalid_argument("engine_abi_calibrate_hull_white: market no puede ser NULL");
+        if (!calibrator) {
+            throw std::invalid_argument("engine_abi_calibrate: calibrator no puede ser NULL");
         }
-        auto calibrator = registries().calibrators.create("HullWhite1F");
-        engine::Params initial_guess{{"a", initial_a}, {"b", initial_b}, {"sigma", sigma}, {"r0", r0}};
-        engine::CalibrationResult result = calibrator->calibrate(to_market(*market), initial_guess);
+        if (!market) {
+            throw std::invalid_argument("engine_abi_calibrate: market no puede ser NULL");
+        }
+        engine::CalibrationResult result =
+            calibrator->ptr->calibrate(to_market(*market), to_params(initial_guess, n_initial_guess));
 
-        out_result->a = std::get<double>(result.optimal_params.at("a"));
-        out_result->b = std::get<double>(result.optimal_params.at("b"));
-        out_result->sigma = std::get<double>(result.optimal_params.at("sigma"));
-        out_result->r0 = std::get<double>(result.optimal_params.at("r0"));
+        out_result->optimal_params = export_params(result.optimal_params, &out_result->n_params);
         out_result->rmse = result.rmse;
         out_result->iterations = result.iterations;
         out_result->converged = result.converged ? 1 : 0;
@@ -203,9 +271,20 @@ int engine_abi_calibrate_hull_white(
         return 0;
     } catch (const std::exception& e) {
         set_last_error(e);
-        *out_result = EngineHullWhiteCalibration{};
+        *out_result = EngineCalibrationResult{};
         return 1;
     }
+}
+
+void engine_abi_free_calibration_result(EngineCalibrationResult* result) {
+    if (!result || !result->optimal_params) return;
+    for (std::size_t i = 0; i < result->n_params; ++i) {
+        delete[] result->optimal_params[i].key;
+        delete[] result->optimal_params[i].values;
+    }
+    delete[] result->optimal_params;
+    result->optimal_params = nullptr;
+    result->n_params = 0;
 }
 
 int engine_abi_calc(

@@ -561,6 +561,24 @@ pub fn calibrate_hull_white(
     crate::calibration::calibrate_hull_white(&market, initial_a, initial_b, sigma, r0)
 }
 
+/// Equivalente de dos factores de `calibrate_hull_white` (PLAN.md §7.18): calibra `a`/`b` de
+/// `HullWhite2F` a una curva de mercado, ver `crate::calibration` para el porqué solo esos dos
+/// parámetros (de los seis del modelo) se calibran.
+#[allow(clippy::too_many_arguments)]
+pub fn calibrate_hull_white_2f(
+    pillars: Vec<f64>,
+    zero_rates: Vec<f64>,
+    initial_a: f64,
+    initial_b: f64,
+    sigma: f64,
+    eta: f64,
+    rho: f64,
+    r0: f64,
+) -> crate::calibration::HullWhite2FCalibrationResult {
+    let market = crate::market::MarketSnapshot::new(pillars, zero_rates);
+    crate::calibration::calibrate_hull_white_2f(&market, initial_a, initial_b, sigma, eta, rho, r0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -830,6 +848,20 @@ mod tests {
         let market = crate::market::MarketSnapshot::synthetic_from_hull_white(true_a, true_b, sigma, r0, pillars.clone());
 
         let result = calibrate_hull_white(pillars, market.zero_rates().to_vec(), 0.3, 0.01, sigma, r0);
+
+        assert!(result.converged, "no convergió: rmse={}", result.rmse);
+        assert!((result.a - true_a).abs() < 1e-4);
+        assert!((result.b - true_b).abs() < 1e-4);
+    }
+
+    #[test]
+    fn calibrate_hull_white_2f_recovers_known_parameters() {
+        let (true_a, true_b, sigma, eta, rho, r0) = (0.15, 0.25, 0.008, 0.01, -0.6, 0.02);
+        let pillars = vec![1.0, 2.0, 5.0, 10.0, 20.0];
+        let market =
+            crate::market::MarketSnapshot::synthetic_from_hull_white_2f(true_a, true_b, sigma, eta, rho, r0, pillars.clone());
+
+        let result = calibrate_hull_white_2f(pillars, market.zero_rates().to_vec(), 0.4, 0.05, sigma, eta, rho, r0);
 
         assert!(result.converged, "no convergió: rmse={}", result.rmse);
         assert!((result.a - true_a).abs() < 1e-4);

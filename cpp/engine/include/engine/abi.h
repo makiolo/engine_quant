@@ -57,14 +57,21 @@ extern "C" {
  * engine_abi_create_measure/engine_abi_evaluate (sustituidos por engine_abi_calc), se
  * elimina engine_abi_set_compute_backend/engine_abi_get_compute_backend (el backend pasa a
  * ser un campo de EngineExecutionContext, no un estado global), y cambia el layout de
- * EngineMarketSnapshot (gana hazard_rate/recovery_rate). Comprobar antes de asumir el layout
- * de cualquier struct de este header en un binario compilado contra una version futura. */
+ * EngineMarketSnapshot (gana hazard_rate/recovery_rate). Sube a 3 en PLAN.md §7.18: con un
+ * segundo ICalibrator (HullWhite2F) ya registrado, se elimina EngineHullWhiteCalibration/
+ * engine_abi_calibrate_hull_white (especificos de HullWhite1F) en favor de un
+ * EngineCalibrator opaco + engine_abi_create_calibrator/engine_abi_calibrate genericos, misma
+ * forma que EngineModel/engine_abi_create_model -- la capa C++ (engine::ICalibrator) ya era
+ * generica desde PLAN.md §7.14, esta ABI solo se pone al dia. Comprobar antes de asumir el
+ * layout de cualquier struct de este header en un binario compilado contra una version
+ * futura. */
 ENGINE_ABI_API int engine_abi_version(void);
 
-/* --- Handles opacos (solo Model/Product: polimorficos, con ciclo de vida) ---------------- */
+/* --- Handles opacos (Model/Product/Calibrator: polimorficos, con ciclo de vida) ---------- */
 
 typedef struct EngineModel EngineModel;
 typedef struct EngineProduct EngineProduct;
+typedef struct EngineCalibrator EngineCalibrator;
 
 /* --- Parametros (PLAN.md §5.5: "structs planos / punteros + longitud", igual bag de
  * parametros que engine::Params -- ver engine/params.hpp -- expresado sin std::variant) --- */
@@ -93,26 +100,33 @@ typedef struct EngineParam {
 ENGINE_ABI_API size_t engine_abi_list_models(const char*** out_names);
 ENGINE_ABI_API size_t engine_abi_list_products(const char*** out_names);
 ENGINE_ABI_API size_t engine_abi_list_measures(const char*** out_names);
+/* Calibradores registrados (PLAN.md §7.18), nombres de Registry<ICalibrator> -- hoy
+ * "HullWhite1F"/"HullWhite2F", uno por modelo del motor con calibrador implementado. */
+ENGINE_ABI_API size_t engine_abi_list_calibrators(const char*** out_names);
 ENGINE_ABI_API void engine_abi_free_string_list(const char** names, size_t count);
 
-/* --- Creacion / liberacion de modelos y productos ----------------------------------------
+/* --- Creacion / liberacion de modelos, productos y calibradores --------------------------
  * Devuelven NULL si `name` no esta registrado o los parametros no son validos para ese tipo
- * (ver engine_abi_last_error). */
+ * (ver engine_abi_last_error). engine_abi_create_calibrator no toma parametros -- ICalibrator
+ * no tiene estado propio, ver engine::HullWhite1FCalibrator/HullWhite2FCalibrator: la
+ * estimacion inicial se pasa en cada llamada a engine_abi_calibrate, no al crear el handle. */
 ENGINE_ABI_API EngineModel* engine_abi_create_model(
     const char* name, const EngineParam* params, size_t n_params
 );
 ENGINE_ABI_API EngineProduct* engine_abi_create_product(
     const char* name, const EngineParam* params, size_t n_params
 );
+ENGINE_ABI_API EngineCalibrator* engine_abi_create_calibrator(const char* name);
 
 /* Liberar exactamente una vez cada handle devuelto por un engine_abi_create_*; NULL se
  * ignora (como free()). */
 ENGINE_ABI_API void engine_abi_free_model(EngineModel* model);
 ENGINE_ABI_API void engine_abi_free_product(EngineProduct* product);
+ENGINE_ABI_API void engine_abi_free_calibrator(EngineCalibrator* calibrator);
 
 /* --- Market / PricingContext / ExecutionContext (PLAN.md §7.15) -------------------------
- * Structs planos, no handles: se construyen y se pasan directamente a engine_abi_calibrate_
- * hull_white/engine_abi_calc, sin creacion/liberacion propia. */
+ * Structs planos, no handles: se construyen y se pasan directamente a
+ * engine_abi_calibrate/engine_abi_calc, sin creacion/liberacion propia. */
 
 typedef struct EngineMarketSnapshot {
     const double* pillars;    /* anios desde hoy, estrictamente creciente */
@@ -135,39 +149,39 @@ typedef struct EngineExecutionContext {
     const char* precision;  /* solo "fp64" aceptado hoy (PLAN.md §5.1) */
 } EngineExecutionContext;
 
-/* --- Calibracion (PLAN.md §7.14) ---------------------------------------------------------
- * Sin handle de calibrador ni Registry<ICalibrator> a este nivel (a diferencia de model/
- * product): con un solo calibrador implementado hoy (HullWhite1F) no hay genericidad
- * real que ganar todavia con un engine_abi_create_calibrator/engine_abi_calibrate genericos
- * -- se anadira cuando exista un segundo. La capa C++ (engine::ICalibrator, PLAN.md §7.14) SI
- * es generica ya, esta funcion es su unica traduccion a esta ABI por ahora. */
-typedef struct EngineHullWhiteCalibration {
-    double a;
-    double b;
-    double sigma; /* no se calibra: se devuelve tal cual se paso, ver engine_abi_calibrate_hull_white */
-    double r0;    /* no se calibra: se devuelve tal cual se paso */
+/* --- Calibracion (PLAN.md §7.14, generalizada en §7.18) ----------------------------------
+ * EngineCalibrator es un handle opaco mas (mismo patron que EngineModel/EngineProduct): con
+ * un segundo ICalibrator ya registrado (HullWhite2F, ademas de HullWhite1F) hay genericidad
+ * real que ganar aqui, a diferencia de cuando solo existia uno (PLAN.md §7.14). El resultado
+ * (EngineCalibrationResult) devuelve los parametros optimos como un array de EngineParam --
+ * mismo bag de parametros que ya consume engine_abi_create_model -- para que se puedan pasar
+ * directamente a engine_abi_create_model sin traduccion, cerrando el circulo Mercado ->
+ * calibrar -> Modelo calibrado igual que ya hacen los tests de las cinco capas. */
+typedef struct EngineCalibrationResult {
+    EngineParam* optimal_params; /* array owned por la libreria, liberar con
+                                   * engine_abi_free_calibration_result */
+    size_t n_params;
     double rmse;
     int iterations;
     int converged; /* 0 o 1 */
-} EngineHullWhiteCalibration;
+} EngineCalibrationResult;
 
-/* Calibra a/b de HullWhite1F a `market` por minimos cuadrados sobre el factor de descuento,
- * partiendo de (initial_a, initial_b); sigma/r0 no se calibran (ver engine_core::calibration
- * en el core Rust para el porque: sigma solo entra en el precio del bono cero-cupon como un
- * efecto de segundo orden, mal identificado contra unicamente una curva de descuento).
- * Devuelve 0 en exito (`*out_result` queda relleno) o != 0 en error (parametros invalidos --
- * `market->count == 0`, pillars no creciente, initial_a <= 0 -- ver engine_abi_last_error;
- * `*out_result` queda a cero). No hace falta liberar `*out_result`: son todo campos planos,
- * sin punteros owned por la libreria. `market->hazard_rate`/`recovery_rate` se ignoran aqui
- * (la calibracion no usa datos de credito). */
-ENGINE_ABI_API int engine_abi_calibrate_hull_white(
+/* Calibra `calibrator` a `market` partiendo de `initial_guess` (mismo bag de parametros que
+ * engine_abi_create_model: que claves hacen falta y cuales de ellas se calibran de verdad
+ * depende de que calibrador sea -- ver engine::HullWhite1FCalibrator/HullWhite2FCalibrator y
+ * engine_core::calibration para el detalle de cada uno). Devuelve 0 en exito (`*out_result`
+ * queda relleno, liberar con engine_abi_free_calibration_result) o != 0 en error (calibrator
+ * NULL, market NULL/vacio, o una clave de initial_guess que ese calibrador necesita y no
+ * recibio -- ver engine_abi_last_error; `*out_result` queda a cero). `market->hazard_rate`/
+ * `recovery_rate` se ignoran aqui (la calibracion no usa datos de credito). */
+ENGINE_ABI_API int engine_abi_calibrate(
+    const EngineCalibrator* calibrator,
     const EngineMarketSnapshot* market,
-    double initial_a,
-    double initial_b,
-    double sigma,
-    double r0,
-    EngineHullWhiteCalibration* out_result
+    const EngineParam* initial_guess,
+    size_t n_initial_guess,
+    EngineCalibrationResult* out_result
 );
+ENGINE_ABI_API void engine_abi_free_calibration_result(EngineCalibrationResult* result);
 
 /* --- ENGINE.CALC (PLAN.md §7.15) ---------------------------------------------------------
  * Sustituye por completo engine_abi_create_measure/engine_abi_evaluate: calcula un lote de

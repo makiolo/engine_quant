@@ -172,6 +172,97 @@ int main(void) {
 
     printf("backend disponible en GPU: %s\n", engine_abi_is_gpu_backend_available() ? "si" : "no");
 
+    /* Calibracion (PLAN.md §7.14, generalizada en §7.18): EngineCalibrator es un handle mas,
+     * creado por nombre igual que EngineModel/EngineProduct -- el mismo engine_abi_calibrate
+     * sirve para HullWhite1F y HullWhite2F, sin una funcion por modelo (a diferencia de la
+     * version anterior de esta ABI, con un engine_abi_calibrate_hull_white especifico). El
+     * mercado se fabrica aqui a mano (una curva creciente sencilla, no necesariamente la que
+     * generaria uno u otro modelo exactamente -- esta sonda solo demuestra el mecanismo de la
+     * ABI, no vuelve a fijar un valor de referencia numerico). */
+    {
+        double cal_pillars[6] = {0.5, 1.0, 2.0, 5.0, 10.0, 20.0};
+        double cal_zero_rates[6] = {0.018, 0.019, 0.021, 0.024, 0.026, 0.027};
+        EngineMarketSnapshot cal_market;
+        const char* calibrator_names[2] = {"HullWhite1F", "HullWhite2F"};
+        int m;
+
+        memset(&cal_market, 0, sizeof(cal_market));
+        cal_market.pillars = cal_pillars;
+        cal_market.zero_rates = cal_zero_rates;
+        cal_market.count = 6;
+
+        for (m = 0; m < 2; ++m) {
+            EngineCalibrator* calibrator = engine_abi_create_calibrator(calibrator_names[m]);
+            EngineParam initial_guess[6];
+            size_t n_initial_guess;
+            EngineCalibrationResult cal_result;
+            EngineModel* calibrated_model;
+
+            if (!calibrator) return fail("engine_abi_create_calibrator");
+
+            initial_guess[0].key = "a";
+            initial_guess[0].kind = ENGINE_PARAM_DOUBLE;
+            initial_guess[0].scalar = 0.3;
+            initial_guess[1].key = "b";
+            initial_guess[1].kind = ENGINE_PARAM_DOUBLE;
+            initial_guess[1].scalar = (m == 0) ? 0.02 : 0.2; /* HullWhite2F: b es velocidad, no nivel */
+            initial_guess[2].key = "sigma";
+            initial_guess[2].kind = ENGINE_PARAM_DOUBLE;
+            initial_guess[2].scalar = 0.01;
+            if (m == 0) {
+                initial_guess[3].key = "r0";
+                initial_guess[3].kind = ENGINE_PARAM_DOUBLE;
+                initial_guess[3].scalar = 0.02;
+                n_initial_guess = 4;
+            } else {
+                initial_guess[3].key = "eta";
+                initial_guess[3].kind = ENGINE_PARAM_DOUBLE;
+                initial_guess[3].scalar = 0.01;
+                initial_guess[4].key = "rho";
+                initial_guess[4].kind = ENGINE_PARAM_DOUBLE;
+                initial_guess[4].scalar = -0.5;
+                initial_guess[5].key = "r0";
+                initial_guess[5].kind = ENGINE_PARAM_DOUBLE;
+                initial_guess[5].scalar = 0.02;
+                n_initial_guess = 6;
+            }
+
+            memset(&cal_result, 0, sizeof(cal_result));
+            if (engine_abi_calibrate(calibrator, &cal_market, initial_guess, n_initial_guess, &cal_result) != 0) {
+                engine_abi_free_calibrator(calibrator);
+                return fail("engine_abi_calibrate");
+            }
+            printf(
+                "calibracion %s: rmse=%.3e iterations=%d converged=%s\n",
+                calibrator_names[m], cal_result.rmse, cal_result.iterations, cal_result.converged ? "si" : "no"
+            );
+
+            /* El resultado se pasa directamente a engine_abi_create_model, sin traduccion --
+             * cierra el circulo Mercado -> calibrar -> Modelo calibrado. */
+            calibrated_model = engine_abi_create_model(calibrator_names[m], cal_result.optimal_params, cal_result.n_params);
+            if (!calibrated_model) {
+                engine_abi_free_calibration_result(&cal_result);
+                engine_abi_free_calibrator(calibrator);
+                return fail("engine_abi_create_model desde el resultado de calibrar");
+            }
+
+            engine_abi_free_model(calibrated_model);
+            engine_abi_free_calibration_result(&cal_result);
+            engine_abi_free_calibrator(calibrator);
+        }
+
+        /* engine_abi_create_calibrator rechaza un nombre desconocido igual que
+         * engine_abi_create_model (PLAN.md §5.5: "ninguna excepcion cruza esta frontera"). */
+        {
+            EngineCalibrator* unknown = engine_abi_create_calibrator("NoExiste");
+            if (unknown != NULL) {
+                engine_abi_free_calibrator(unknown);
+                fprintf(stderr, "FALLO: se esperaba NULL al crear un calibrador desconocido\n");
+                return 1;
+            }
+        }
+    }
+
     /* engine_abi_calc rechaza un nombre de medida desconocido (PLAN.md §7.15): el error queda
      * en engine_abi_last_error(), nunca lanza/aborta a traves de esta frontera C. */
     {

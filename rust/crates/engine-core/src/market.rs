@@ -58,6 +58,26 @@ impl MarketSnapshot {
         Self::new(pillars, zero_rates)
     }
 
+    /// Mercado "falso" (PLAN.md §7.16), equivalente de dos factores de
+    /// `synthetic_from_hull_white`: fabrica un `MarketSnapshot` leyendo la propia fórmula
+    /// cerrada de `HullWhite2F` (`crate::smoke::hull_white_2f_zero_coupon_bond`, factores
+    /// latentes en su valor inicial) en los pillars dados.
+    #[allow(clippy::too_many_arguments)]
+    pub fn synthetic_from_hull_white_2f(a: f64, b: f64, sigma: f64, eta: f64, rho: f64, r0: f64, pillars: Vec<f64>) -> Self {
+        let zero_rates = pillars
+            .iter()
+            .map(|&t| {
+                let price = crate::smoke::hull_white_2f_zero_coupon_bond(a, b, sigma, eta, rho, r0, t);
+                if t > 0.0 {
+                    -price.ln() / t
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+        Self::new(pillars, zero_rates)
+    }
+
     pub fn pillars(&self) -> &[f64] {
         &self.pillars
     }
@@ -140,5 +160,21 @@ mod tests {
     #[should_panic(expected = "estrictamente creciente")]
     fn new_rejects_non_increasing_pillars() {
         MarketSnapshot::new(vec![1.0, 1.0], vec![0.02, 0.03]);
+    }
+
+    #[test]
+    fn synthetic_from_hull_white_2f_reproduces_the_models_own_prices() {
+        let (a, b, sigma, eta, rho, r0) = (0.1, 0.2, 0.01, 0.012, -0.7, 0.03);
+        let pillars = vec![1.0, 2.0, 5.0, 10.0];
+        let market = MarketSnapshot::synthetic_from_hull_white_2f(a, b, sigma, eta, rho, r0, pillars.clone());
+
+        for &t in &pillars {
+            let expected = crate::smoke::hull_white_2f_zero_coupon_bond(a, b, sigma, eta, rho, r0, t);
+            assert!(
+                (market.discount_factor(t) - expected).abs() < 1e-9,
+                "t={t}: discount_factor={} vs esperado={expected}",
+                market.discount_factor(t)
+            );
+        }
     }
 }

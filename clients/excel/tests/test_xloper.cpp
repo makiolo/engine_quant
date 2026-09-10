@@ -481,6 +481,45 @@ TEST(HandleRegistry, CalibrateHullWhiteRecoversKnownParameters) {
     EXPECT_NEAR(std::get<double>(result.optimal_params.at("b")), true_b, 1e-4);
 }
 
+// Equivalente de dos factores del test anterior (PLAN.md §7.18): mismo mecanismo genérico
+// (ENGINE.CREATE_CALIBRATOR/ENGINE.CALIBRATE por nombre), solo cambia el nombre del calibrador
+// y las claves de la estimación inicial -- ninguna línea nueva en HandleRegistry hizo falta
+// para que este segundo calibrador funcionase.
+TEST(HandleRegistry, CalibrateHullWhite2FRecoversKnownParameters) {
+    xlbridge::HandleRegistry registry = make_registry();
+
+    double true_a = 0.15, true_b = 0.25, sigma = 0.008, eta = 0.01, rho = -0.6, r0 = 0.02;
+    std::vector<double> pillars{0.5, 1.0, 2.0, 3.0, 5.0, 7.0, 10.0, 15.0, 20.0, 30.0};
+    engine::MarketSnapshot synthetic =
+        engine::MarketSnapshot::synthetic_from_hull_white_2f(true_a, true_b, sigma, eta, rho, r0, pillars);
+
+    std::vector<std::vector<XCHAR>> market_bufs;
+    std::vector<XLOPER12> market_cells{str_cell(market_bufs, "pillars")};
+    for (double p : synthetic.pillars()) market_cells.push_back(num_cell(p));
+    market_cells.push_back(str_cell(market_bufs, "zero_rates"));
+    for (double z : synthetic.zero_rates()) market_cells.push_back(num_cell(z));
+    XLOPER12 market_table = make_table(market_cells, 2, static_cast<COL>(pillars.size() + 1));
+    std::string market = registry.create_market(market_table);
+
+    std::vector<std::vector<XCHAR>> guess_bufs;
+    std::vector<XLOPER12> guess_cells{
+        str_cell(guess_bufs, "a"), num_cell(0.4),
+        str_cell(guess_bufs, "b"), num_cell(0.05),
+        str_cell(guess_bufs, "sigma"), num_cell(sigma),
+        str_cell(guess_bufs, "eta"), num_cell(eta),
+        str_cell(guess_bufs, "rho"), num_cell(rho),
+        str_cell(guess_bufs, "r0"), num_cell(r0),
+    };
+    XLOPER12 guess_table = make_table(guess_cells, 6, 2);
+
+    std::string calibrator = registry.create_calibrator("HullWhite2F");
+    engine::CalibrationResult result = registry.calibrate(calibrator, market, guess_table);
+
+    EXPECT_TRUE(result.converged);
+    EXPECT_NEAR(std::get<double>(result.optimal_params.at("a")), true_a, 1e-4);
+    EXPECT_NEAR(std::get<double>(result.optimal_params.at("b")), true_b, 1e-4);
+}
+
 TEST(HandleRegistry, CalibrateUnknownHandleThrows) {
     xlbridge::HandleRegistry registry = make_registry();
     XLOPER12 missing = missing_arg();

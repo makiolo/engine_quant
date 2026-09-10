@@ -8,6 +8,7 @@
 // (no negatividad, PFE95>=EE, etc.), ya que esta suite verifica el mecanismo de la ABI, no
 // vuelve a fijar el número.
 
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <string>
@@ -332,6 +333,30 @@ TEST(Abi, IsGpuBackendAvailableIsBoolLike) {
     EXPECT_TRUE(available == 0 || available == 1);
 }
 
+namespace {
+
+// EngineCalibrationResult::optimal_params llega como array desordenado (mismo orden que
+// engine::Params, un unordered_map) -- busca por clave, igual que haría un consumidor real.
+double find_param(const EngineCalibrationResult& result, const char* key) {
+    for (std::size_t i = 0; i < result.n_params; ++i) {
+        if (std::strcmp(result.optimal_params[i].key, key) == 0) return result.optimal_params[i].scalar;
+    }
+    ADD_FAILURE() << "clave no encontrada en optimal_params: " << key;
+    return 0.0;
+}
+
+} // namespace
+
+TEST(Abi, ListCalibratorsIncludesBothModels) {
+    const char** names = nullptr;
+    std::size_t count = engine_abi_list_calibrators(&names);
+    std::vector<std::string> list(names, names + count);
+    engine_abi_free_string_list(names, count);
+
+    EXPECT_NE(std::find(list.begin(), list.end(), "HullWhite1F"), list.end());
+    EXPECT_NE(std::find(list.begin(), list.end(), "HullWhite2F"), list.end());
+}
+
 TEST(Abi, CalibrateHullWhiteRecoversKnownParametersFromASyntheticMarket) {
     // Mercado "falso" (PLAN.md §7.14) fabricado a mano aquí (no via
     // MarketSnapshot::synthetic_from_hull_white, que es C++ interno, no parte de esta ABI):
@@ -348,20 +373,86 @@ TEST(Abi, CalibrateHullWhiteRecoversKnownParametersFromASyntheticMarket) {
     market.zero_rates = zero_rates;
     market.count = 10;
 
-    EngineHullWhiteCalibration result{};
-    int rc = engine_abi_calibrate_hull_white(&market, 0.3, 0.01, sigma, r0, &result);
+    EngineCalibrator* calibrator = engine_abi_create_calibrator("HullWhite1F");
+    ASSERT_NE(calibrator, nullptr) << last_error();
+
+    EngineParam initial_guess[] = {
+        scalar_param("a", 0.3), scalar_param("b", 0.01), scalar_param("sigma", sigma), scalar_param("r0", r0)
+    };
+    EngineCalibrationResult result{};
+    int rc = engine_abi_calibrate(calibrator, &market, initial_guess, 4, &result);
     ASSERT_EQ(rc, 0) << last_error();
 
     EXPECT_TRUE(result.converged);
-    EXPECT_NEAR(result.a, true_a, 1e-4);
-    EXPECT_NEAR(result.b, true_b, 1e-4);
-    EXPECT_EQ(result.sigma, sigma);
-    EXPECT_EQ(result.r0, r0);
+    EXPECT_NEAR(find_param(result, "a"), true_a, 1e-4);
+    EXPECT_NEAR(find_param(result, "b"), true_b, 1e-4);
+    EXPECT_EQ(find_param(result, "sigma"), sigma);
+    EXPECT_EQ(find_param(result, "r0"), r0);
+
+    // El resultado se pasa directamente a engine_abi_create_model, sin traducción -- cierra
+    // el círculo Mercado -> calibrar -> Modelo calibrado (PLAN.md §7.14/§7.18).
+    EngineModel* calibrated_model = engine_abi_create_model("HullWhite1F", result.optimal_params, result.n_params);
+    EXPECT_NE(calibrated_model, nullptr) << last_error();
+    engine_abi_free_model(calibrated_model);
+
+    engine_abi_free_calibration_result(&result);
+    engine_abi_free_calibrator(calibrator);
 }
 
-TEST(Abi, CalibrateHullWhiteRejectsNullMarket) {
-    EngineHullWhiteCalibration result{};
-    int rc = engine_abi_calibrate_hull_white(nullptr, 0.1, 0.03, 0.01, 0.02, &result);
+TEST(Abi, CalibrateHullWhite2FRecoversKnownParametersFromASyntheticMarket) {
+    double pillars[] = {0.5, 1.0, 2.0, 3.0, 5.0, 7.0, 10.0, 15.0, 20.0, 30.0};
+    double true_a = 0.15, true_b = 0.25, sigma = 0.008, eta = 0.01, rho = -0.6, r0 = 0.02;
+    double zero_rates[10];
+    for (int i = 0; i < 10; ++i) {
+        double price = engine::hull_white_2f_zero_coupon_bond(true_a, true_b, sigma, eta, rho, r0, pillars[i]);
+        zero_rates[i] = -std::log(price) / pillars[i];
+    }
+    EngineMarketSnapshot market{};
+    market.pillars = pillars;
+    market.zero_rates = zero_rates;
+    market.count = 10;
+
+    EngineCalibrator* calibrator = engine_abi_create_calibrator("HullWhite2F");
+    ASSERT_NE(calibrator, nullptr) << last_error();
+
+    EngineParam initial_guess[] = {
+        scalar_param("a", 0.4), scalar_param("b", 0.05), scalar_param("sigma", sigma),
+        scalar_param("eta", eta), scalar_param("rho", rho), scalar_param("r0", r0)
+    };
+    EngineCalibrationResult result{};
+    int rc = engine_abi_calibrate(calibrator, &market, initial_guess, 6, &result);
+    ASSERT_EQ(rc, 0) << last_error();
+
+    EXPECT_TRUE(result.converged);
+    EXPECT_NEAR(find_param(result, "a"), true_a, 1e-4);
+    EXPECT_NEAR(find_param(result, "b"), true_b, 1e-4);
+    EXPECT_EQ(find_param(result, "sigma"), sigma);
+    EXPECT_EQ(find_param(result, "eta"), eta);
+    EXPECT_EQ(find_param(result, "rho"), rho);
+    EXPECT_EQ(find_param(result, "r0"), r0);
+
+    EngineModel* calibrated_model = engine_abi_create_model("HullWhite2F", result.optimal_params, result.n_params);
+    EXPECT_NE(calibrated_model, nullptr) << last_error();
+    engine_abi_free_model(calibrated_model);
+
+    engine_abi_free_calibration_result(&result);
+    engine_abi_free_calibrator(calibrator);
+}
+
+TEST(Abi, CalibrateRejectsNullMarket) {
+    EngineCalibrator* calibrator = engine_abi_create_calibrator("HullWhite1F");
+    ASSERT_NE(calibrator, nullptr) << last_error();
+
+    EngineCalibrationResult result{};
+    int rc = engine_abi_calibrate(calibrator, nullptr, nullptr, 0, &result);
     EXPECT_NE(rc, 0);
+    EXPECT_FALSE(last_error().empty());
+
+    engine_abi_free_calibrator(calibrator);
+}
+
+TEST(Abi, CreateUnknownCalibratorReturnsNull) {
+    EngineCalibrator* calibrator = engine_abi_create_calibrator("NoExiste");
+    EXPECT_EQ(calibrator, nullptr);
     EXPECT_FALSE(last_error().empty());
 }

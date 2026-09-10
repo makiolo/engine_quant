@@ -62,4 +62,17 @@ MarketSnapshot MarketSnapshot::synthetic_from_hull_white(
     return MarketSnapshot(pillars, std::move(zero_rates), hazard_rate, recovery_rate);
 }
 
+MarketSnapshot MarketSnapshot::synthetic_from_hull_white_2f(
+    double a, double b, double sigma, double eta, double rho, double r0, const std::vector<double>& pillars,
+    double hazard_rate, double recovery_rate
+) {
+    std::vector<double> zero_rates;
+    zero_rates.reserve(pillars.size());
+    for (double t : pillars) {
+        double price = hull_white_2f_zero_coupon_bond(a, b, sigma, eta, rho, r0, t);
+        zero_rates.push_back(t > 0.0 ? -std::log(price) / t : 0.0);
+    }
+    return MarketSnapshot(pillars, std::move(zero_rates), hazard_rate, recovery_rate);
+}
+
 } // namespace engine
