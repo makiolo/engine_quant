@@ -10,7 +10,9 @@ Requiere haber compilado antes el arbol CMake de este repo (ver examples/abi/REA
 defecto busca engine_abi.dll/.so en <repo>/build/cpp/engine, o en la ruta que indique la
 variable de entorno ENGINE_ABI_LIB_DIR/ENGINE_ABI_LIB_PATH.
 
-    python examples/abi/python/abi_example.py
+Ver tambien abi_example_cffi.py: mismo recorrido, con la libreria `cffi` en vez de `ctypes`.
+
+    python examples/abi/python/abi_example_ctypes.py
 """
 
 import ctypes
@@ -209,6 +211,7 @@ def main() -> None:
     print(f"error esperado al pedir un modelo inexistente: {last_error(lib)}")
 
     print("OK: ejemplo de Python (ctypes) sobre engine/abi.h completado.")
+
 
 
 if __name__ == "__main__":

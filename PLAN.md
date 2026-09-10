@@ -1122,7 +1122,7 @@ sigue construyendo solo `engine_py_ext` (wheel) y `release.yml` solo empaqueta
 árbol de build de desarrollo/CI, sin afectar a ningún artefacto publicado hoy.
 
 **Ejemplos multi-lenguaje** (`examples/abi/`, además de `cpp/engine/examples/abi_c_smoke.c`):
-cuatro versiones del mismo recorrido (listar modelos, IRS 5y+Hull-White, `ExposureProfile`/
+cinco versiones del mismo recorrido (listar modelos, IRS 5y+Hull-White, `ExposureProfile`/
 `UnilateralCVA`, backend de §7.12, un error controlado) consumiendo *solo* `engine/abi.h`, para
 documentar cómo se ve de verdad consumir el motor desde fuera de este repo:
 
@@ -1134,18 +1134,27 @@ documentar cómo se ve de verdad consumir el motor desde fuera de este repo:
   capa C++ vía `cxx`, un mecanismo interno distinto) — declara a mano las firmas `extern "C"`
   de `abi.h` (lo que generaría `bindgen`) para demostrar que incluso Rust podría consumir el
   motor como cualquier lenguaje externo. Cero dependencias: `cargo build` no toca la red.
-- **Python** (`examples/abi/python/abi_example.py`): `ctypes` (solo librería estándar), no el
-  `.pyd` de nanobind de `clients/python` — sin compilar nada específico de Python, la
-  demostración más directa de "universal" (§5.5): cualquier intérprete con `ctypes` sirve.
+- **Python, dos versiones** (`examples/abi/python/abi_example_ctypes.py` y
+  `abi_example_cffi.py`): ninguna pasa por el `.pyd` de nanobind de `clients/python` — sin
+  compilar nada específico de Python, la demostración más directa de "universal" (§5.5).
+  `ctypes` (solo librería estándar) declara cada struct campo a campo
+  (`ctypes.Structure`/`ctypes.POINTER(...)`); `cffi` en modo ABI (`ffi.dlopen`, sin compilar
+  una extensión propia) acepta en `ffi.cdef(...)` una traducción de `abi.h` en sintaxis C casi
+  literal, menos código repetido a cambio de una dependencia externa (`pip install cffi`) —
+  comparar ambos ficheros lado a lado documenta la diferencia entre las dos librerías de FFI
+  más comunes de Python. Gotcha de `cffi` que costó diagnosticar: inicializar un campo `enum`
+  de un struct vía diccionario (`ffi.new("EngineParam[]", [{"kind": "ENGINE_PARAM_DOUBLE",
+  ...}])`) con el *nombre* de la constante como string falla con `TypeError: an integer is
+  required` — hace falta el valor entero subyacente (`0`, no `"ENGINE_PARAM_DOUBLE"`).
 
-Los cuatro (C incluido) dieron exactamente los mismos números en verificación manual —
+Las cinco (C incluido) dieron exactamente los mismos números en verificación manual —
 `ExposureProfile EE ≈ [0, 12862.62, 13673.53]`, `UnilateralCVA = 426.7618244093184` (Rust y
 Python, con más decimales de precisión de imprenta, dieron `426.76182440931836`, el mismo
 valor que ya documentaba `clients/excel/README.md` bit a bit) — confirmando que la traducción
-C ABI ↔ `engine::Registries`/`IMeasure` es correcta independientemente del lenguaje que la
-consuma. CI (`ci.yml`) construye y ejecuta los cuatro en cada push (el C++ y el C comparten el
-build de CMake; Rust y Python se compilan/ejecutan aparte, con el mismo `engine_abi.dll` ya
-generado).
+C ABI ↔ `engine::Registries`/`IMeasure` es correcta independientemente del lenguaje/librería de
+FFI que la consuma. CI (`ci.yml`) construye y ejecuta las cinco en cada push (el C++ y el C
+comparten el build de CMake; Rust y ambas versiones de Python se compilan/ejecutan aparte, con
+el mismo `engine_abi.dll` ya generado).
 
 ---
 *Próxima iteración: confirmar en la práctica (no se pudo ejecutar GitHub Actions desde este

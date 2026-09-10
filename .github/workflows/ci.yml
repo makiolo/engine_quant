@@ -105,7 +105,14 @@ jobs:
       # examples/abi/python: ctypes (solo librería estándar), no el .pyd de nanobind de
       # clients/python -- la demostración más directa de qué significa "universal" en §5.5.
       - name: Python ABI example (ctypes, sin nanobind)
-        run: python examples/abi/python/abi_example.py
+        run: python examples/abi/python/abi_example_ctypes.py
+
+      # Misma ABI, vía cffi (ffi.dlopen) en vez de ctypes -- ver examples/abi/README.md para
+      # la comparación entre ambas. Único ejemplo con una dependencia externa a instalar.
+      - name: Python ABI example (cffi)
+        run: |
+          pip install cffi
+          python examples/abi/python/abi_example_cffi.py
 
       - name: Python smoke test (ping + Hull-White/IRS/CVA sobre Burn)
         run: python clients/python/tests/test_smoke.py build/clients/python

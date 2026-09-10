@@ -1,20 +1,20 @@
 # Ejemplos de la C ABI (`engine/abi.h`, PLAN.md Fase 6, §5.5/§7.13)
 
-Cuatro versiones del mismo recorrido -- listar modelos registrados, construir un IRS a 5 años
+Cinco versiones del mismo recorrido -- listar modelos registrados, construir un IRS a 5 años
 bajo Hull-White 1F, evaluar `ExposureProfile` y `UnilateralCVA`, consultar/seleccionar el
 backend de cómputo (PLAN.md §7.12) y provocar un error controlado -- consumiendo únicamente la
 interfaz `extern "C"` de [`cpp/engine/include/engine/abi.h`](../../cpp/engine/include/engine/abi.h),
 nunca el registry C++ interno, `cxx` ni nanobind. El objetivo es documentar cómo se ve "de
-verdad" consumir el motor desde fuera de este repo, en cuatro lenguajes distintos, no repetir
-la validación numérica fina (eso ya lo cubren `rust/crates/engine-core` y
+verdad" consumir el motor desde fuera de este repo, en distintos lenguajes/librerías de FFI,
+no repetir la validación numérica fina (eso ya lo cubren `rust/crates/engine-core` y
 `cpp/engine/tests/test_abi.cpp`).
 
-Los cuatro deben imprimir los mismos números -- el mismo caso/semillas que documenta
+Los cinco deben imprimir los mismos números -- el mismo caso/semillas que documenta
 [`clients/excel/README.md`](../../clients/excel/README.md) ("Verificación manual"):
 `ExposureProfile EE ≈ [0, 12862.62, 13673.53]` (`seed=7`) y `UnilateralCVA = 426.7618244093184`
 (`seed=13`, `hazard_rate=0.02`, `recovery_rate=0.4`). Si alguno da un número distinto, algo se
-rompió en la traducción C ABI ↔ `engine::Registries`/`IMeasure` para ese lenguaje concreto, no
-en el motor (que ya validan las otras tres).
+rompió en la traducción C ABI ↔ `engine::Registries`/`IMeasure` para ese lenguaje/librería
+concreto, no en el motor (que ya validan los demás).
 
 ## Requisito común: compilar `engine_abi` primero
 
@@ -26,9 +26,9 @@ cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build --target engine_abi
 ```
 
-Por defecto, los tres ejemplos que no viven dentro del propio árbol de CMake (Rust, Python)
-buscan la librería en `<repo>/build/cpp/engine/`; una variable de entorno permite apuntar a
-otra ubicación (por ejemplo, un `engine_abi` instalado fuera de este repo).
+Por defecto, los ejemplos que no viven dentro del propio árbol de CMake (Rust, Python) buscan
+la librería en `<repo>/build/cpp/engine/`; una variable de entorno permite apuntar a otra
+ubicación (por ejemplo, un `engine_abi` instalado fuera de este repo).
 
 ## C
 
@@ -75,21 +75,35 @@ cp ../../../build/cpp/engine/engine_abi.dll target/debug/
 `engine_abi.lib`/`.dll` en tiempo de compilación si no está en `../../../build/cpp/engine`
 relativo a este crate.
 
-## Python
+## Python (dos versiones: `ctypes` y `cffi`)
 
-[`python/abi_example.py`](python/abi_example.py) -- usa `ctypes` (solo librería estándar): a
-diferencia de `import engine` (`clients/python`, un `.pyd` de nanobind compilado para una
-versión exacta de CPython), esta ruta funciona con cualquier Python que tenga `ctypes` --
-ninguna compilación específica de Python de por medio, la demostración más directa de qué
-significa "universal" en PLAN.md §5.5.
+Ambas siguen el mismo recorrido y aceptan las mismas variables de entorno
+(`ENGINE_ABI_LIB_DIR`, una carpeta; o `ENGINE_ABI_LIB_PATH`, la ruta completa al `.dll`/`.so`,
+con prioridad sobre la anterior) para apuntar a una ubicación de `engine_abi` distinta de
+`<repo>/build/cpp/engine/`. Comparar ambos ficheros lado a lado es la forma más directa de ver
+la diferencia entre las dos librerías de FFI más comunes de Python.
 
-```
-python examples/abi/python/abi_example.py
-```
+- [`python/abi_example_ctypes.py`](python/abi_example_ctypes.py) -- `ctypes`, **solo librería
+  estándar**: a diferencia de `import engine` (`clients/python`, un `.pyd` de nanobind
+  compilado para una versión exacta de CPython), esta ruta funciona con cualquier Python que
+  tenga `ctypes` -- ninguna compilación específica de Python de por medio, la demostración más
+  directa de qué significa "universal" en PLAN.md §5.5.
 
-`ENGINE_ABI_LIB_DIR` (carpeta) o `ENGINE_ABI_LIB_PATH` (ruta completa al `.dll`/`.so`, tiene
-prioridad) como variables de entorno para apuntar a una ubicación distinta de
-`<repo>/build/cpp/engine/`.
+  ```
+  python examples/abi/python/abi_example_ctypes.py
+  ```
+
+- [`python/abi_example_cffi.py`](python/abi_example_cffi.py) -- [`cffi`](https://cffi.readthedocs.io/),
+  en modo ABI (`ffi.dlopen`, sin compilar una extensión propia): `ffi.cdef(...)` acepta
+  declaraciones en sintaxis C casi literal (la misma forma que `abi.h`, sin macros de
+  exportación ni directivas de preprocesador) en vez de traducir cada struct campo a campo a
+  `ctypes.Structure`, menos código repetido a cambio de una dependencia externa
+  (`pip install cffi`).
+
+  ```
+  pip install cffi
+  python examples/abi/python/abi_example_cffi.py
+  ```
 
 ## Otros lenguajes con FFI a C
 
