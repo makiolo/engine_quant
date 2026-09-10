@@ -97,12 +97,18 @@ jobs:
       # a engine_abi -- demuestra que incluso Rust podría consumir el motor como un lenguaje
       # externo cualquiera. El .dll debe copiarse junto al .exe para que Windows lo encuentre
       # en tiempo de ejecución (el .lib de import ya basta para enlazar, ver build.rs).
+      #
+      # Deliberadamente SIN `shell: bash`: Git Bash antepone su propio `/usr/bin` (coreutils,
+      # que incluye un `link.exe` homónimo) al directorio del linker de MSVC en el PATH, así
+      # que `cargo build` con el toolchain MSVC invoca ese `link.exe` equivocado en vez del de
+      # Visual Studio -- el fallo se ve como un error de "operando" de coreutils `link`, no
+      # como un error de enlazado real. El shell por defecto en runners Windows (pwsh) no
+      # tiene ese problema.
       - name: Rust ABI example (FFI manual a engine_abi, fuera del workspace de Cargo)
-        shell: bash
         working-directory: examples/abi/rust
         run: |
           cargo build
-          cp ../../../build/cpp/engine/engine_abi.dll target/debug/
+          Copy-Item ../../../build/cpp/engine/engine_abi.dll target/debug/
           ./target/debug/engine_abi_example.exe
 
       # examples/abi/python: ctypes (solo librería estándar), no el .pyd de nanobind de
@@ -131,7 +137,7 @@ jobs:
       # ExecutionContext({"backend": "auto"}) siempre resuelve a "cpu" aquí. Incluye el valor
       # de referencia exacto (UnilateralCVA=503.64194077997536, mismo EE/PFE95 que
       # cpp/engine/tests/test_registry.cpp).
-      - name: Python calc test (ENGINE.CALC: PV/DV01/ExpectedExposure/PFE95/UnilateralCVA)
+      - name: Python calc test (ENGINE.CALC -- PV/DV01/ExpectedExposure/PFE95/UnilateralCVA)
         run: python clients/python/tests/test_calc.py build/clients/python
 
       # PLAN.md §7.14 (Fase 7): equivalente Python de cpp/engine/tests/test_calibration.cpp,
