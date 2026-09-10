@@ -1,0 +1,181 @@
+name: Release
+
+# Empaqueta y publica los artefactos de una release (PLAN.md §7.9): ruedas de Python
+# autocontenidas (una por version de CPython) y el .xll de Excel con sus dependencias y el
+# instalador. Se dispara al empujar un tag "vX.Y.Z" -- crea la release en GitHub con
+# softprops/action-gh-release si no existe, y le adjunta los assets. `workflow_dispatch`
+# permite probar el pipeline de build sin publicar nada (build-wheels/build-xll corren igual,
+# pero publish-release se salta si no viene de un tag).
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  build-wheels:
+    name: Wheel Python (cp${{ matrix.python-version }}, win_amd64)
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Set up MSVC dev environment
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Set up Ninja
+        uses: seanmiddleditch/gha-setup-ninja@master
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            rust/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('rust/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      # pyproject.toml versiona "0.0.0" en el repo (solo para builds locales/de desarrollo);
+      # aqui se sobrescribe con el tag de la release (v1.2.3 -> 1.2.3).
+      - name: Fijar la version del paquete desde el tag
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            version="${GITHUB_REF_NAME#v}"
+          else
+            version="0.0.0.dev0+${GITHUB_SHA::8}"
+          fi
+          sed -i "s/^version = \"0.0.0\"/version = \"$version\"/" pyproject.toml
+          echo "Version fijada: $version"
+
+      - name: Instalar herramientas de build
+        run: python -m pip install --upgrade pip delvewheel
+
+      # scikit-build-core (pyproject.toml) construye solo engine_py_ext (PLAN.md §7.9):
+      # ENGINE_QUANT_BUILD_TESTS/ENGINE_QUANT_BUILD_EXCEL=OFF ya vienen fijados ahi, no aqui.
+      # `pip wheel` (no `python -m build`) igual que en la verificacion local del pipeline:
+      # ambos son frontends PEP517 equivalentes, se prefiere el que quedo probado end-to-end.
+      - name: Construir la wheel
+        env:
+          CMAKE_GENERATOR: Ninja
+        run: python -m pip wheel . -w wheelhouse --no-deps
+
+      # La wheel enlaza dinamicamente MSVCP140.dll (runtime de C++); delvewheel lo detecta y
+      # lo embebe (mangling de nombre incluido) para que `pip install` no dependa de tener el
+      # redistribuible de Visual C++ ya instalado (vcruntime140[_1].dll se consideran parte
+      # del CRT universal que trae Windows 10/11 actualizado, delvewheel no los copia).
+      - name: Reparar la wheel (autocontenida)
+        shell: bash
+        run: python -m delvewheel repair -w dist wheelhouse/*.whl
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheel-cp${{ matrix.python-version }}
+          path: dist/*.whl
+
+  build-xll:
+    name: Complemento de Excel (.xll + instalador)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up MSVC dev environment
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Set up Ninja
+        uses: seanmiddleditch/gha-setup-ninja@master
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            rust/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('rust/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Configure (CMake + Corrosion + cxx + nanobind)
+        shell: bash
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DPython_EXECUTABLE="$(python -c 'import sys; print(sys.executable)')"
+
+      - name: Build
+        run: cmake --build build
+
+      # Incluye engine_excel_harness_test (PLAN.md §7.8): carga el .xll YA COMPILADO que se
+      # va a empaquetar mas abajo y ejerce xlAutoOpen/las UDFs como lo haria Excel de verdad.
+      - name: Tests (registry + bridge Excel + harness del .xll)
+        run: ctest --test-dir build --output-on-failure -C Release
+
+      - name: Determinar la version del asset desde el tag
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            echo "ASSET_VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+          else
+            echo "ASSET_VERSION=0.0.0-dev-${GITHUB_SHA::8}" >> "$GITHUB_ENV"
+          fi
+
+      # engine_excel.xll enlaza Rust estaticamente (PLAN.md §5.4); la unica dependencia
+      # dinamica que no forma parte de Windows es MSVCP140.dll (mismo criterio que la wheel
+      # de Python, ver el job build-wheels/delvewheel): se copia junto al .xll para que quien
+      # lo instale no necesite Visual Studio ni el redistribuible de VC++ por separado
+      # (Windows busca primero en la carpeta del propio modulo cargado por ruta completa).
+      - name: Empaquetar el complemento (.xll + DLL + instalador)
+        shell: pwsh
+        run: |
+          $stage = "package"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          Copy-Item build/clients/excel/engine_excel.xll $stage
+          Copy-Item "$env:VCToolsRedistDir\x64\Microsoft.VC143.CRT\msvcp140.dll" $stage
+          Copy-Item clients/excel/install/Install-EngineExcelAddin.ps1 $stage
+          Copy-Item clients/excel/install/Uninstall-EngineExcelAddin.ps1 $stage
+          Copy-Item clients/excel/install/README.md $stage
+          $zipName = "engine_excel-$env:ASSET_VERSION-win_amd64.zip"
+          Compress-Archive -Path "$stage\*" -DestinationPath $zipName
+          echo "ZIP_NAME=$zipName" >> $env:GITHUB_ENV
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: engine_excel-xll
+          path: ${{ env.ZIP_NAME }}
+
+  publish-release:
+    name: Publicar la release en GitHub
+    needs: [build-wheels, build-xll]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Aplanar los artefactos descargados
+        run: |
+          mkdir -p release_assets
+          find artifacts -type f \( -name "*.whl" -o -name "*.zip" \) -exec cp {} release_assets/ \;
+          ls -la release_assets
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: release_assets/*
+          generate_release_notes: true
