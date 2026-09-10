@@ -146,7 +146,29 @@ jobs:
           $stage = "package"
           New-Item -ItemType Directory -Force -Path $stage | Out-Null
           Copy-Item build/clients/excel/engine_excel.xll $stage
-          Copy-Item "$env:VCToolsRedistDir\x64\Microsoft.VC143.CRT\msvcp140.dll" $stage
+
+          # No se asume el nombre de carpeta "Microsoft.VC143.CRT" (cambia de version en
+          # version del toolset, p.ej. VS2022 14.44 vs una posterior 14.51 con otra carpeta):
+          # se busca msvcp140.dll dentro de VCToolsRedistDir y, si no aparece ahi, dentro del
+          # propio compilador (VCToolsInstallDir) -- misma copia funcional que usa delvewheel
+          # cuando no encuentra la de Redist (ver el job build-wheels).
+          $msvcp140 = $null
+          if ($env:VCToolsRedistDir) {
+              $msvcp140 = Get-ChildItem -Path $env:VCToolsRedistDir -Recurse -Filter "msvcp140.dll" -ErrorAction SilentlyContinue |
+                  Where-Object { $_.FullName -like '*\x64\*' -and $_.FullName -notlike '*\onecore\*' -and $_.FullName -notlike '*\debug_nonredist\*' } |
+                  Select-Object -First 1
+          }
+          if (-not $msvcp140 -and $env:VCToolsInstallDir) {
+              $msvcp140 = Get-ChildItem -Path $env:VCToolsInstallDir -Recurse -Filter "msvcp140.dll" -ErrorAction SilentlyContinue |
+                  Where-Object { $_.FullName -like '*\Hostx64\x64\*' } |
+                  Select-Object -First 1
+          }
+          if (-not $msvcp140) {
+              throw "No se encontro msvcp140.dll ni en VCToolsRedistDir ('$env:VCToolsRedistDir') ni en VCToolsInstallDir ('$env:VCToolsInstallDir')"
+          }
+          Write-Host "Usando msvcp140.dll: $($msvcp140.FullName)"
+          Copy-Item $msvcp140.FullName $stage
+
           Copy-Item clients/excel/install/Install-EngineExcelAddin.ps1 $stage
           Copy-Item clients/excel/install/Uninstall-EngineExcelAddin.ps1 $stage
           Copy-Item clients/excel/install/README.md $stage
