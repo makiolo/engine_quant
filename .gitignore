@@ -17,6 +17,10 @@ __pycache__/
 /dist_*/
 /wheelhouse/
 
+# Instalador (PLAN.md §7.9): payload montado por release.yml/build-installer a partir de los
+# artefactos de build-wheels/build-xll, no es codigo fuente.
+/installer/payload/
+
 # IDE / editor
 .vs/
 .vscode/

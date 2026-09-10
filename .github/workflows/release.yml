@@ -218,9 +218,60 @@ jobs:
           name: engine_excel-xll
           path: ${{ env.ZIP_NAME }}
 
+  build-installer:
+    name: Instalador Windows (.exe, wizard)
+    needs: [determine-version, build-wheels, build-xll]
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # merge-multiple junta las N wheels (una por version de CPython, artefactos
+      # wheel-cp3.10/wheel-cp3.11/...) en un unico directorio -- Install-EngineWheels.ps1
+      # (PLAN.md §7.9) elige la que corresponda a cada interprete detectado en tiempo de
+      # instalacion, no hace falta seleccionar ninguna aqui.
+      - name: Descargar las wheels
+        uses: actions/download-artifact@v4
+        with:
+          pattern: wheel-cp*
+          path: installer/payload/wheels
+          merge-multiple: true
+
+      - name: Descargar el paquete del XLL
+        uses: actions/download-artifact@v4
+        with:
+          name: engine_excel-xll
+          path: installer/payload/xll-zip
+
+      - name: Descomprimir el paquete del XLL
+        shell: pwsh
+        run: |
+          $zip = Get-ChildItem installer/payload/xll-zip -Filter *.zip | Select-Object -First 1
+          Expand-Archive -Path $zip.FullName -DestinationPath installer/payload/xll -Force
+          Remove-Item installer/payload/xll-zip -Recurse -Force
+
+      - name: Copiar los scripts de instalacion de Python
+        shell: bash
+        run: cp clients/python/install/*.ps1 installer/payload/wheels/
+
+      - name: Instalar Inno Setup
+        run: choco install innosetup --no-progress -y
+
+      # AppId fijo en EngineQuantSetup.iss: instalar una version nueva sobre una anterior
+      # actualiza en el mismo sitio (Programas y caracteristicas no duplica la entrada) y
+      # [InstallDelete] limpia {app}\wheels/{app}\xll antes de copiar los ficheros nuevos, asi
+      # que una wheel/xll de una version anterior no se queda a medias junto a la nueva.
+      - name: Compilar el instalador
+        shell: cmd
+        run: '"C:\Program Files (x86)\Inno Setup 6\ISCC.exe" /DMyAppVersion=${{ needs.determine-version.outputs.version }} installer\EngineQuantSetup.iss'
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: engine_quant-installer
+          path: dist_installer/*.exe
+
   publish-release:
     name: Publicar la release en GitHub
-    needs: [determine-version, build-wheels, build-xll]
+    needs: [determine-version, build-wheels, build-xll, build-installer]
     if: needs.determine-version.outputs.publish == 'true'
     runs-on: ubuntu-latest
     steps:
@@ -231,7 +282,7 @@ jobs:
       - name: Aplanar los artefactos descargados
         run: |
           mkdir -p release_assets
-          find artifacts -type f \( -name "*.whl" -o -name "*.zip" \) -exec cp {} release_assets/ \;
+          find artifacts -type f \( -name "*.whl" -o -name "*.zip" -o -name "*.exe" \) -exec cp {} release_assets/ \;
           ls -la release_assets
 
       - uses: softprops/action-gh-release@v2
