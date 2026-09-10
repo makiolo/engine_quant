@@ -17,6 +17,8 @@
 #include "xloper.hpp"
 #include "handles.hpp"
 
+#include "engine/engine.hpp"
+
 #include <vector>
 
 namespace {
@@ -105,6 +107,36 @@ extern "C" __declspec(dllexport) LPXLOPER12 WINAPI xlEngineEvaluate(
     });
 }
 
+// Selección de backend de cómputo (PLAN.md §7.12): a diferencia de Python (un `with` acota
+// el cambio a un bloque), una hoja de Excel no tiene un equivalente de "bloque" -- por eso
+// aquí es, como anticipaba el propio PLAN.md, una UDF que cambia un estado global de proceso
+// que leen las llamadas siguientes a ENGINE.EVALUATE, no un argumento más de esa función.
+//
+// Importante para quien la use: ENGINE.EVALUATE no *depende* de la celda donde está
+// ENGINE.SET_BACKEND (Excel solo recalcula una fórmula cuando cambia algo de lo que depende
+// explícitamente), así que cambiar de backend y volver a pulsar Intro en la celda de
+// SET_BACKEND no recalcula por sí solo las celdas EVALUATE ya existentes -- hace falta un
+// recálculo manual (Ctrl+Alt+Intro) después de cambiar de backend para que reflejen el nuevo
+// backend. Alternativa para quien quiera recálculo automático: hacer que ENGINE.SET_BACKEND
+// devuelva el nombre del backend y meter esa celda como argumento extra (sin usarlo) de las
+// fórmulas EVALUATE relevantes, para que Excel las trate como dependientes.
+extern "C" __declspec(dllexport) LPXLOPER12 WINAPI xlEngineSetBackend(LPXLOPER12 name) {
+    return xlbridge::guarded([&] {
+        std::string requested = xlbridge::read_string(*name);
+        if (!engine::set_compute_backend(requested)) {
+            throw std::invalid_argument(
+                "Backend de computo no disponible: '" + requested + "'");
+        }
+        return xlbridge::new_str(engine::compute_backend_name());
+    });
+}
+
+extern "C" __declspec(dllexport) LPXLOPER12 WINAPI xlEngineGetBackend() {
+    return xlbridge::guarded([] {
+        return xlbridge::new_str(engine::compute_backend_name());
+    });
+}
+
 // PLAN.md §5.4 (registro explicito centralizado) aplicado tambien aqui: una unica tabla que
 // enumera todo lo que este XLL expone, sin auto-registro implicito. Va despues de las UDFs
 // (no antes): ENGINE_XLL_ENTRY necesita verlas ya declaradas para el chequeo `void(&fn)`.
@@ -124,6 +156,11 @@ constexpr FnSpec kFunctions[] = {
                       L"Crea una medida y devuelve su handle."),
     ENGINE_XLL_ENTRY(xlEngineEvaluate, L"UQQQQ", L"ENGINE.EVALUATE", L"medida,modelo,producto,params",
                       L"Evalua una medida sobre un modelo y un producto (params: rango clave/valor)."),
+    ENGINE_XLL_ENTRY(xlEngineSetBackend, L"UQ", L"ENGINE.SET_BACKEND", L"nombre",
+                      L"Selecciona el backend de computo global ('cpu'/'gpu'). Requiere recalculo "
+                      L"manual (Ctrl+Alt+Intro) de las celdas EVALUATE existentes."),
+    ENGINE_XLL_ENTRY(xlEngineGetBackend, L"U", L"ENGINE.GET_BACKEND", L"",
+                      L"Backend de computo actualmente seleccionado ('cpu' o 'gpu')."),
 };
 } // namespace
 

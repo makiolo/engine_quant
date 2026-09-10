@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <string>
 #include <vector>
 
 namespace engine {
@@ -59,5 +60,16 @@ double unilateral_cva_from_exposure(
     const std::vector<double>& times, const std::vector<double>& ee,
     double hazard_rate, double recovery_rate
 );
+
+// Selección de backend de cómputo (PLAN.md §7.12): "cpu" (siempre disponible) o "gpu" (solo
+// si el core Rust se compiló con la feature `gpu`, ver ENGINE_QUANT_ENABLE_GPU en el
+// CMakeLists.txt raíz). Estado global de proceso, no un parámetro de cada llamada: las dos
+// funciones de arriba lo leen internamente en cada invocación. set_compute_backend devuelve
+// false (sin cambiar nada) si `name` no se reconoce o pide un backend no compilado en este
+// build — comprobar is_gpu_backend_available() antes de pedir "gpu" si se quiere distinguir
+// ambos casos en el mensaje al usuario.
+bool set_compute_backend(const std::string& name);
+std::string compute_backend_name();
+bool is_gpu_backend_available();
 
 } // namespace engine

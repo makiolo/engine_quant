@@ -85,3 +85,10 @@ jobs:
       # IMeasure::evaluate con la misma semántica que el registry C++.
       - name: Python registry test (Engine/Model/Product/Measure)
         run: python clients/python/tests/test_registry.py build/clients/python
+
+      # PLAN.md §7.12: set_compute_backend/get_compute_backend/backend() -- este runner
+      # compila sin ENGINE_QUANT_ENABLE_GPU (ver paso "Configure" arriba), así que solo
+      # ejercita el contrato de la API con CpuBackend; is_gpu_backend_available() debe dar
+      # False aquí.
+      - name: Python backend-selection test (set_compute_backend/backend())
+        run: python clients/python/tests/test_backend.py build/clients/python

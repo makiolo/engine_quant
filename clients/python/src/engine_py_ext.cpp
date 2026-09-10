@@ -66,6 +66,42 @@ private:
     engine::Registries registries_;
 };
 
+// Gestor de contexto nativo para PLAN.md §7.12: "with engine.backend('gpu'): ...". Inspirado
+// en `decimal.localcontext()`/`torch.device()` (Python estándar/PyTorch) — recordar el
+// backend previo al entrar y restaurarlo al salir, incluso si el bloque lanza una excepción
+// — pero implementado como clase de nanobind en vez de un decorador `@contextlib.
+// contextmanager` de Python: este binding es el único módulo que se distribuye (PLAN.md
+// §7.9, `pyproject.toml`: "no hay paquete Python que auto-copiar"), así que el protocolo de
+// gestor de contexto (`__enter__`/`__exit__`, duck-typed por Python, contextlib es solo un
+// azúcar sintáctico para construirlo con un generador) vive aquí en vez de en un fichero .py
+// nuevo. `clients/python/examples/backend_selection.py` muestra el equivalente con
+// contextlib para quien prefiera construir el suyo por encima de `set_compute_backend`/
+// `get_compute_backend`.
+class BackendScope {
+public:
+    explicit BackendScope(std::string requested) : requested_(std::move(requested)) {}
+
+    std::string enter() {
+        previous_ = engine::compute_backend_name();
+        if (!engine::set_compute_backend(requested_)) {
+            throw std::invalid_argument(
+                "Backend de computo no disponible: '" + requested_ +
+                "' (gpu disponible en este build: " +
+                (engine::is_gpu_backend_available() ? "si" : "no") + ")");
+        }
+        return engine::compute_backend_name();
+    }
+
+    bool exit(nb::object, nb::object, nb::object) {
+        engine::set_compute_backend(previous_);
+        return false; // no suprime la excepcion, si la hubo
+    }
+
+private:
+    std::string requested_;
+    std::string previous_;
+};
+
 } // namespace
 
 // Fase 0: cadena de humo del pipeline de build (PLAN.md §7.1).
@@ -154,4 +190,54 @@ NB_MODULE(engine, m) {
         .def("create_model", &Engine::create_model, nb::arg("name"), nb::arg("params") = nb::dict())
         .def("create_product", &Engine::create_product, nb::arg("name"), nb::arg("params") = nb::dict())
         .def("create_measure", &Engine::create_measure, nb::arg("name"));
+
+    // --- Selección de backend de cómputo (PLAN.md §7.12) ---
+
+    m.def(
+        "set_compute_backend",
+        &engine::set_compute_backend,
+        nb::arg("name"),
+        "Selecciona el backend de computo global ('cpu'/'gpu'). Devuelve False sin cambiar "
+        "nada si el nombre no se reconoce o pide un backend no compilado en este build "
+        "(ver is_gpu_backend_available()). Afecta a todas las llamadas siguientes hasta el "
+        "proximo set_compute_backend() -- para un cambio acotado a un bloque, usar backend()."
+    );
+    m.def(
+        "get_compute_backend",
+        &engine::compute_backend_name,
+        "Backend de computo actualmente seleccionado ('cpu' o 'gpu')."
+    );
+    m.def(
+        "is_gpu_backend_available",
+        &engine::is_gpu_backend_available,
+        "True si este build se compilo con soporte GPU (feature `gpu` de engine-core), "
+        "independientemente de cual sea el backend seleccionado ahora mismo."
+    );
+
+    nb::class_<BackendScope>(m, "_BackendScope")
+        .def(nb::init<std::string>())
+        .def("__enter__", &BackendScope::enter)
+        // Python invoca __exit__(None, None, None) cuando el bloque `with` termina sin
+        // excepcion: .none() en cada argumento es obligatorio en nanobind (por defecto
+        // rechaza None incluso para un nb::object generico, ver nb_attr.h) o cada salida
+        // limpia del `with` lanzaria un TypeError en vez de restaurar el backend.
+        .def(
+            "__exit__",
+            &BackendScope::exit,
+            nb::arg("exc_type").none(),
+            nb::arg("exc_value").none(),
+            nb::arg("traceback").none()
+        );
+
+    m.def(
+        "backend",
+        [](const std::string& name) { return BackendScope(name); },
+        nb::arg("name"),
+        "Gestor de contexto: selecciona el backend de computo ('cpu'/'gpu') solo dentro del "
+        "bloque `with`, restaurando el anterior al salir (incluso si el bloque lanza una "
+        "excepcion) -- inspirado en decimal.localcontext()/torch.device().\n\n"
+        ">>> with engine.backend('gpu'):\n"
+        "...     medida.evaluate(modelo, producto, params)  # corre en GPU\n"
+        "... # aqui ya se ha restaurado el backend anterior"
+    );
 }

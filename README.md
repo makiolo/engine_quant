@@ -209,7 +209,8 @@ The project plan in `PLAN.md` outlines a progressive roadmap:
 - phase 4: Excel XLL client
 - phase 5: GPU backend (`burn-wgpu`) benchmarked on the IRS+Hull-White case; kept opt-in
   behind the `gpu` feature (see `PLAN.md` §7.11) rather than default, since it only pays off
-  above ~100k Monte Carlo paths
+  above ~100k Monte Carlo paths. Selectable from clients: `with engine.backend("gpu"):` in
+  Python, `ENGINE.SET_BACKEND("gpu")` in Excel (`PLAN.md` §7.12)
 - future phases: broader XVA metrics, more products, and a stable universal ABI
 
 ## Why this might get attention

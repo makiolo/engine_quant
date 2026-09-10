@@ -29,6 +29,8 @@ El resultado es `build/clients/excel/engine_excel.xll`. Solo se construye en Win
 | `ENGINE.CREATE_PRODUCT(nombre, params)` | `Engine().create_product(nombre, params)` |
 | `ENGINE.CREATE_MEASURE(nombre)` | `Engine().create_measure(nombre)` |
 | `ENGINE.EVALUATE(medida, modelo, producto, params)` | `Measure.evaluate(modelo, producto, params)` |
+| `ENGINE.SET_BACKEND(nombre)` | `engine.set_compute_backend(nombre)` / `with engine.backend(nombre):` |
+| `ENGINE.GET_BACKEND()` | `engine.get_compute_backend()` |
 
 `params` es un rango de Excel de 2 o más columnas: columna A = nombre del parámetro,
 columnas siguientes = su valor. Un parámetro escalar (`a`, `notional`, ...) solo rellena la
@@ -48,6 +50,40 @@ matriz de 3 columnas (tiempo, EE, PFE 95%) si no lo tiene (`ExposureProfile`) �
 moderno (arrays dinámicos) basta con escribir la fórmula en la celda superior izquierda y
 dejar que "derrame" (spill); en versiones sin arrays dinámicos hay que introducirla como
 fórmula matricial (Ctrl+Shift+Intro) sobre un rango del tamaño esperado.
+
+## Selección de backend (CPU/GPU, PLAN.md §7.12)
+
+A diferencia de Python (donde `with engine.backend("gpu"):` acota el cambio a un bloque de
+código, ver `clients/python/examples/backend_selection.py`), una hoja de Excel no tiene un
+"bloque" equivalente: `ENGINE.SET_BACKEND` cambia un **estado global del proceso** (del
+complemento, no de una celda) que leen todas las llamadas siguientes a `ENGINE.EVALUATE`.
+
+```
+=ENGINE.SET_BACKEND("gpu")   -> "gpu" si este build tiene GpuBackend compilado, error #VALUE! si no
+=ENGINE.GET_BACKEND()        -> "cpu" o "gpu": backend actualmente seleccionado
+```
+
+`GpuBackend` (`burn-wgpu`) no está compilado en el `.xll` por defecto (PLAN.md §5.1, §7.11):
+hace falta recompilar con `-DENGINE_QUANT_ENABLE_GPU=ON` (ver [`../../CMakeLists.txt`](../../CMakeLists.txt))
+para que `ENGINE.SET_BACKEND("gpu")` tenga efecto — en un `.xll` sin esa opción, devuelve
+`#VALUE!` en vez de calcular en silencio sobre CPU sin avisar.
+
+**Importante — recálculo manual tras cambiar de backend**: Excel solo recalcula una fórmula
+cuando cambia algo de lo que depende *explícitamente*. Las celdas con `ENGINE.EVALUATE` no
+dependen de la celda donde está `ENGINE.SET_BACKEND` (es una UDF sin argumentos compartidos),
+así que cambiar de backend y volver a pulsar Intro en esa celda no recalcula por sí solo las
+`ENGINE.EVALUATE` ya existentes en la hoja: hace falta forzar un recálculo completo
+(Ctrl+Alt+Intro) después de cambiar de backend para que reflejen el nuevo valor. Quien
+necesite que Excel recalcule automáticamente puede usar el valor de retorno de
+`ENGINE.SET_BACKEND` (o de `ENGINE.GET_BACKEND`) como un argumento más — sin usarlo dentro de
+la fórmula — de las `ENGINE.EVALUATE` que le interese forzar a depender del backend activo.
+
+**Los resultados no son bit a bit idénticos entre backends con la misma semilla**: cada
+backend de Burn implementa su propio generador de números aleatorios, así que el mismo
+`seed` produce una secuencia de shocks distinta en CPU (`burn-ndarray`) y GPU (`burn-wgpu`) —
+el perfil de exposición Monte Carlo difiere en ruido estadístico (variación típica sub-2%
+en el caso de §5.2), no en la lógica de valoración. No usar el mismo `seed` en ambos backends
+como prueba de reproducibilidad exacta.
 
 ## Verificación manual (PLAN.md §5.6, capa 4: equivalencia entre clientes)
 

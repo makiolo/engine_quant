@@ -79,4 +79,16 @@ double unilateral_cva_from_exposure(
     );
 }
 
+bool set_compute_backend(const std::string& name) {
+    return ffi::set_compute_backend(name);
+}
+
+std::string compute_backend_name() {
+    return std::string(ffi::compute_backend_name());
+}
+
+bool is_gpu_backend_available() {
+    return ffi::is_gpu_backend_available();
+}
+
 } // namespace engine

@@ -12,3 +12,9 @@ engine-core = { path = "../engine-core" }
 
 [build-dependencies]
 cxx-build = "1"
+
+[features]
+# PLAN.md §7.12: permite compilar la capa C++/Python/Excel con GpuBackend disponible sin
+# tocar este crate; reenvía a la misma feature de engine-core (PLAN.md §5.1, §7.11). Se
+# activa desde CMake con la opción ENGINE_QUANT_ENABLE_GPU (ver CMakeLists.txt raíz).
+gpu = ["engine-core/gpu"]

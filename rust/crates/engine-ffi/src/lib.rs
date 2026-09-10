@@ -72,6 +72,14 @@ mod ffi {
             hazard_rate: f64,
             recovery_rate: f64,
         ) -> f64;
+
+        // Selección de backend (PLAN.md §7.12): estado global de proceso que leen las dos
+        // funciones de arriba (`engine_core::backend::current()`), no un parámetro más de
+        // cada una — así encaja con cómo cada cliente quiere seleccionarlo (un `with` de
+        // Python, una UDF global de Excel).
+        fn set_compute_backend(name: String) -> bool;
+        fn compute_backend_name() -> String;
+        fn is_gpu_backend_available() -> bool;
     }
 }
 
@@ -159,4 +167,16 @@ fn unilateral_cva_from_exposure(
     recovery_rate: f64,
 ) -> f64 {
     engine_core::api::unilateral_cva_from_exposure(a, b, sigma, r0, times, ee, hazard_rate, recovery_rate)
+}
+
+fn set_compute_backend(name: String) -> bool {
+    engine_core::api::set_compute_backend(&name)
+}
+
+fn compute_backend_name() -> String {
+    engine_core::api::compute_backend_name()
+}
+
+fn is_gpu_backend_available() -> bool {
+    engine_core::api::is_gpu_backend_available()
 }

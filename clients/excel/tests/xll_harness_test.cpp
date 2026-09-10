@@ -102,21 +102,24 @@ int main() {
     using AutoFreeFn = void(WINAPI*)(LPXLOPER12);
     using ListFn = LPXLOPER12(WINAPI*)();
     using CreateModelFn = LPXLOPER12(WINAPI*)(LPXLOPER12, LPXLOPER12);
+    using GetBackendFn = LPXLOPER12(WINAPI*)();
 
     auto auto_open = reinterpret_cast<AutoOpenFn>(GetProcAddress(module, "xlAutoOpen"));
     auto auto_free = reinterpret_cast<AutoFreeFn>(GetProcAddress(module, "xlAutoFree12"));
     auto list_models = reinterpret_cast<ListFn>(GetProcAddress(module, "xlEngineListModels"));
     auto create_model = reinterpret_cast<CreateModelFn>(GetProcAddress(module, "xlEngineCreateModel"));
+    auto get_backend = reinterpret_cast<GetBackendFn>(GetProcAddress(module, "xlEngineGetBackend"));
 
     bool ok = check(auto_open != nullptr, "GetProcAddress(xlAutoOpen)")
         & check(auto_free != nullptr, "GetProcAddress(xlAutoFree12)")
         & check(list_models != nullptr, "GetProcAddress(xlEngineListModels)")
-        & check(create_model != nullptr, "GetProcAddress(xlEngineCreateModel)");
+        & check(create_model != nullptr, "GetProcAddress(xlEngineCreateModel)")
+        & check(get_backend != nullptr, "GetProcAddress(xlEngineGetBackend)");
     if (!ok) return 1;
 
     int rc = auto_open();
     ok &= check(rc == 1, "xlAutoOpen devuelve 1");
-    ok &= check(g_register_calls == 7, "xlAutoOpen registra exactamente 7 UDFs via xlfRegister");
+    ok &= check(g_register_calls == 9, "xlAutoOpen registra exactamente 9 UDFs via xlfRegister");
     for (const auto& name : g_registered_names) {
         ok &= check(name.rfind("ENGINE.", 0) == 0, "cada UDF registrada se llama ENGINE.*");
     }
@@ -133,6 +136,13 @@ int main() {
             ok &= check(found, "\"HullWhite1F\" aparece en xlEngineListModels()");
         }
         auto_free(models);
+    }
+
+    LPXLOPER12 backend = get_backend();
+    ok &= check(backend != nullptr, "xlEngineGetBackend devuelve un XLOPER12");
+    if (backend) {
+        ok &= check(narrow(backend) == "cpu", "xlEngineGetBackend() es \"cpu\" por defecto");
+        auto_free(backend);
     }
 
     FreeLibrary(module);

@@ -13,6 +13,11 @@ enable_testing()
 # sin traerse GoogleTest (cpp/engine/tests, clients/excel/tests) ni compilar el XLL.
 option(ENGINE_QUANT_BUILD_TESTS "Compilar los tests de C++ (ctest: registry + bridge Excel)" ON)
 option(ENGINE_QUANT_BUILD_EXCEL "Compilar el cliente Excel (XLL)" ON)
+# PLAN.md §5.1/§7.11: GpuBackend (burn-wgpu) no se compila por defecto (árbol de dependencias
+# y tiempo de compilación considerables, sin GPU garantizada en CI). Activar esta opción
+# compila engine-ffi con la feature `gpu` de engine-core, dejando GpuBackend realmente
+# disponible tras engine::set_compute_backend("gpu") en C++/Python/Excel (PLAN.md §7.12).
+option(ENGINE_QUANT_ENABLE_GPU "Compila el backend GPU (burn-wgpu) en el core Rust" OFF)
 
 # Corrosion: importa el workspace de Cargo (rust/) como targets CMake nativos (PLAN.md §5, §7.3).
 FetchContent_Declare(
@@ -23,6 +28,13 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(Corrosion)
 
 corrosion_import_crate(MANIFEST_PATH ${CMAKE_SOURCE_DIR}/rust/Cargo.toml)
+
+# Corrosion nombra el target CMake "engine_ffi" (guiones -> guiones bajos, ver comentario de
+# corrosion_add_cxxbridge más abajo). corrosion_set_features debe llamarse después de que el
+# target exista (corrosion_import_crate lo crea arriba).
+if(ENGINE_QUANT_ENABLE_GPU)
+    corrosion_set_features(engine_ffi FEATURES gpu)
+endif()
 
 # Genera el header/fuente C++ del bridge cxx de engine-ffi (PLAN.md §7, §7.1).
 # Nota: Corrosion reemplaza guiones por guiones bajos en el nombre del target CMake

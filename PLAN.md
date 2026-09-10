@@ -1,10 +1,11 @@
 # XVA Engine — Plan de Arquitectura
 
 > Documento vivo. Se construye de forma incremental, sección a sección.
-> Estado: **v0.10 — Fase 4 completada (cliente Excel vía XLL sobre el registry C++) +
+> Estado: **v0.11 — Fase 4 completada (cliente Excel vía XLL sobre el registry C++) +
 > empaquetado/distribución (wheel Python + XLL autocontenidos, release automática en CI, §7.9)
 > + instalador Windows todo-en-uno (wizard .exe, §7.10) + Fase 5 completada (backend GPU
-> ejercitado con benchmarks reales, se mantiene opcional, §7.11)**
+> ejercitado con benchmarks reales, se mantiene opcional, §7.11; seleccionable desde Python
+> (`with engine.backend(...)`) y Excel (`ENGINE.SET_BACKEND`), §7.12)**
 
 ## 1. Visión
 
@@ -224,6 +225,8 @@ añade en cuanto exista más de un cliente.
 5. **Fase 4** ✅ — Cliente Excel (XLL) sobre el registry C++ (ver §7.8).
 6. **Fase 5** ✅ — Backend GPU: alias `GpuBackend` (`burn-wgpu`) ejercitado con benchmarks reales
    sobre IRS+Hull-White; se mantiene tras feature opcional `gpu`, no por defecto (ver §7.11).
+   Seleccionable desde los clientes: `with engine.backend("gpu"):` en Python,
+   `ENGINE.SET_BACKEND("gpu")` en Excel (ver §7.12).
 7. **Fase 6** — API universal / interoperabilidad externa.
 
 ## 7. Estructura de repos/carpetas (Fase 0)
@@ -979,6 +982,78 @@ cuando el número de paths de Monte Carlo del cálculo sea del orden de 10⁵ o 
 todo lo demás (incluida toda la superficie actual de `crate::api`/clientes), `CpuBackend`
 sigue siendo la opción correcta y es la que se mantiene compilada por defecto.
 
+### 7.12 Selección de backend desde los clientes (Python `with`, UDF global de Excel)
+
+§7.11 dejó `GpuBackend` benchmarkado pero inalcanzable desde fuera de `cargo run --example`:
+ningún cliente (Python, Excel) tenía forma de pedir "corre esto en GPU". Esta sección cierra
+ese hueco extendiendo la Fase 5 en vez de abrir una fase nueva — sigue siendo "que los
+clientes puedan elegir CPU o GPU" (§6), solo que ahora de verdad desde fuera de Rust.
+
+**Estado global de proceso, no un parámetro más de cada llamada** — decisión deliberada, no
+un atajo: `crate::backend::current()`/`set_current()` (`rust/crates/engine-core/src/
+backend.rs`) son un `AtomicU8` de proceso que leen internamente `irs_hull_white_exposure_
+profile`/`unilateral_cva_from_exposure` (`crate::api`) en cada llamada, en vez de recibir el
+backend como argumento. Mismo enfoque que `decimal.localcontext()` (stdlib) o `torch.device`
+(PyTorch): tratar el backend como un *contexto ambiente* ("¿con qué calculo a partir de
+ahora?") en vez de forzar a colarlo en cada llamada — y es lo único que encaja con cómo cada
+cliente quiere seleccionarlo de verdad:
+
+- **Python**: `with engine.backend("gpu"): ...` — gestor de contexto que guarda el backend
+  previo al entrar y lo restaura al salir (incluso si el bloque lanza una excepción).
+- **Excel**: `=ENGINE.SET_BACKEND("gpu")` — una hoja de cálculo no tiene un "bloque"
+  equivalente a un `with`, así que es una UDF que cambia el estado global, tal cual.
+
+**Cadena completa, sin acortar ningún tramo**: `engine_core::backend` (enum `ComputeBackend`
++ `current()`/`set_current()`, con `ComputeBackend::is_available()` distinguiendo "Cpu"
+—siempre— de "Gpu" —solo si este build tiene la feature `gpu`, §7.11—) → `crate::api`
+(`set_compute_backend`/`compute_backend_name`/`is_gpu_backend_available`, más el despacho en
+tiempo de ejecución dentro de `irs_hull_white_exposure_profile`/`unilateral_cva_from_
+exposure`: un `match current() { Cpu => ..., Gpu => ... }` que instancia `CpuBackend` o
+`GpuBackend` según toque, ya que ambas funciones eran genéricas sobre `B: Backend` desde
+§7.11) → `engine-ffi` (tres funciones más en el bridge `cxx`, sin `#[cfg(feature = "gpu")]`
+propio: el despacho ya vive en `engine-core`) → `engine::set_compute_backend`/
+`compute_backend_name`/`is_gpu_backend_available` en `cpp/engine/include/engine/engine.hpp`
+→ nanobind (`clients/python/src/engine_py_ext.cpp`) y el bridge de Excel (`clients/excel/src/
+engine_excel.cpp`).
+
+`set_compute_backend("gpu")` devuelve `false` (sin cambiar nada) si el nombre no se reconoce
+o si se pide un backend no compilado en este build — nunca cae en silencio a CPU sin que el
+cliente se entere: Python lo convierte en una `ValueError` desde `engine.backend(...)`, Excel
+en `#VALUE!` desde `ENGINE.SET_BACKEND`.
+
+**`GpuBackend` compilable en toda la pila, no solo en `engine-core`** (necesario para que
+"pedir gpu" tenga efecto real más allá de Rust): nueva feature `gpu` en `engine-ffi/Cargo.toml`
+(reenvía a `engine-core/gpu`) y nueva opción de CMake `ENGINE_QUANT_ENABLE_GPU` (por defecto
+`OFF`, coherente con la decisión de §7.11 de no compilarlo por defecto) que llama a
+`corrosion_set_features(engine_ffi FEATURES gpu)`. **Verificado en local** (no en CI, ver
+razones de §7.11 — sin adaptador GPU garantizado en el runner): con
+`-DENGINE_QUANT_ENABLE_GPU=ON` compila el árbol completo (Rust + registry C++ + `engine.pyd` +
+`.xll`) y, desde Python, `engine.is_gpu_backend_available()` da `True` y `with engine.backend
+("gpu"):` ejecuta de verdad sobre `burn-wgpu` (perfil de exposición con valores del mismo
+orden que CPU, ver limitación de reproducibilidad más abajo). Sin la opción (el `.xll`/wheel
+que se publican hoy, PLAN.md §7.9), `is_gpu_backend_available()` da `False` y pedir "gpu"
+falla con un mensaje claro en vez de silencio.
+
+**Descubrimiento no anticipado — el mismo `seed` no da el mismo Monte Carlo en los dos
+backends**: `examples/backend_dispatch_probe.rs` (nuevo, ejercita el despacho de `crate::api`
+de punta a punta, a diferencia de `examples/gpu_vs_cpu_bench.rs` que instancia los tipos de
+Burn a mano) reveló que `Tensor::random` con la misma semilla produce secuencias de shocks
+distintas en `burn-ndarray` y `burn-wgpu` — cada backend trae su propio generador. El perfil
+de exposición difiere en ruido estadístico (variación observada <2% en el caso de §5.2), no
+en lógica de valoración; documentado en `clients/excel/README.md` para que nadie lo confunda
+con un bug al comparar CPU vs GPU con el mismo `seed`.
+
+**Gotcha de nanobind que costó diagnosticar** (dejar constancia para no repetir la
+investigación): un método `__exit__(self, exc_type, exc_value, traceback)` expuesto con
+argumentos `nb::object` falla con "incompatible function arguments" en **cualquier** llamada
+donde alguno de los tres sea `None` — que es exactamente como Python invoca `__exit__` en una
+salida normal del `with` — a menos que cada argumento se anote explícitamente con `.none()`
+(`nb::arg("exc_type").none()`, PLAN.md `clients/python/src/engine_py_ext.cpp`): nanobind
+rechaza `None` por defecto para *cualquier* tipo de argumento, incluido el genérico
+`nb::object`, salvo que se pida explícitamente lo contrario. Sin este `.none()` el gestor de
+contexto nativo lanzaba `TypeError` en cuanto el bloque `with` terminaba sin excepción — el
+caso más común, así que habría fallado inmediatamente en cuanto alguien lo probara.
+
 ---
 *Próxima iteración: confirmar en la práctica (no se pudo ejecutar GitHub Actions desde este
 entorno de desarrollo) que el job `build-installer` de `.github/workflows/release.yml` (§7.10)
@@ -987,5 +1062,7 @@ compila y publica `engine_quant_setup.exe` en una release real, con la misma cau
 Redist con nombre distinto en un toolset de CI más nuevo) que no había aparecido en ninguna
 verificación local. En cuanto exista verificación manual de Fase 4 con Excel real
 (`clients/excel/README.md`), completar la capa 4 de test de §5.6 marcándola como verificada de
-punta a punta, no solo parcial. Con Fase 5 (§7.11) cerrada, arrancar Fase 6 — API universal /
-interoperabilidad externa (§5.5): C ABI plana y versionada sobre la capa C++.*
+punta a punta, no solo parcial — aprovechar esa sesión para probar también `ENGINE.SET_BACKEND`/
+`ENGINE.GET_BACKEND` (§7.12) con Excel real, incluida la advertencia de recálculo manual. Con
+Fase 5 (§7.11-§7.12) cerrada, arrancar Fase 6 — API universal / interoperabilidad externa
+(§5.5): C ABI plana y versionada sobre la capa C++.*
