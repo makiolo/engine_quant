@@ -1,7 +1,8 @@
 # XVA Engine — Plan de Arquitectura
 
 > Documento vivo. Se construye de forma incremental, sección a sección.
-> Estado: **v0.7 — Fase 4 completada (cliente Excel vía XLL sobre el registry C++)**
+> Estado: **v0.8 — Fase 4 completada (cliente Excel vía XLL sobre el registry C++) +
+> empaquetado/distribución (wheel Python + XLL autocontenidos, release automática en CI, ver §7.9)**
 
 ## 1. Visión
 
@@ -676,14 +677,132 @@ entorno de desarrollo): `engine_excel_bridge_tests` (15/15, incluye dos casos qu
 los mismos parámetros/semillas que `test_registry.cpp`/`test_registry.py` para confirmar que
 el bridge invoca el mismo código, PLAN.md §5.6 capa 4 parcial) pasa; `engine_excel_ext`
 enlaza y produce `engine_excel.xll`, con `dumpbin /exports` confirmando las 10 entradas
-esperadas sin decorar. **Pendiente de verificación manual con Excel real**
-(`clients/excel/README.md` documenta los pasos y los valores de referencia exactos:
-`CVA = 426.76182440931836` para el caso `UnilateralCVA` de `test_registry.py`).
+esperadas sin decorar. **Añadido tras esta fase** (§7.9): `engine_excel_harness_test` carga
+el `.xll` con `LoadLibrary` y ejerce `xlAutoOpen`/las UDFs exactamente como lo haría Excel
+(exportando su propio stub de `MdCallBack12`), cerrando gran parte del hueco de "¿esto
+funciona con Excel de verdad?" sin necesitar Excel instalado. **Sigue pendiente de
+verificación manual con Excel real** solo la parte que ese harness no cubre (Excel cargando
+el `.xll` y evaluando una fórmula real en una hoja) — `clients/excel/README.md` documenta los
+pasos y los valores de referencia exactos: `CVA = 426.76182440931836` para el caso
+`UnilateralCVA` de `test_registry.py`.
+
+### 7.9 Empaquetado y distribución — wheel Python autocontenida + XLL + release en CI
+
+Motivación: hasta esta fase, usar `clients/python` o `clients/excel` exigía clonar el repo y
+compilar (CMake + Corrosion + Rust + MSVC) — nada distribuible con un simple `pip install` o
+"descarga y ejecuta". Objetivo de esta fase: que alguien sin el toolchain instalado pueda (a)
+`pip install` una rueda de `engine-quant` y usar `import engine`, y (b) descargar un zip,
+ejecutar un script, y tener el complemento funcionando en su Excel — sin arrastrar consigo
+Visual Studio, Rust, ni preocuparse de dependencias que falten.
+
+**`pyproject.toml` (raíz) + `scikit-build-core`** — build backend que sabe invocar el
+`CMakeLists.txt` ya existente (no un `setup.py` paralelo con su propia lógica de build):
+`build.targets = ["engine_py_ext"]` compila solo lo que hace falta para el cliente Python;
+`cmake.define` fija `ENGINE_QUANT_BUILD_TESTS=OFF`/`ENGINE_QUANT_BUILD_EXCEL=OFF` (opciones
+nuevas de `CMakeLists.txt` raíz, `option(... ON)` por defecto para no tocar el build normal)
+para no traerse GoogleTest ni compilar el XLL en un build de rueda. `wheel.packages = []` +
+`wheel.install-dir = "."` porque no hay paquete Python envoltorio: el único artefacto es
+`engine.pyd`, instalado en la raíz del árbol vía el nuevo `install(TARGETS engine_py_ext
+LIBRARY DESTINATION . RUNTIME DESTINATION .)` de `clients/python/CMakeLists.txt` (RUNTIME
+porque en Windows un `MODULE` se instala como los ejecutables/DLLs, no como `LIBRARY` —
+gotcha clásico de `install(TARGETS)` multiplataforma). El paquete pip se llama
+`engine-quant`; el módulo importable sigue siendo `engine` (no se renombra código existente).
+
+**Dependencias en tiempo de ejecución de la rueda** — comprobado con `dumpbin /dependents`
+sobre el `.pyd` ya compilado: además de `python3XX.dll` (la proporciona el intérprete del
+usuario) y DLL que ya trae cualquier Windows 10/11 (`kernel32`, `ntdll`,
+`api-ms-win-crt-*.dll` — Universal CRT, servida vía Windows Update), depende de
+`MSVCP140.dll`/`VCRUNTIME140.dll`/`VCRUNTIME140_1.dll` (runtime de C++, el motivo del
+mismatch de CRT ya documentado en §7.1: todo se enlaza `/MD`, no hay forma sencilla de
+enlazar estático sin tocar cómo `cxx-build`/Cargo compilan su propio shim). En vez de exigir
+al usuario instalar el redistribuible de Visual C++ por separado, la rueda se repara con
+[`delvewheel`](https://github.com/adang1345/delvewheel) (equivalente Windows de
+`auditwheel`/`delocate`): embebe las DLL que de verdad hacen falta, con *name-mangling* para
+evitar colisiones si el usuario tiene instaladas varias ruedas que también embeben su propia
+copia del runtime de C++. Verificado en local: `delvewheel repair` sobre la rueda solo copia
+`msvcp140.dll` — decide que `vcruntime140[_1].dll` no hace falta copiarlas porque las
+considera parte del CRT universal que ya trae Windows 10/11 actualizado (mismo criterio que
+se reutiliza sin reinventar para el `.xll`, ver más abajo). Instalada la rueda reparada en un
+entorno virtual limpio (sin Visual Studio/Rust/`cmake` en el `PATH`), `import engine` más un
+cálculo real (`UnilateralCVA`, mismos parámetros/semilla que `test_registry.py`) reproduce
+exactamente `CVA = 426.76182440931836` — la rueda es indistinguible en resultado del build
+directo.
+
+**Complemento de Excel — instalador sin pasos manuales** (`clients/excel/install/`):
+`Install-EngineExcelAddin.ps1`/`Uninstall-EngineExcelAddin.ps1` copian `engine_excel.xll` (y
+sus DLL) a `%LOCALAPPDATA%\engine_quant\excel` y lo registran. Decisión de diseño no trivial,
+con un giro durante el desarrollo:
+
+- **Primer intento: automatizar Excel por COM** (`New-Object -ComObject Excel.Application`,
+  `Application.AddIns.Add(...).Installed = $true` — el equivalente scriptable de abrir
+  Archivo > Opciones > Complementos > Ir... a mano). Descartado tras probarlo en la máquina
+  de desarrollo: incluso operaciones tan básicas como `Workbooks.Add()` sobre una instancia
+  de Excel recién creada (visible o no) fallan con `RPC_E_CALL_REJECTED` ("Call was rejected
+  by callee") de forma consistente y no transitoria (reintentos con espera no lo resuelven),
+  pese a que el proceso `EXCEL.EXE` arranca y responde a nivel de mensajes de ventana — un
+  síntoma característico de una política de seguridad/DCOM del equipo bloqueando llamadas COM
+  entrantes a Office, no un fallo del complemento en sí.
+- **Solución adoptada: escribir directamente la clave del registro que Excel usa para
+  complementos persistentes por usuario** — `HKCU\Software\Microsoft\Office\<versión>\Excel\
+  Options`, valores `OPEN`/`OPEN1`/`OPEN2`/... con formato `/R "ruta\al\complemento"`. No es
+  una ingeniería inversa a ciegas: se confirmó leyendo el valor `OPEN` ya existente en la
+  cuenta de desarrollo, puesto ahí por otro complemento XLL de terceros instalado
+  previamente por esa misma vía (Archivo > Opciones > Complementos) — mismo formato exacto.
+  El script busca el primer slot `OPEN`/`OPEN1`/... libre, comprueba que no esté ya
+  registrado (idempotente), y opera sobre todas las claves `Excel\Options` que existan bajo
+  `HKCU\Software\Microsoft\Office\*` (una por versión de Office que se haya ejecutado alguna
+  vez en esa cuenta). Sin lanzar Excel en ningún momento: más rápido y sin la fragilidad de
+  la automatización COM.
+- Verificado end-to-end en la máquina de desarrollo: el script de instalación escribe el
+  valor `OPEN1` con el formato correcto (comprobado con `reg query`); el de desinstalación lo
+  quita y borra la carpeta de instalación (`-RemoveFiles`), dejando el equipo exactamente
+  como estaba antes de la prueba.
+
+**`engine_excel_harness_test`** (`clients/excel/tests/xll_harness_test.cpp`, nuevo desde esta
+fase) — cierra el hueco que ni `engine_excel_bridge_tests` (lógica pura, nunca llama a
+`Excel12`/`Excel12v`) ni la automatización COM (bloqueada en el entorno de desarrollo, ver
+arriba) cubrían: carga con `LoadLibrary` el `engine_excel.xll` ya compilado — el mismo
+artefacto que se empaqueta y distribuye — y ejerce `xlAutoOpen`/las UDFs exactamente como lo
+haría Excel. Lo consigue exportando desde el propio ejecutable de test un stub de
+`MdCallBack12`, el símbolo que `XLCALL.CPP` (vendorizado, §7.8) resuelve en tiempo de
+ejecución vía `GetProcAddress(GetModuleHandle(NULL), "MdCallBack12")` — `Excel.exe` exporta
+su propia implementación real de ese mismo símbolo por el mismo motivo. El stub responde a
+`xlGetName`/`xlFree`/`xlfRegister` (las tres llamadas que hace `xlAutoOpen`) y comprueba: que
+`xlAutoOpen` devuelve `1`, que registra exactamente las 7 UDFs con nombres `ENGINE.*`, y que
+`xlEngineListModels()` devuelve un `xltypeMulti` que incluye `"HullWhite1F"`. Añadido a
+`ctest` (22/22 en el build completo, antes 21/22) vía `add_test` directo (no `gtest_discover_
+tests`: no usa GoogleTest, es un `main()` con comprobaciones propias, más simple para un
+único caso de integración de bajo nivel). La ruta del `.xll` a cargar la resuelve el propio
+CMake (`$<TARGET_FILE:engine_excel_ext>` como *compile definition*), no una ruta adivinada a
+mano.
+
+**`.github/workflows/release.yml`** — dispara con un `push` de tag `vX.Y.Z` (o
+`workflow_dispatch` para probar el pipeline sin publicar nada). Tres jobs:
+
+1. `build-wheels` (matriz `cp3.10`–`cp3.13`, `windows-latest`): fija la versión del paquete
+   desde el tag (sustituye el `"0.0.0"` de `pyproject.toml`, que solo sirve para builds
+   locales), construye la rueda (`pip wheel .`) y la repara con `delvewheel`.
+2. `build-xll` (`windows-latest`): build completo + `ctest` (incluye
+   `engine_excel_harness_test` contra el `.xll` real que se va a distribuir — no se publica
+   nada que no haya pasado los tests) y empaqueta `engine_excel.xll` + `MSVCP140.dll`
+   (localizada vía la variable de entorno `VCToolsRedistDir` que ya pone `ilammy/msvc-dev-
+   cmd`, el mismo mecanismo de CI que usa `build-and-smoke-test`, §7.4) + los scripts de
+   `clients/excel/install` en un único zip versionado.
+3. `publish-release` (solo si el disparo fue un tag, no en `workflow_dispatch`): descarga los
+   artefactos de los dos jobs anteriores y los adjunta a la release de GitHub
+   (`softprops/action-gh-release`, que crea la release si no existe).
+
+Todo el pipeline (sustitución de versión, `pip wheel` + `delvewheel repair`, y el
+empaquetado en zip del `.xll`) se verificó localmente paso a paso con una versión de prueba
+antes de confiar en que funcionaría sin poder ejecutar GitHub Actions desde este entorno.
 
 ---
-*Próxima iteración: arrancar Fase 5 — backend GPU (§6): ejercitar en serio el alias
-`GpuBackend` (`burn-wgpu`, ya presente tras la feature `gpu` de `engine-core` desde Fase 1,
-§5.1) con benchmarks reales sobre el caso IRS+Hull-White de §5.2, decidiendo si conviene
-activarlo por defecto o dejarlo opcional. En cuanto exista verificación manual de Fase 4 con
-Excel real (`clients/excel/README.md`), completar la capa 4 de test de §5.6 marcándola como
-verificada de punta a punta, no solo parcial.*
+*Próxima iteración: confirmar en la práctica que `.github/workflows/release.yml` (§7.9)
+funciona empujando un primer tag `v0.1.0` (no pudo ejecutarse GitHub Actions desde este
+entorno de desarrollo, solo verificarse cada paso por separado en local) y, con eso resuelto,
+arrancar Fase 5 — backend GPU (§6): ejercitar en serio el alias `GpuBackend` (`burn-wgpu`, ya
+presente tras la feature `gpu` de `engine-core` desde Fase 1, §5.1) con benchmarks reales
+sobre el caso IRS+Hull-White de §5.2, decidiendo si conviene activarlo por defecto o dejarlo
+opcional. En cuanto exista verificación manual de Fase 4 con Excel real
+(`clients/excel/README.md`), completar la capa 4 de test de §5.6 marcándola como verificada
+de punta a punta, no solo parcial.*
