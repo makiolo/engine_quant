@@ -16,3 +16,15 @@ target_link_libraries(engine_excel_bridge_tests PRIVATE engine_excel_bridge GTes
 
 include(GoogleTest)
 gtest_discover_tests(engine_excel_bridge_tests)
+
+# Test de integracion del .xll real (PLAN.md §7.8): carga engine_excel.xll con LoadLibrary y
+# ejerce xlAutoOpen/las UDFs exactamente como lo haria Excel, exportando su propio stub de
+# MdCallBack12 -- no depende de GoogleTest ni de Excel instalado. ENGINE_EXCEL_XLL_PATH usa
+# un generator expression para no adivinar la ruta de salida (Debug/Release, generador, ...).
+add_executable(engine_excel_harness_test xll_harness_test.cpp)
+target_include_directories(engine_excel_harness_test PRIVATE ${CMAKE_SOURCE_DIR}/clients/excel/thirdparty/xlcall/include)
+target_compile_definitions(engine_excel_harness_test PRIVATE
+    ENGINE_EXCEL_XLL_PATH="$<TARGET_FILE:engine_excel_ext>"
+)
+add_dependencies(engine_excel_harness_test engine_excel_ext)
+add_test(NAME EngineExcelHarness COMMAND engine_excel_harness_test)
