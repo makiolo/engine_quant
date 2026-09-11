@@ -224,6 +224,20 @@ std::vector<MeasureResult> evaluate_batch_registered_measure(
     }
     if (registered_type == "DV01") {
         double bump = get_double(params, "bump", 0.0001);
+        // PLAN_REAPI.md §6 Fase 5: bucketed=true en el lote se comporta igual que en
+        // Dv01Measure::evaluate -- un vector de deltas (uno por pillar) en vez de un escalar.
+        if (get_bool(params, "bucketed", false)) {
+            std::vector<std::vector<double>> deltas_per_trade = compute_dv01_bucketed_batch(market, irs_products, bump);
+            std::vector<MeasureResult> results;
+            results.reserve(deltas_per_trade.size());
+            for (auto& deltas : deltas_per_trade) {
+                MeasureResult r;
+                r.times = market.pillars();
+                r.primary = std::move(deltas);
+                results.push_back(std::move(r));
+            }
+            return results;
+        }
         std::vector<double> deltas = compute_dv01_batch(market, irs_products, bump);
         std::vector<MeasureResult> results;
         results.reserve(deltas.size());

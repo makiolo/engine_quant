@@ -57,6 +57,33 @@ def test_par_swap_with_explicit_par_rate_from_a_multi_pillar_curve_is_zero():
     assert math.isclose(result["PV"].scalar, 0.0, abs_tol=1e-6)
 
 
+def test_bucketed_dv01_sums_to_the_parallel_dv01():
+    # PLAN_REAPI.md §6 Fase 5: DV01(bucketed=True) bumpea cada pillar individualmente -- la
+    # suma de los deltas por pillar debe coincidir con el DV01 "parcial" (bump paralelo).
+    eng = engine.Engine()
+    market = _upward_sloping_market()
+    model = eng.create_model("HullWhite1F", _hull_white_params())
+    product = eng.create_product(
+        "IRSwap",
+        {
+            "notional": 1_000_000.0,
+            "fixed_rate": 0.02,
+            "payment_times": [1.0, 2.0, 3.0, 4.0, 5.0],
+            "accruals": [1.0, 1.0, 1.0, 1.0, 1.0],
+        },
+    )
+    pricing = _deterministic_pricing()
+    execution = _cpu_execution()
+
+    parallel_dv01 = eng.calc(product, [("DV01", {})], model, market, pricing, execution)["DV01"].scalar
+    bucketed = eng.calc(product, [("DV01", {"bucketed": True})], model, market, pricing, execution)["DV01"]
+
+    assert not bucketed.has_scalar
+    assert len(bucketed.times) == len(market.pillars)
+    assert len(bucketed.primary) == len(market.pillars)
+    assert math.isclose(sum(bucketed.primary), parallel_dv01, abs_tol=1e-6)
+
+
 def test_par_swap_via_use_par_rate_matches_explicit_par_rate_on_a_non_flat_curve():
     eng = engine.Engine()
     market = _upward_sloping_market()
@@ -80,5 +107,6 @@ def test_par_swap_via_use_par_rate_matches_explicit_par_rate_on_a_non_flat_curve
 
 if __name__ == "__main__":
     test_par_swap_with_explicit_par_rate_from_a_multi_pillar_curve_is_zero()
+    test_bucketed_dv01_sums_to_the_parallel_dv01()
     test_par_swap_via_use_par_rate_matches_explicit_par_rate_on_a_non_flat_curve()
     print("OK: tests de PV/DV01 por curva de mercado (multi-pillar) pasaron")

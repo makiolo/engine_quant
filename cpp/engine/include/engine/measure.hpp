@@ -108,9 +108,17 @@ public:
 // (PLAN_REAPI.md §6 Fase 3, propuesta 3 -- primera medida con configuración real: `Registry<
 // IMeasure>::create("DV01", {{"bump", 0.0002}})` da una sensibilidad distinta de la de
 // `create("DV01")`), leído en el constructor porque `evaluate()` no recibe un `Params` propio.
+//
+// `bucketed` (PLAN_REAPI.md §6 Fase 5, construida sobre la Fase 4): en vez de un único bump
+// PARALELO de toda la curva, bumpea cada `zero_rates[i]` INDIVIDUALMENTE (uno a la vez, mismo
+// `bump`) y devuelve un delta por pillar (`times`=`market.pillars()`, `primary`=deltas,
+// `has_scalar=false`) -- misma forma de `MeasureResult` que ya usa `ExposureProfileMeasure`,
+// sin inventar un tipo de resultado nuevo. El DV01 "parcial" (escalar, `bucketed=false`) es la
+// suma de estos deltas -- ver el test de consistencia en `test_registry.cpp`.
 class Dv01Measure : public IMeasure {
 public:
-    explicit Dv01Measure(const Params& params) : bump_(get_double(params, "bump", 0.0001)) {}
+    explicit Dv01Measure(const Params& params) :
+        bump_(get_double(params, "bump", 0.0001)), bucketed_(get_bool(params, "bucketed", false)) {}
 
     std::string type_name() const override { return "DV01"; }
 
@@ -121,6 +129,7 @@ public:
 
 private:
     double bump_;
+    bool bucketed_;
 };
 
 // --- Lote homogéneo (PLAN.md §7.17/§7.19) ---------------------------------------------------
@@ -157,6 +166,14 @@ std::vector<double> compute_npv_batch(const MarketSnapshot& market, const std::v
 // es bump-and-reval de la curva de descuento: bump paralelo de todos los `zero_rates` en
 // `bump`, reprecio con la `MarketSnapshot` bumpeada, diferencia contra el precio base.
 std::vector<double> compute_dv01_batch(
+    const MarketSnapshot& market, const std::vector<const IrSwapProduct*>& irs_products, double bump
+);
+
+// Bucketed DV01 por lote (PLAN_REAPI.md §6 Fase 5): un vector de deltas (uno por pillar de
+// `market`) por trade, mismo bump-and-reval que `compute_dv01_batch` pero pillar a pillar en
+// vez de un bump paralelo -- equivalente de lote de `Dv01Measure::evaluate` con
+// `bucketed=true`.
+std::vector<std::vector<double>> compute_dv01_bucketed_batch(
     const MarketSnapshot& market, const std::vector<const IrSwapProduct*>& irs_products, double bump
 );
 

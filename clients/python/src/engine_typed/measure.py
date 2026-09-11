@@ -39,16 +39,23 @@ class PV(Measure):
 
 
 class DV01(Measure):
-    """Sensibilidad del NPV a un movimiento de `bump` en r0 (`engine::Dv01Measure`). Primera
-    medida con configuración real (PLAN_REAPI.md §6 Fase 3): `DV01(bump=0.0002).to_spec()` da
-    un resultado distinto de `DV01().to_spec()` (default `bump=0.0001`, un punto básico)."""
+    """Sensibilidad del NPV a un movimiento de `bump` en la curva de mercado
+    (`engine::Dv01Measure`, bump-and-reval, PLAN_REAPI.md §6 Fase 4). Primera medida con
+    configuración real (PLAN_REAPI.md §6 Fase 3): `DV01(bump=0.0002).to_spec()` da un
+    resultado distinto de `DV01().to_spec()` (default `bump=0.0001`, un punto básico).
+
+    `bucketed=True` (PLAN_REAPI.md §6 Fase 5): en vez de un bump paralelo de toda la curva,
+    bumpea cada pillar individualmente y devuelve un delta por pillar
+    (`MeasureResult.times`=pillars, `.primary`=deltas) en vez de un escalar -- la suma de los
+    deltas coincide con `DV01(bucketed=False)` sobre la misma curva/bump."""
 
     measure_name: ClassVar[str] = "DV01"
 
     bump: float = 0.0001
+    bucketed: bool = False
 
     def to_params(self) -> dict:
-        return {"bump": self.bump}
+        return {"bump": self.bump, "bucketed": self.bucketed}
 
 
 class ExposureProfile(Measure):

@@ -148,6 +148,33 @@ double compute_dv01(const MarketSnapshot& market, const IrSwapProduct& irs_produ
     return bumped - base;
 }
 
+// Curva con un ÚNICO pillar bumpeado en `bump` (PLAN_REAPI.md §6 Fase 5), el resto sin tocar
+// -- construida sobre bump_curve() de la Fase 4 (bump paralelo), aquí pillar a pillar.
+MarketSnapshot bump_pillar(const MarketSnapshot& market, std::size_t pillar_index, double bump) {
+    std::vector<double> bumped_rates = market.zero_rates();
+    bumped_rates[pillar_index] += bump;
+    return MarketSnapshot(market.pillars(), std::move(bumped_rates), market.hazard_rate(), market.recovery_rate());
+}
+
+// Bucketed DV01 (PLAN_REAPI.md §6 Fase 5): un delta por pillar, MISMO tipo fijo efectivo
+// (fijado una vez bajo la curva base, igual que compute_dv01) en todas las revaloraciones --
+// sum(deltas) == compute_dv01(market, irs_product, bump) porque exp(-z(t)*t) para el pillar i
+// solo depende de zero_rates[i] vía interpolación local: bumpear todos los pillars a la vez
+// (bump paralelo) y bumpearlos uno a uno y sumar dan, hasta convexidad de segundo orden entre
+// pillars, el mismo resultado -- ver el test de consistencia en test_registry.cpp.
+std::vector<double> dv01_bucketed_from_market(const MarketSnapshot& market, const IrSwapProduct& irs_product, double bump) {
+    double fixed_rate = effective_fixed_rate(market, irs_product);
+    double base = npv_from_market(market, irs_product, fixed_rate);
+
+    std::vector<double> deltas;
+    deltas.reserve(market.pillars().size());
+    for (std::size_t i = 0; i < market.pillars().size(); ++i) {
+        double bumped = npv_from_market(bump_pillar(market, i, bump), irs_product, fixed_rate);
+        deltas.push_back(bumped - base);
+    }
+    return deltas;
+}
+
 // Columnas notional/fixed_rate del lote (PLAN.md §7.19) -- el resto del calendario
 // (start/payment_times/accruals) se toma del primer trade, ya validado igual en todos por el
 // llamante (`engine::calc_batch`).
@@ -238,6 +265,18 @@ std::vector<double> compute_dv01_batch(
     return results;
 }
 
+std::vector<std::vector<double>> compute_dv01_bucketed_batch(
+    const MarketSnapshot& market, const std::vector<const IrSwapProduct*>& irs_products, double bump
+) {
+    std::vector<std::vector<double>> results;
+    results.reserve(irs_products.size());
+    for (const IrSwapProduct* irs : irs_products) {
+        // require_homogeneous_irs_batch (calc.cpp) ya garantiza use_par_rate() == false aquí.
+        results.push_back(dv01_bucketed_from_market(market, *irs, bump));
+    }
+    return results;
+}
+
 MeasureResult ExposureProfileMeasure::evaluate(
     const IModel& model, const IProduct& product, const MarketSnapshot&,
     const PricingContext& pricing, const ExecutionContext& execution
@@ -303,8 +342,14 @@ MeasureResult Dv01Measure::evaluate(
     }
 
     MeasureResult result;
-    result.has_scalar = true;
-    result.scalar = compute_dv01(market, *irs_product, bump_);
+    if (bucketed_) {
+        result.times = market.pillars();
+        result.primary = dv01_bucketed_from_market(market, *irs_product, bump_);
+        result.has_scalar = false;
+    } else {
+        result.has_scalar = true;
+        result.scalar = compute_dv01(market, *irs_product, bump_);
+    }
     return result;
 }
 

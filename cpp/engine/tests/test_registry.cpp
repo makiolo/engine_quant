@@ -579,6 +579,66 @@ TEST(Calc, ParSwapViaUseParRateMatchesExplicitParRateOnANonFlatCurve) {
     EXPECT_GT(result[1].result.scalar, 0.0); // DV01 de un swap pagador: > 0 pase lo que pase con la curva
 }
 
+// PLAN_REAPI.md §6 Fase 5 (construida sobre la Fase 4): DV01(bucketed=true) bumpea cada pillar
+// individualmente -- la suma de los deltas por pillar debe coincidir con el DV01 "parcial"
+// (bump paralelo) sobre la MISMA curva/bump, exactamente el test de consistencia que pide el
+// propio PLAN_REAPI.md.
+TEST(Calc, BucketedDv01SumsToTheParallelDv01) {
+    Registries registries;
+    register_builtins(registries);
+
+    auto model = registries.models.create("HullWhite1F", hull_white_params());
+    auto product = registries.products.create("IRSwap", irs_5y_params(1'000'000.0, 0.02));
+    MarketSnapshot market = upward_sloping_market();
+    PricingContext pricing = golden_pricing(1, 1); // DV01 es determinista
+    ExecutionContext execution = cpu_execution();
+
+    std::vector<engine::MeasureSpec> measures = {
+        {"DV01", {}},                                       // escalar, bump paralelo
+        {"DV01", {{"bucketed", true}}},                      // vector de deltas por pillar
+    };
+    engine::CalcResult result = engine::calc(registries, *product, measures, *model, market, pricing, execution);
+
+    ASSERT_EQ(result.size(), 2u);
+    ASSERT_TRUE(result[0].result.has_scalar);
+    ASSERT_FALSE(result[1].result.has_scalar);
+    ASSERT_EQ(result[1].result.times.size(), market.pillars().size());
+    ASSERT_EQ(result[1].result.primary.size(), market.pillars().size());
+
+    double bucketed_sum = 0.0;
+    for (double delta : result[1].result.primary) bucketed_sum += delta;
+    EXPECT_NEAR(bucketed_sum, result[0].result.scalar, 1e-6);
+}
+
+// Equivalente de lote (PLAN.md §7.19-style): calc_batch con DV01(bucketed=true) debe coincidir,
+// trade a trade, con llamar a calc() una vez por trade -- mismo patrón que
+// CalcBatch.MatchesALoopOfScalarCallsPerTrade para el resto de medidas.
+TEST(CalcBatch, BucketedDv01MatchesALoopOfScalarCalls) {
+    Registries registries;
+    register_builtins(registries);
+
+    auto model = registries.models.create("HullWhite1F", hull_white_params());
+    auto product_a = registries.products.create("IRSwap", irs_5y_params(1'000'000.0, 0.02));
+    auto product_b = registries.products.create("IRSwap", irs_5y_params(2'500'000.0, 0.015));
+    MarketSnapshot market = upward_sloping_market();
+    PricingContext pricing = golden_pricing(1, 1);
+    ExecutionContext execution = cpu_execution();
+
+    std::vector<const engine::IProduct*> products{product_a.get(), product_b.get()};
+    std::vector<engine::MeasureSpec> measures = {{"DV01", {{"bucketed", true}}}};
+
+    engine::CalcBatchResult batch = engine::calc_batch(registries, products, measures, *model, market, pricing, execution);
+    ASSERT_EQ(batch.size(), products.size());
+
+    for (std::size_t i = 0; i < products.size(); ++i) {
+        engine::CalcResult scalar = engine::calc(registries, *products[i], measures, *model, market, pricing, execution);
+        ASSERT_EQ(batch[i].measures[0].result.primary.size(), scalar[0].result.primary.size());
+        for (std::size_t p = 0; p < scalar[0].result.primary.size(); ++p) {
+            EXPECT_NEAR(batch[i].measures[0].result.primary[p], scalar[0].result.primary[p], 1e-6);
+        }
+    }
+}
+
 // PLAN.md §7.19: calc_batch (lote homogéneo) debe coincidir, trade a trade, con llamar a
 // calc() una vez por trade -- mismo espíritu que los tests "matches a loop of scalar calls" de
 // Rust, aquí a nivel de la orquestación C++.

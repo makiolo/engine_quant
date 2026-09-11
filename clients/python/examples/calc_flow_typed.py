@@ -24,7 +24,14 @@ def main():
         accruals=[1.0, 1.0, 1.0, 1.0, 1.0],
     )
     model = q.HullWhite1F(a=0.1, b=0.03, sigma=0.01, r0=0.02)
-    market = q.Market(pillars=[1.0], zero_rates=[0.02], hazard_rate=0.02, recovery_rate=0.4)
+    # Curva multi-pillar real (PLAN_REAPI.md §6 Fase 4/5): PV/DV01 descuentan por esta curva,
+    # no por el modelo -- una curva de un solo pillar "funciona" pero da una réplica plana poco
+    # realista para un swap a 5 años. hazard_rate/recovery_rate (usados solo por UnilateralCVA)
+    # no dependen de la forma de la curva.
+    market = q.Market(
+        pillars=[1.0, 2.0, 3.0, 4.0, 5.0], zero_rates=[0.018, 0.019, 0.020, 0.0205, 0.021],
+        hazard_rate=0.02, recovery_rate=0.4,
+    )
     pricing = q.PricingContext(n_paths=5000, n_steps=208, seed=7)
     execution = q.ExecutionContext(backend="auto")
 
@@ -51,6 +58,15 @@ def main():
     print(f"DV01 (1bp)     = {result['DV01'].scalar:,.2f}")
     dv01_2bp = eng.calc(product, [q.DV01(bump=0.0002).to_spec()], eng_model, eng_market, eng_pricing, eng_execution)
     print(f"DV01 (2bp)     = {dv01_2bp['DV01'].scalar:,.2f}")
+
+    # DV01(bucketed=True) (PLAN_REAPI.md §6 Fase 5): un delta por pillar en vez de un escalar --
+    # su suma coincide con el DV01 "parcial" de arriba (bump paralelo).
+    bucketed = eng.calc(product, [q.DV01(bucketed=True).to_spec()], eng_model, eng_market, eng_pricing, eng_execution)["DV01"]
+    print("DV01 bucketed (por pillar):")
+    for t, delta in zip(bucketed.times, bucketed.primary):
+        print(f"  pillar={t:.0f}y: {delta:,.2f}")
+    print(f"  suma            = {sum(bucketed.primary):,.2f}")
+
     print(f"UnilateralCVA  = {result['UnilateralCVA'].scalar:,.2f}")
     print("ExpectedExposure / PFE95 por fecha de reseteo:")
     ee, pfe = result["ExpectedExposure"], result["PFE95"]
