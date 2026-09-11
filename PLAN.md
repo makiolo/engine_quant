@@ -1357,7 +1357,8 @@ C++, C ABI, Python, Excel), no solo en el cliente que primero se pensó (Excel).
 - **Descuento híbrido con la curva de `Market`** (usar `discount_factor()` para `PV`/`DV01` en
   vez de la fórmula propia del modelo): fuera de alcance. `PV`/`DV01`/`ExpectedExposure`/
   `PFE95`/`UnilateralCVA` siguen usando únicamente el modelo; `Market` solo alimenta
-  calibración y crédito.
+  calibración y crédito. *(Decisión revisada en §7.21 Fase 4: `PV`/`DV01` pasan a descontar por
+  la curva de `Market`; `ExpectedExposure`/`PFE95`/`UnilateralCVA` siguen usando el modelo.)*
 - **Compartir cómputo entre medidas del lote**: `ExpectedExposure`+`PFE95` comparten una sola
   llamada (ya lo hacían internamente); `UnilateralCVA` sigue recalculando su propio perfil de
   exposición si se pide junto a las anteriores (no se comparte). Optimización futura, no
@@ -1946,6 +1947,121 @@ Release` (106 tests, todos en verde, sobre los 98 de §7.19) sin regresiones. Py
 uso manual de `engine.MarketSnapshot` desde el `.pyd` reconstruido confirma que
 `pillars`/`zero_rates`/`discount_factor` siguen funcionando sin cambios en la API expuesta.
 
+## 7.21 Fachada Python tipada (`engine_typed`) + `MeasureSpec` genérico + PV/DV01 por curva de mercado
+
+### Motivación
+
+El usuario recibió cuatro observaciones externas sobre el diseño de la API pública (estilo
+`q.create_product(...)`/`q.IRSwap.par(...)`, con measures tipadas y una separación de capas
+Product/Market/Model/Measure/Execution). Se analizaron a fondo en `PLAN_REAPI.md` (documento de
+trabajo, no integrado aquí hasta que algo quedara implementado y verificado end-to-end — ese
+momento es este cierre): tres de las cuatro propuestas encajaban con bajo riesgo sobre el
+diseño ya existente (el patrón de doble constructor de `MarketSnapshot`, §7.14, era ya el
+precedente directo); la cuarta (arquitectura de cartera/netting/colateral) se trató como
+checklist de validación, no como trabajo a planificar. Seis fases decididas en
+`PLAN_REAPI.md` §6, ejecutadas y verificadas una a una con commit propio; las tres primeras
+aditivas y de bajo riesgo, las dos últimas cambian el contrato numérico de `PV`/`DV01` (punto
+de control explícito con el usuario antes de tocarlas, confirmado antes de proceder).
+
+### Diseño
+
+**Fase 1-2 — `engine_typed`: `TradeSpec`/`Model`/`Market`/`PricingContext`/`ExecutionContext`
+tipados.** Paquete Python puro y aditivo (`clients/python/src/engine_typed/`, `import engine,
+engine_typed as q`), dependiente de `pydantic>=2` (primera dependencia Python en tiempo de
+ejecución del paquete `engine-quant` — renuncia deliberada a la promesa anterior de "sin
+dependencias"; la extensión nativa `engine` en sí sigue sin ninguna). Mismo patrón en todas las
+clases: `BaseModel` congelado (`frozen=True`) + `.to_params()` que alimenta las factories
+existentes del registry (`Engine.create_product`/`create_model`) o los constructores ya tipados
+de C++ (`MarketSnapshot`/`PricingContext`/`ExecutionContext`) sin tocar una sola línea de C++.
+`IRSwap.fixed_rate` es **requerido** (`float | Literal["PAR"]`, sin default) — omitirlo es
+`ValidationError` de pydantic, no un swap "a la par"; `IRSwap.par(...)` es el constructor con
+nombre explícito para eso. La fachada dinámica (dict/Excel/C ABI) no cambia: ahí "ausencia de
+`fixed_rate`" sigue significando PAR, documentado como limitación conocida y aceptada (barato
+resolverlo en Python tipado, caro tocarlo en el dict genérico sin romper compatibilidad).
+`day_count` se dejó fuera de `IRSwap` deliberadamente — no existe en el core (ni C++ ni Rust lo
+reciben, pendiente ya anotado en el cierre de §7.15) y hubiera sido un campo sin efecto. `Model`
+(`HullWhite1F`/`HullWhite2F`, todos los campos requeridos, igual que en C++) y `Market` (replica
+en Python la validación de invariantes que ya hace `engine::Curve` — pillars estrictamente
+creciente, mismo tamaño que zero_rates) completan el paquete.
+
+**Fase 3 — `MeasureSpec` en `calc.hpp` (C++/C ABI/Python/Excel) + `DV01(bump=...)`.**
+`calc`/`calc_batch`/`calc_many`/`calc_grid` pasan de `measure_names: vector<string>` a
+`measures: vector<MeasureSpec>` (`MeasureSpec = {name, Params}`), con sobrecarga
+retrocompatible `vector<string>` preservada en las cuatro funciones — ningún consumidor
+existente (`test_calc.py`/`abi_c_smoke.c`/Excel/ejemplos) cambia una línea. Se retira
+`calc_measure_name_mappings()` como tabla curada cerrada de 5 nombres (decisión tomada en
+`PLAN_REAPI.md` §5, revirtiendo el vocabulario deliberadamente desacoplado del registry que
+fijó §7.15): `calc()` (trade único) resuelve directamente contra `Registry<IMeasure>`,
+conservando "ExpectedExposure"/"PFE95" como alias heredados hacia `ExposureProfileMeasure`
+(`.primary`/`.secondary`) — cualquier otro nombre del registry (p.ej. "ExposureProfile" a
+secas) ya funciona y devuelve el `MeasureResult` completo sin recortar campos.
+`calc_batch`/`calc_many`/`calc_grid` siguen limitados al mismo conjunto cerrado de antes
+(`PV`/`DV01`/`UnilateralCVA`/`ExposureProfile`, más los dos alias) — su despacho de lote sigue
+sin pasar por el registry, mismo argumento de "sin genericidad real que ganar todavía" que ya
+justificó no generalizar la C ABI de calibración hasta el segundo calibrador (§7.18).
+`Dv01Measure` lee `"bump"` de `Params` (default `0.0001`, antes hardcodeado) — primera medida
+con configuración real; el binding nanobind (`Engine.calc`) acepta strings "pelados" o tuplas
+`(nombre, params)` en la misma llamada. `engine_typed.measure` añade `PV()`/`DV01(bump=...)`/
+`ExposureProfile()`/`UnilateralCVA()` con `.to_spec()` → `(nombre, params)`.
+
+**Fase 4 — PV/DV01 descuentan por la curva de `Market`, no por el modelo (cambio de contrato
+numérico, riesgo alto).** `PresentValueMeasure`/`Dv01Measure` (y sus equivalentes de lote)
+dejan de llamar a `irs_hull_white_npv`/`irs_hull_white_npv_delta_r0` (Rust, dependientes de
+`HullWhite1F`/`2F`) y replican el swap en bonos cero-cupón directamente en C++ vía
+`MarketSnapshot::discount_factor(t)` — misma fórmula exacta que `IrSwap::npv` en Rust
+(`rust/crates/engine-core/src/products/irs.rs`), solo cambia de dónde sale el descuento. Rust
+no se toca: `irs_hull_white_npv*` siguen existiendo para las rutas Monte Carlo
+(`ExposureProfileMeasure`/`UnilateralCvaMeasure`, que revaloran en fechas *futuras* donde no
+hay curva de mercado observable, por diseño tienen que seguir usando el modelo) — esta
+asimetría PV/DV01-por-curva vs. exposición/CVA-por-modelo es intencional, documentada
+explícitamente para que no parezca una inconsistencia. Swaps "a la par"
+(`use_par_rate() == true`) calculan su tipo fijo efectivo con la misma curva de mercado (antes:
+con el modelo) — `PV ≈ 0` se conserva algebraicamente sea cual sea la curva usada, sin cambio
+de comportamiento observable ahí. `DV01` deja de ser `d(NPV)/d(r0)` vía autodiff: pasa a ser
+bump-and-reval (bump paralelo de `zero_rates`, reusa el `Params["bump"]` de la Fase 3), fijando
+el tipo fijo efectivo **una vez** bajo la curva base antes de repreciar (el contrato del swap
+no se re-estructura al mover el mercado). Consecuencia: duplicar el bump ya no duplica el DV01
+al bit exacto (convexidad de segundo orden real en `exp(-zero_rate(t)*t)`, ausente en la
+derivada exacta anterior) — tolerancia relativa, no absoluta, en los tests que lo comprueban.
+Golden value de referencia recalculado (`clients/excel/README.md`): `DV01` del caso de §7.15
+pasa de `378.467434451206` a `480.4686940754473` (mismo swap par 5y, mismo mercado de 2
+pillars planos) — `PV`/`ExpectedExposure`/`PFE95`/`UnilateralCVA` no cambian en ese caso.
+
+**Fase 5 — Bucketed DV01 (construida sobre la Fase 4).** `DV01(bucketed=true)` bumpea cada
+`zero_rates[i]` de la curva individualmente (uno a la vez, mismo `bump`) en vez de un bump
+paralelo, y devuelve un delta por pillar (`times=market.pillars()`, `primary`=deltas,
+`has_scalar=false`) en vez de un escalar — reusa la forma de `MeasureResult` que ya usa
+`ExposureProfileMeasure`, sin inventar un tipo de resultado nuevo. El DV01 "parcial" (Fase 4,
+escalar) es la suma de estos deltas — verificado como test de consistencia, en `calc()` y en
+`calc_batch()` (bucketed también soportado en el lote, misma invariante batch-vs-loop-de-
+llamadas-escalares que ya se exige al resto de medidas). `engine_typed.DV01` gana el campo
+`bucketed: bool = False`.
+
+**Fuera de alcance, deliberado (checklist de la propuesta 4, `PLAN_REAPI.md` §3.4)**: netting
+sets, colateral, FVA/MVA/KVA, orquestación de cartera — ninguna decisión de esta fase asume "un
+trade = una llamada aislada" de una forma que estorbe agruparlos más adelante (`TradeSpec`/
+`MeasureSpec` no cargan nada que solo tenga sentido a nivel de trade individual). Configurar
+una medida (p.ej. el `bump`/`bucketed` de `DV01`) no está expuesto todavía desde Excel/C ABI —
+solo desde Python (`engine_typed`); `ENGINE.CALC` con solo nombres sigue funcionando igual ahí.
+
+### Verificación
+
+Build limpio (`cmake --build build --config Release`) + `ctest -C Release` (112 tests, todos en
+verde, sobre los 106 de §7.20 — 6 tests nuevos: dos de `MeasureSpec` genérico, dos de PV/DV01
+por curva no plana, dos de bucketed DV01) sin regresiones. C ABI en C puro
+(`engine_abi_c_smoke.exe`) y el ejemplo C++ (`engine_abi_cpp_example.exe`) reproducen los
+mismos invariantes cualitativos de siempre (PV≈0 par, DV01>0, PFE95≥EE≥0, CVA>0) con los
+valores nuevos. Python: toda la suite existente (`test_smoke`/`test_registry`/`test_calc`/
+`test_calibration`) sin cambios de comportamiento salvo el ajuste de tolerancia de DV01 ya
+descrito y la actualización de `list_measures()` (gana "ExposureProfile" como nombre directo);
+cinco ficheros de test nuevos (`test_engine_typed_trade`/`_context`/`_measure`,
+`test_calc_measure_spec`, `test_calc_market_discounting`) y tres ejemplos nuevos
+(`calc_flow_typed_trade.py`, `calc_flow_typed.py` con curva multi-pillar real y salida de DV01
+bucketed por pillar) ejecutados de punta a punta contra el `Engine` real, no solo con mocks.
+Cada una de las seis fases se commiteó y verificó por separado (build + tests en verde antes
+del siguiente paso), con un punto de control explícito con el usuario entre la Fase 3
+(aditiva) y la Fase 4 (cambio de contrato numérico) antes de tocar la fórmula de valoración.
+
 ---
 *Próxima iteración: confirmar en la práctica (no se pudo ejecutar GitHub Actions desde este
 entorno de desarrollo) que el job `build-installer` de `.github/workflows/release.yml` (§7.10)
@@ -1967,9 +2083,10 @@ mercado crudos (depósitos, futuros, swaps) en vez de zero rates ya construidos;
 `sigma`/`eta`/`rho` contra instrumentos de volatilidad (swaptions, caps) en vez de dejarlos
 fijos, en ambos calibradores. Sobre la Fase 7.15: sigue pendiente la calibración vía `ENGINE.CALC`
 (hoy `ENGINE.CALIBRATE` es una llamada aparte, no una medida más del lote), la aritmética de
-calendario real para `PricingDate`, el descuento híbrido con la curva de `Market` para
-`PV`/`DV01`, y compartir el perfil de exposición entre `UnilateralCVA` y
-`ExpectedExposure`/`PFE95` dentro de un mismo lote de `ENGINE.CALC`. Y, más en general, el
+calendario real para `PricingDate`, y compartir el perfil de exposición entre `UnilateralCVA` y
+`ExpectedExposure`/`PFE95` dentro de un mismo lote de `ENGINE.CALC` (el descuento híbrido con
+la curva de `Market` para `PV`/`DV01`, pendiente anotado aquí, se cerró en §7.21 Fase 4). Y, más
+en general, el
 resto de la lista de "qué faltaría para valorar un swap de verdad" (day count/calendarios/
 generación de calendario de pagos, multi-curva descuento vs. proyección, valoración a media
 vida de un swap que ya fijó su cupón actual). CUDA (`burn-cuda`, §5.1) sigue abierto como
@@ -2013,4 +2130,16 @@ C++ (Python/Excel/C ABI siguen exponiendo solo el `MarketSnapshot` compuesto, nu
 separado) -- deliberado por ahora (nadie pidió construir/calibrar una curva sin datos de
 crédito desde esas capas), pero a revisar si `Curve` acaba necesitando reutilizarse fuera de
 `MarketSnapshot` (p.ej. una curva de proyección distinta de la de descuento, mencionada como
-pendiente en la Fase 7.15).*
+pendiente en la Fase 7.15). Sobre la Fase 7.21 (`engine_typed`/`MeasureSpec`/PV-DV01 por curva
+de mercado): sigue pendiente exponer configuración por medida (`bump`/`bucketed` de `DV01`)
+desde Excel/C ABI, no solo Python; abrir `calc_batch`/`calc_many`/`calc_grid` a cualquier
+nombre del registry (hoy siguen limitados al conjunto cerrado de antes, a diferencia de
+`calc()`) si algún día aparece una medida de lote nueva que lo necesite; y enriquecer el resto
+de mercados de test/ejemplo de las cinco capas a curvas multi-pillar reales (hoy la mayoría
+siguen siendo de 1-2 pillars planos por extrapolación -- matemáticamente válido pero poco
+realista para un swap a varios años, ver el inventario que motivó los nuevos tests de curva no
+plana en §7.21 Fase 4/5). `day_count`/calendarios reales (pendiente heredado de §7.14/§7.15)
+sigue bloqueando incluir ese campo en `IRSwap` de `engine_typed`. Propuesta 4 de
+`PLAN_REAPI.md` (netting sets/colateral/FVA/MVA/KVA/orquestación de cartera) sigue sin
+planificar -- se revisó como checklist al diseñar `TradeSpec`/`MeasureSpec` (§7.21), no como
+trabajo en sí.*

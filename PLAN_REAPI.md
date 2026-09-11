@@ -219,6 +219,13 @@ numérica ya en producción (PV/DV01) — riesgo real, requieren revisión cuant
 API".** Se recomienda un punto de control explícito con el usuario entre la Fase 3 y la Fase 4
 antes de tocar ninguna fórmula de valoración.
 
+> **Estado: Fases 1-5 implementadas y verificadas end-to-end (2026-09-12)**, con commit propio
+> por fase y confirmación explícita del usuario en el punto de control entre la Fase 3 y la
+> Fase 4. Migradas a `PLAN.md` §7.21. Fase 6 (esta sección) queda parcialmente hecha: la
+> migración a `PLAN.md` y la actualización de `README_PYPI.md`/`clients/excel/README.md` están
+> hechas; la revisión final contra la propuesta 4 (§3.4, cartera/netting) está documentada en el
+> cierre de §7.21 de `PLAN.md`.
+
 ### Fase 1 — `engine_typed`: `TradeSpec`/`IRSwap` + sentinel PAR
 
 **Hallazgo de packaging que condiciona todo el paquete nuevo**: el módulo compilado nanobind se
