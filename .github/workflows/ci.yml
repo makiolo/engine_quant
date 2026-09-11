@@ -152,3 +152,6 @@ jobs:
 
       - name: Python engine_typed test (TradeSpec/IRSwap tipados)
         run: python clients/python/tests/test_engine_typed_trade.py build/clients/python
+
+      - name: Python engine_typed test (Model/Market/PricingContext/ExecutionContext tipados)
+        run: python clients/python/tests/test_engine_typed_context.py build/clients/python

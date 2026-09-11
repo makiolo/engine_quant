@@ -53,3 +53,7 @@ trade = q.IRSwap(
 eng = engine.Engine()
 product = eng.create_product(trade.product_type, trade.to_params())
 ```
+
+`engine_typed` también cubre `Model` (`q.HullWhite1F`/`q.HullWhite2F`), `Market`,
+`PricingContext` y `ExecutionContext` -- ver `clients/python/examples/calc_flow_typed.py` para
+el flujo completo sin dicts crudos.
