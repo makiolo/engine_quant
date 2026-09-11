@@ -1,15 +1,15 @@
 // Implementación de la API universal en C ABI (PLAN.md Fase 6/§7.15, ver engine/abi.h para
 // el contrato). Traduce entre los tipos C planos del header y engine::Registries/Registry<T>/
-// engine::calc ya existentes (PLAN.md §5.4, §7.15) -- no reimplementa lógica de negocio, solo
+// engine::price ya existentes (PLAN.md §5.4, §7.15) -- no reimplementa lógica de negocio, solo
 // la frontera: construir/leer engine::Params desde EngineParam[], convertir
 // engine::MarketSnapshot/PricingContext/ExecutionContext desde sus structs C planos, convertir
-// engine::CalcResult a EngineCalcResultEntry[] con arrays owned por esta librería, y atrapar
+// engine::PriceResult a EnginePriceResultEntry[] con arrays owned por esta librería, y atrapar
 // toda excepción de C++ (ninguna puede cruzar a un lenguaje sin soporte de excepciones, PLAN.md
 // §5.5).
 
 #include "engine/abi.h"
 
-#include "engine/calc.hpp"
+#include "engine/price.hpp"
 #include "engine/engine.hpp"
 
 #include <algorithm>
@@ -122,13 +122,13 @@ EngineParam* export_params(const engine::Params& params, std::size_t* out_count)
     return array;
 }
 
-// Convierte un engine::CalcResult (un trade) a un array EngineCalcResultEntry owned por esta
-// libreria -- extraido de engine_abi_calc para reutilizarlo tal cual en engine_abi_calc_batch/
-// _many/_grid (PLAN.md §7.19), donde el mismo CalcResult se repite una vez por fila.
-EngineCalcResultEntry* export_calc_result(const engine::CalcResult& result) {
-    auto* entries = new EngineCalcResultEntry[result.size()]{};
+// Convierte un engine::PriceResult (un trade) a un array EnginePriceResultEntry owned por esta
+// libreria -- extraido de engine_abi_price para reutilizarlo tal cual en engine_abi_price_batch/
+// _many/_grid (PLAN.md §7.19), donde el mismo PriceResult se repite una vez por fila.
+EnginePriceResultEntry* export_calc_result(const engine::PriceResult& result) {
+    auto* entries = new EnginePriceResultEntry[result.size()]{};
     for (std::size_t i = 0; i < result.size(); ++i) {
-        const engine::CalcResultEntry& src = result[i];
+        const engine::PriceResultEntry& src = result[i];
 
         char* name_copy = new char[src.measure_name.size() + 1];
         std::memcpy(name_copy, src.measure_name.data(), src.measure_name.size() + 1);
@@ -230,7 +230,7 @@ struct EngineCalibrator {
 namespace {
 
 // Arrays de handles opacos (PLAN.md §7.19, patrón nuevo en esta ABI -- hasta ahora un handle
-// se pasaba de uno en uno): construyen los vectores de punteros crudos que engine::calc_batch/
+// se pasaba de uno en uno): construyen los vectores de punteros crudos que engine::price_batch/
 // _many/_grid ya esperan, sin copiar ningún IProduct/IModel. Definidos aquí (no junto al resto
 // de conversion helpers) porque necesitan el tipo completo de EngineProduct/EngineModel.
 std::vector<const engine::IProduct*> to_product_vector(const EngineProduct* const* products, std::size_t n_products) {
@@ -268,7 +268,7 @@ std::size_t engine_abi_list_products(const char*** out_names) {
 }
 
 std::size_t engine_abi_list_measures(const char*** out_names) {
-    return export_string_list(engine::calc_measure_names(registries()), out_names);
+    return export_string_list(engine::price_measure_names(registries()), out_names);
 }
 
 std::size_t engine_abi_list_calibrators(const char*** out_names) {
@@ -361,7 +361,7 @@ void engine_abi_free_calibration_result(EngineCalibrationResult* result) {
     result->n_params = 0;
 }
 
-int engine_abi_calc(
+int engine_abi_price(
     const EngineProduct* product,
     const char** measure_names,
     std::size_t n_measure_names,
@@ -369,7 +369,7 @@ int engine_abi_calc(
     const EngineMarketSnapshot* market,
     const EnginePricingContext* pricing,
     const EngineExecutionContext* execution,
-    EngineCalcResultEntry** out_entries,
+    EnginePriceResultEntry** out_entries,
     std::size_t* out_count
 ) {
     *out_entries = nullptr;
@@ -377,9 +377,9 @@ int engine_abi_calc(
     try {
         if (!product || !model || !market || !pricing || !execution) {
             throw std::invalid_argument(
-                "engine_abi_calc: product/model/market/pricing/execution no pueden ser NULL");
+                "engine_abi_price: product/model/market/pricing/execution no pueden ser NULL");
         }
-        engine::CalcResult result = engine::calc(
+        engine::PriceResult result = engine::price(
             registries(), *product->ptr, to_string_vector(measure_names, n_measure_names), *model->ptr,
             to_market(*market), to_pricing_context(*pricing), to_execution_context(*execution)
         );
@@ -396,7 +396,7 @@ int engine_abi_calc(
     }
 }
 
-void engine_abi_free_calc_results(EngineCalcResultEntry* entries, std::size_t count) {
+void engine_abi_free_price_results(EnginePriceResultEntry* entries, std::size_t count) {
     if (!entries) return;
     for (std::size_t i = 0; i < count; ++i) {
         delete[] entries[i].measure_name;
@@ -407,7 +407,7 @@ void engine_abi_free_calc_results(EngineCalcResultEntry* entries, std::size_t co
     delete[] entries;
 }
 
-int engine_abi_calc_batch(
+int engine_abi_price_batch(
     const EngineProduct** products,
     std::size_t n_products,
     const char** measure_names,
@@ -416,7 +416,7 @@ int engine_abi_calc_batch(
     const EngineMarketSnapshot* market,
     const EnginePricingContext* pricing,
     const EngineExecutionContext* execution,
-    EngineCalcBatchResultEntry** out_entries,
+    EnginePriceBatchResultEntry** out_entries,
     std::size_t* out_count
 ) {
     *out_entries = nullptr;
@@ -424,14 +424,14 @@ int engine_abi_calc_batch(
     try {
         if (!products || !model || !market || !pricing || !execution) {
             throw std::invalid_argument(
-                "engine_abi_calc_batch: products/model/market/pricing/execution no pueden ser NULL");
+                "engine_abi_price_batch: products/model/market/pricing/execution no pueden ser NULL");
         }
-        engine::CalcBatchResult result = engine::calc_batch(
+        engine::PriceBatchResult result = engine::price_batch(
             registries(), to_product_vector(products, n_products), to_string_vector(measure_names, n_measure_names),
             *model->ptr, to_market(*market), to_pricing_context(*pricing), to_execution_context(*execution)
         );
 
-        auto* entries = new EngineCalcBatchResultEntry[result.size()]{};
+        auto* entries = new EnginePriceBatchResultEntry[result.size()]{};
         for (std::size_t i = 0; i < result.size(); ++i) {
             entries[i].trade_index = result[i].trade_index;
             entries[i].measures = export_calc_result(result[i].measures);
@@ -449,7 +449,7 @@ int engine_abi_calc_batch(
     }
 }
 
-int engine_abi_calc_many(
+int engine_abi_price_many(
     const EngineProduct** products,
     std::size_t n_products,
     const char** measure_names,
@@ -458,7 +458,7 @@ int engine_abi_calc_many(
     const EngineMarketSnapshot* market,
     const EnginePricingContext* pricing,
     const EngineExecutionContext* execution,
-    EngineCalcBatchResultEntry** out_entries,
+    EnginePriceBatchResultEntry** out_entries,
     std::size_t* out_count
 ) {
     *out_entries = nullptr;
@@ -466,14 +466,14 @@ int engine_abi_calc_many(
     try {
         if (!products || !model || !market || !pricing || !execution) {
             throw std::invalid_argument(
-                "engine_abi_calc_many: products/model/market/pricing/execution no pueden ser NULL");
+                "engine_abi_price_many: products/model/market/pricing/execution no pueden ser NULL");
         }
-        engine::CalcBatchResult result = engine::calc_many(
+        engine::PriceBatchResult result = engine::price_many(
             registries(), to_product_vector(products, n_products), to_string_vector(measure_names, n_measure_names),
             *model->ptr, to_market(*market), to_pricing_context(*pricing), to_execution_context(*execution)
         );
 
-        auto* entries = new EngineCalcBatchResultEntry[result.size()]{};
+        auto* entries = new EnginePriceBatchResultEntry[result.size()]{};
         for (std::size_t i = 0; i < result.size(); ++i) {
             entries[i].trade_index = result[i].trade_index;
             entries[i].measures = export_calc_result(result[i].measures);
@@ -491,15 +491,15 @@ int engine_abi_calc_many(
     }
 }
 
-void engine_abi_free_calc_batch_results(EngineCalcBatchResultEntry* entries, std::size_t count) {
+void engine_abi_free_price_batch_results(EnginePriceBatchResultEntry* entries, std::size_t count) {
     if (!entries) return;
     for (std::size_t i = 0; i < count; ++i) {
-        engine_abi_free_calc_results(entries[i].measures, entries[i].n_measures);
+        engine_abi_free_price_results(entries[i].measures, entries[i].n_measures);
     }
     delete[] entries;
 }
 
-int engine_abi_calc_grid(
+int engine_abi_price_grid(
     const EngineProduct** products,
     std::size_t n_products,
     const char** measure_names,
@@ -510,7 +510,7 @@ int engine_abi_calc_grid(
     std::size_t n_markets,
     const EnginePricingContext* pricing,
     const EngineExecutionContext* execution,
-    EngineCalcGridResultEntry** out_entries,
+    EnginePriceGridResultEntry** out_entries,
     std::size_t* out_count
 ) {
     *out_entries = nullptr;
@@ -518,15 +518,15 @@ int engine_abi_calc_grid(
     try {
         if (!products || !models || !markets || !pricing || !execution) {
             throw std::invalid_argument(
-                "engine_abi_calc_grid: products/models/markets/pricing/execution no pueden ser NULL");
+                "engine_abi_price_grid: products/models/markets/pricing/execution no pueden ser NULL");
         }
-        engine::CalcGridResult result = engine::calc_grid(
+        engine::PriceGridResult result = engine::price_grid(
             registries(), to_product_vector(products, n_products), to_string_vector(measure_names, n_measure_names),
             to_model_vector(models, n_models), to_market_vector(markets, n_markets),
             to_pricing_context(*pricing), to_execution_context(*execution)
         );
 
-        auto* entries = new EngineCalcGridResultEntry[result.size()]{};
+        auto* entries = new EnginePriceGridResultEntry[result.size()]{};
         for (std::size_t i = 0; i < result.size(); ++i) {
             entries[i].trade_index = result[i].trade_index;
             entries[i].model_index = result[i].model_index;
@@ -546,10 +546,10 @@ int engine_abi_calc_grid(
     }
 }
 
-void engine_abi_free_calc_grid_results(EngineCalcGridResultEntry* entries, std::size_t count) {
+void engine_abi_free_price_grid_results(EnginePriceGridResultEntry* entries, std::size_t count) {
     if (!entries) return;
     for (std::size_t i = 0; i < count; ++i) {
-        engine_abi_free_calc_results(entries[i].measures, entries[i].n_measures);
+        engine_abi_free_price_results(entries[i].measures, entries[i].n_measures);
     }
     delete[] entries;
 }

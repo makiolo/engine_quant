@@ -19,7 +19,7 @@
 #include <utility>
 #include <vector>
 
-#include "engine/calc.hpp"
+#include "engine/price.hpp"
 #include "engine/calibrator.hpp"
 #include "engine/market.hpp"
 #include "engine/measure.hpp"
@@ -41,7 +41,7 @@ bool is_blank(const XLOPER12& x);
 double read_double(const XLOPER12& x);
 bool read_bool(const XLOPER12& x);
 std::string read_string(const XLOPER12& x);
-// Lista de nombres de medida para ENGINE.CALC (PLAN.md §7.15): rango/array de celdas de
+// Lista de nombres de medida para ENGINE.PRICE (PLAN.md §7.15): rango/array de celdas de
 // texto, en fila o columna -- se aplana en el orden en que aparecen las celdas. Las celdas en
 // blanco se ignoran (igual criterio que table_to_params con filas vacías).
 std::vector<std::string> read_string_list(const XLOPER12& x);
@@ -75,20 +75,20 @@ XLOPER12* new_num(double value);
 XLOPER12* new_str(const std::string& utf8);
 XLOPER12* new_string_column(const std::vector<std::string>& values);
 XLOPER12* new_measure_result(const engine::MeasureResult& result);
-// Resultado de ENGINE.CALC en formato largo (PLAN.md §7.15): una fila por [MeasureName, Time,
+// Resultado de ENGINE.PRICE en formato largo (PLAN.md §7.15): una fila por [MeasureName, Time,
 // Value] -- las medidas escalares (PV/DV01/UnilateralCVA) dan 1 fila con Time en blanco, las
 // de perfil (ExpectedExposure/PFE95) dan una fila por fecha de monitorización. Único formato
 // homogéneo para todo el lote, fácil de filtrar/dinamizar en Excel.
-XLOPER12* new_calc_result(const engine::CalcResult& result);
+XLOPER12* new_price_result(const engine::PriceResult& result);
 
-// Igual formato largo que new_calc_result, con una columna TradeIndex al frente (PLAN.md
+// Igual formato largo que new_price_result, con una columna TradeIndex al frente (PLAN.md
 // §7.19): [TradeIndex, MeasureName, Time, Value] -- una fila por (trade, medida[, fecha]).
-// Usado por ENGINE.CALC_BATCH/ENGINE.CALC_MANY, que devuelven la misma forma.
-XLOPER12* new_calc_batch_result(const engine::CalcBatchResult& result);
+// Usado por ENGINE.PRICE_BATCH/ENGINE.PRICE_MANY, que devuelven la misma forma.
+XLOPER12* new_price_batch_result(const engine::PriceBatchResult& result);
 
 // Igual formato largo, con tres columnas de indice al frente (PLAN.md §7.19): [TradeIndex,
-// ModelIndex, MarketIndex, MeasureName, Time, Value]. Usado por ENGINE.CALC_GRID.
-XLOPER12* new_calc_grid_result(const engine::CalcGridResult& result);
+// ModelIndex, MarketIndex, MeasureName, Time, Value]. Usado por ENGINE.PRICE_GRID.
+XLOPER12* new_price_grid_result(const engine::PriceGridResult& result);
 
 // Tabla clave/valor (col 0 = clave, col 1.. = valor -- mismo formato que espera
 // table_to_params, para poder pasar directamente el resultado a ENGINE.CREATE_MODEL): los

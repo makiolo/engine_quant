@@ -7,7 +7,7 @@ add_library(engine STATIC
     src/market.cpp
     src/pricing_context.cpp
     src/execution_context.cpp
-    src/calc.cpp
+    src/price.cpp
     src/calibrator.cpp
     src/bootstrap.cpp
 )

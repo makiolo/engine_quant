@@ -27,7 +27,7 @@ struct MeasureResult {
 // Interfaz base de toda medida registrable (PLAN.md §5.4). Desde PLAN.md §7.15, `evaluate`
 // recibe `MarketSnapshot`/`PricingContext`/`ExecutionContext` en vez de un `Params` genérico
 // de "measure_params" -- estos tres objetos ya tipados sustituyen por completo el flujo
-// anterior de `ENGINE.CREATE_MEASURE`+`ENGINE.EVALUATE` (retirado, ver `engine/calc.hpp`).
+// anterior de `ENGINE.CREATE_MEASURE`+`ENGINE.EVALUATE` (retirado, ver `engine/price.hpp`).
 // Limitación conocida del "caso base" de Fase 2 (PLAN.md §5.2, solo IRS+Hull-White):
 // evaluate() lanza std::invalid_argument si model/product no son del tipo concreto que la
 // medida sabe evaluar (dynamic_cast a HullWhite1FModel/IrSwapProduct).
@@ -134,7 +134,7 @@ private:
 
 // --- Lote homogéneo (PLAN.md §7.17/§7.19) ---------------------------------------------------
 // Equivalentes de lote de los `compute_*` internos de measure.cpp. Declarados aquí (no en el
-// `namespace {}` anónimo de measure.cpp) porque `engine::calc_batch` (calc.hpp) necesita
+// `namespace {}` anónimo de measure.cpp) porque `engine::price_batch` (price.hpp) necesita
 // llamarlos directamente -- el despacho de lote no pasa por `IMeasure`/`Registry<IMeasure>`:
 // con un único producto real (`IrSwapProduct`) no hay genericidad real que ganar con un método
 // virtual `evaluate_batch` todavía (mismo argumento que ya justificó no generalizar la C ABI
@@ -159,7 +159,7 @@ std::vector<double> compute_cva_from_exposure_batch(
 // modelo -- PV/DV01 de un swap vainilla son función únicamente de la curva de descuento
 // observada (`MarketSnapshot`), no del tipo corto simulado. `irs_products` sigue siendo un
 // lote ya validado por `require_homogeneous_irs_batch` (`use_par_rate() == false` en todos,
-// así que a diferencia de `calc()` estas dos no necesitan calcular un par rate).
+// así que a diferencia de `price()` estas dos no necesitan calcular un par rate).
 std::vector<double> compute_npv_batch(const MarketSnapshot& market, const std::vector<const IrSwapProduct*>& irs_products);
 
 // DV01 por lote (PLAN_REAPI.md §6 Fase 4): ya no es `d(NPV)/d(r0)` (el modelo ni interviene) --

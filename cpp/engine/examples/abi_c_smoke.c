@@ -1,4 +1,4 @@
-/* Sonda en C puro (no C++) de engine/abi.h (PLAN.md Fase 6, §5.5; ENGINE.CALC en PLAN.md
+/* Sonda en C puro (no C++) de engine/abi.h (PLAN.md Fase 6, §5.5; ENGINE.PRICE en PLAN.md
  * §7.15): demuestra/verifica que la ABI se puede consumir de verdad desde un compilador de C,
  * sin tocar cxx/nanobind/el bridge de Excel -- lo mas parecido que se puede probar en este
  * arbol a un consumidor externo real (Julia via ccall, .NET via P/Invoke, Go via cgo), todos
@@ -27,7 +27,7 @@ static int fail(const char* what) {
     return 1;
 }
 
-static const EngineCalcResultEntry* find_entry(EngineCalcResultEntry* entries, size_t count, const char* name) {
+static const EnginePriceResultEntry* find_entry(EnginePriceResultEntry* entries, size_t count, const char* name) {
     size_t i;
     for (i = 0; i < count; ++i) {
         if (strcmp(entries[i].measure_name, name) == 0) return &entries[i];
@@ -51,9 +51,9 @@ int main(void) {
     EnginePricingContext pricing;
     EngineExecutionContext execution;
     const char* measure_names[5] = {"PV", "DV01", "ExpectedExposure", "PFE95", "UnilateralCVA"};
-    EngineCalcResultEntry* entries = NULL;
+    EnginePriceResultEntry* entries = NULL;
     size_t entry_count = 0;
-    const EngineCalcResultEntry *pv, *dv01, *ee, *pfe, *cva;
+    const EnginePriceResultEntry *pv, *dv01, *ee, *pfe, *cva;
     char error_buf[256];
     size_t error_len;
 
@@ -117,12 +117,12 @@ int main(void) {
     execution.backend = "cpu";
     execution.precision = "FP64";
 
-    if (engine_abi_calc(
+    if (engine_abi_price(
             product, measure_names, 5, model, &market, &pricing, &execution, &entries, &entry_count
         ) != 0) {
         engine_abi_free_product(product);
         engine_abi_free_model(model);
-        return fail("engine_abi_calc");
+        return fail("engine_abi_price");
     }
 
     pv = find_entry(entries, entry_count, "PV");
@@ -131,10 +131,10 @@ int main(void) {
     pfe = find_entry(entries, entry_count, "PFE95");
     cva = find_entry(entries, entry_count, "UnilateralCVA");
     if (!pv || !dv01 || !ee || !pfe || !cva) {
-        engine_abi_free_calc_results(entries, entry_count);
+        engine_abi_free_price_results(entries, entry_count);
         engine_abi_free_product(product);
         engine_abi_free_model(model);
-        return fail("engine_abi_calc no devolvio las 5 medidas esperadas");
+        return fail("engine_abi_price no devolvio las 5 medidas esperadas");
     }
 
     printf("PV            = %.4f  (swap a la par: ~0)\n", pv->result.scalar);
@@ -145,14 +145,14 @@ int main(void) {
     }
 
     if (fabs(pv->result.scalar) > 1e-6) {
-        engine_abi_free_calc_results(entries, entry_count);
+        engine_abi_free_price_results(entries, entry_count);
         engine_abi_free_product(product);
         engine_abi_free_model(model);
         fprintf(stderr, "FALLO: PV de un swap a la par deberia ser ~0\n");
         return 1;
     }
     if (dv01->result.scalar <= 0.0 || cva->result.scalar <= 0.0) {
-        engine_abi_free_calc_results(entries, entry_count);
+        engine_abi_free_price_results(entries, entry_count);
         engine_abi_free_product(product);
         engine_abi_free_model(model);
         fprintf(stderr, "FALLO: se esperaba DV01 > 0 y UnilateralCVA > 0\n");
@@ -160,7 +160,7 @@ int main(void) {
     }
     for (i = 0; i < ee->result.len; ++i) {
         if (ee->result.primary[i] < 0.0 || pfe->result.primary[i] < ee->result.primary[i]) {
-            engine_abi_free_calc_results(entries, entry_count);
+            engine_abi_free_price_results(entries, entry_count);
             engine_abi_free_product(product);
             engine_abi_free_model(model);
             fprintf(stderr, "FALLO: se esperaba ExpectedExposure >= 0 y PFE95 >= ExpectedExposure\n");
@@ -168,7 +168,7 @@ int main(void) {
         }
     }
 
-    engine_abi_free_calc_results(entries, entry_count);
+    engine_abi_free_price_results(entries, entry_count);
 
     printf("backend disponible en GPU: %s\n", engine_abi_is_gpu_backend_available() ? "si" : "no");
 
@@ -263,15 +263,15 @@ int main(void) {
         }
     }
 
-    /* engine_abi_calc rechaza un nombre de medida desconocido (PLAN.md §7.15): el error queda
+    /* engine_abi_price rechaza un nombre de medida desconocido (PLAN.md §7.15): el error queda
      * en engine_abi_last_error(), nunca lanza/aborta a traves de esta frontera C. */
     {
         const char* bad_names[1] = {"NoExiste"};
-        EngineCalcResultEntry* bad_entries = NULL;
+        EnginePriceResultEntry* bad_entries = NULL;
         size_t bad_count = 0;
-        int rc = engine_abi_calc(product, bad_names, 1, model, &market, &pricing, &execution, &bad_entries, &bad_count);
+        int rc = engine_abi_price(product, bad_names, 1, model, &market, &pricing, &execution, &bad_entries, &bad_count);
         if (rc == 0) {
-            engine_abi_free_calc_results(bad_entries, bad_count);
+            engine_abi_free_price_results(bad_entries, bad_count);
             engine_abi_free_product(product);
             engine_abi_free_model(model);
             fprintf(stderr, "FALLO: se esperaba error con un nombre de medida desconocido\n");
@@ -281,7 +281,7 @@ int main(void) {
         printf("error esperado al pedir una medida inexistente: %.*s\n", (int) error_len, error_buf);
     }
 
-    /* engine_abi_calc_batch (PLAN.md §7.17/§7.19): lote homogeneo -- 3 swaps del mismo
+    /* engine_abi_price_batch (PLAN.md §7.17/§7.19): lote homogeneo -- 3 swaps del mismo
      * calendario, cada uno con su propio notional/fixed_rate explicito (sin use_par_rate,
      * que el lote no soporta), vectorizado sin bucle escalar. EngineProduct** es un patron
      * nuevo en esta ABI (hasta ahora un handle se pasaba de uno en uno). */
@@ -292,7 +292,7 @@ int main(void) {
         const EngineProduct* batch_products_const[3];
         EngineParam batch_irs_params[4];
         const char* batch_measure_names[3] = {"PV", "ExpectedExposure", "UnilateralCVA"};
-        EngineCalcBatchResultEntry* batch_entries = NULL;
+        EnginePriceBatchResultEntry* batch_entries = NULL;
         size_t batch_count = 0;
         int bi;
 
@@ -317,16 +317,16 @@ int main(void) {
             batch_products_const[bi] = batch_products[bi];
         }
 
-        if (engine_abi_calc_batch(
+        if (engine_abi_price_batch(
                 batch_products_const, 3, batch_measure_names, 3, model, &market, &pricing, &execution,
                 &batch_entries, &batch_count
             ) != 0) {
             for (bi = 0; bi < 3; ++bi) engine_abi_free_product(batch_products[bi]);
-            return fail("engine_abi_calc_batch");
+            return fail("engine_abi_price_batch");
         }
 
         for (bi = 0; bi < (int) batch_count; ++bi) {
-            const EngineCalcResultEntry* pv_row = NULL;
+            const EnginePriceResultEntry* pv_row = NULL;
             size_t k;
             for (k = 0; k < batch_entries[bi].n_measures; ++k) {
                 if (strcmp(batch_entries[bi].measures[k].measure_name, "PV") == 0) {
@@ -338,7 +338,7 @@ int main(void) {
             );
         }
 
-        engine_abi_free_calc_batch_results(batch_entries, batch_count);
+        engine_abi_free_price_batch_results(batch_entries, batch_count);
         for (bi = 0; bi < 3; ++bi) engine_abi_free_product(batch_products[bi]);
     }
 
@@ -359,6 +359,6 @@ int main(void) {
         printf("error esperado al pedir un modelo inexistente: %.*s\n", (int) error_len, error_buf);
     }
 
-    printf("OK: engine/abi.h (ENGINE.CALC) consumido desde C puro de punta a punta.\n");
+    printf("OK: engine/abi.h (ENGINE.PRICE) consumido desde C puro de punta a punta.\n");
     return 0;
 }

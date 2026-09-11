@@ -1,6 +1,6 @@
-"""Equivalente completo de `calc_flow.py` usando solo `engine_typed` (PLAN_REAPI.md §6 Fase 2):
+"""Equivalente completo de `price_flow.py` usando solo `engine_typed` (PLAN_REAPI.md §6 Fase 2):
 cero dicts crudos -- Trade/Model/Market/PricingContext/ExecutionContext tipados, `.to_params()`
-alimenta el mismo `Engine.calc(...)` de siempre.
+alimenta el mismo `Engine.price(...)` de siempre.
 """
 
 import sys
@@ -52,16 +52,16 @@ def main():
         "PFE95",
         q.UnilateralCVA().to_spec(),
     ]
-    result = eng.calc(product, measures, eng_model, eng_market, eng_pricing, eng_execution)
+    result = eng.price(product, measures, eng_model, eng_market, eng_pricing, eng_execution)
 
     print(f"PV             = {result['PV'].scalar:,.2f}")
     print(f"DV01 (1bp)     = {result['DV01'].scalar:,.2f}")
-    dv01_2bp = eng.calc(product, [q.DV01(bump=0.0002).to_spec()], eng_model, eng_market, eng_pricing, eng_execution)
+    dv01_2bp = eng.price(product, [q.DV01(bump=0.0002).to_spec()], eng_model, eng_market, eng_pricing, eng_execution)
     print(f"DV01 (2bp)     = {dv01_2bp['DV01'].scalar:,.2f}")
 
     # DV01(bucketed=True) (PLAN_REAPI.md §6 Fase 5): un delta por pillar en vez de un escalar --
     # su suma coincide con el DV01 "parcial" de arriba (bump paralelo).
-    bucketed = eng.calc(product, [q.DV01(bucketed=True).to_spec()], eng_model, eng_market, eng_pricing, eng_execution)["DV01"]
+    bucketed = eng.price(product, [q.DV01(bucketed=True).to_spec()], eng_model, eng_market, eng_pricing, eng_execution)["DV01"]
     print("DV01 bucketed (por pillar):")
     for t, delta in zip(bucketed.times, bucketed.primary):
         print(f"  pillar={t:.0f}y: {delta:,.2f}")

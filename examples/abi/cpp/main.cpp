@@ -1,5 +1,5 @@
-// Ejemplo de C++ consumiendo engine/abi.h (PLAN.md Fase 6, §5.5/§7.13; ENGINE.CALC en PLAN.md
-// §7.15) SIN pasar por el registry C++ interno (engine::Registries/engine::calc, cpp/engine/
+// Ejemplo de C++ consumiendo engine/abi.h (PLAN.md Fase 6, §5.5/§7.13; ENGINE.PRICE en PLAN.md
+// §7.15) SIN pasar por el registry C++ interno (engine::Registries/engine::price, cpp/engine/
 // include/engine/*.hpp) ni por cxx -- exactamente la misma superficie extern "C" que vería un
 // consumidor externo real (Julia vía ccall, .NET vía P/Invoke, Go vía cgo). Este fichero
 // envuelve esa superficie con RAII y excepciones porque el consumidor aquí sí es C++ y puede
@@ -72,40 +72,40 @@ ProductPtr create_product(const char* name, const std::vector<EngineParam>& para
     return ProductPtr(raw);
 }
 
-// RAII para el array EngineCalcResultEntry* que devuelve engine_abi_calc (owned por engine_abi,
-// ver abi.h): se libera en el destructor con engine_abi_free_calc_results, nunca con delete[]
+// RAII para el array EnginePriceResultEntry* que devuelve engine_abi_price (owned por engine_abi,
+// ver abi.h): se libera en el destructor con engine_abi_free_price_results, nunca con delete[]
 // directo.
-class CalcResults {
+class PriceResults {
 public:
-    CalcResults(EngineCalcResultEntry* entries, std::size_t count) : entries_(entries), count_(count) {}
-    ~CalcResults() { engine_abi_free_calc_results(entries_, count_); }
-    CalcResults(const CalcResults&) = delete;
-    CalcResults& operator=(const CalcResults&) = delete;
+    PriceResults(EnginePriceResultEntry* entries, std::size_t count) : entries_(entries), count_(count) {}
+    ~PriceResults() { engine_abi_free_price_results(entries_, count_); }
+    PriceResults(const PriceResults&) = delete;
+    PriceResults& operator=(const PriceResults&) = delete;
 
     const EngineMeasureResult& operator[](const char* measure_name) const {
         for (std::size_t i = 0; i < count_; ++i) {
             if (std::string(entries_[i].measure_name) == measure_name) return entries_[i].result;
         }
-        throw std::out_of_range(std::string("CalcResults: no se pidio la medida '") + measure_name + "'");
+        throw std::out_of_range(std::string("PriceResults: no se pidio la medida '") + measure_name + "'");
     }
 
 private:
-    EngineCalcResultEntry* entries_;
+    EnginePriceResultEntry* entries_;
     std::size_t count_;
 };
 
 // Sustituye por completo create_measure/evaluate (PLAN.md §7.15): calcula un lote de medidas
 // nombradas de una vez.
-CalcResults calc(
+PriceResults price(
     EngineProduct* product, std::vector<const char*> measure_names, EngineModel* model,
     const EngineMarketSnapshot& market, const EnginePricingContext& pricing, const EngineExecutionContext& execution
 ) {
-    EngineCalcResultEntry* entries = nullptr;
+    EnginePriceResultEntry* entries = nullptr;
     std::size_t count = 0;
-    int rc = engine_abi_calc(
+    int rc = engine_abi_price(
         product, measure_names.data(), measure_names.size(), model, &market, &pricing, &execution, &entries, &count);
-    if (rc != 0) throw_last_error("engine_abi_calc");
-    return CalcResults(entries, count);
+    if (rc != 0) throw_last_error("engine_abi_price");
+    return PriceResults(entries, count);
 }
 
 } // namespace
@@ -151,7 +151,7 @@ int main() {
     execution.backend = "cpu";
     execution.precision = "FP64";
 
-    CalcResults results = calc(
+    PriceResults results = price(
         product.get(), {"PV", "DV01", "ExpectedExposure", "PFE95", "UnilateralCVA"}, model.get(), market, pricing,
         execution);
 
@@ -178,11 +178,11 @@ int main() {
 
     std::cout << "gpu disponible: " << (engine_abi_is_gpu_backend_available() ? "si" : "no") << "\n";
 
-    // engine_abi_calc rechaza un nombre de medida desconocido (PLAN.md §7.15): el error queda
-    // en engine_abi_last_error(), nunca lanza/aborta a traves de esta frontera C -- calc() de
+    // engine_abi_price rechaza un nombre de medida desconocido (PLAN.md §7.15): el error queda
+    // en engine_abi_last_error(), nunca lanza/aborta a traves de esta frontera C -- price() de
     // este fichero lo convierte en una excepcion de C++.
     try {
-        calc(product.get(), {"NoExiste"}, model.get(), market, pricing, execution);
+        price(product.get(), {"NoExiste"}, model.get(), market, pricing, execution);
         std::cerr << "ERROR: se esperaba una excepcion con una medida desconocida\n";
         return 1;
     } catch (const std::exception& e) {
@@ -200,6 +200,6 @@ int main() {
         std::cout << "error esperado al pedir un modelo inexistente: " << e.what() << "\n";
     }
 
-    std::cout << "OK: ejemplo de C++ sobre engine/abi.h (ENGINE.CALC) completado.\n";
+    std::cout << "OK: ejemplo de C++ sobre engine/abi.h (ENGINE.PRICE) completado.\n";
     return 0;
 }

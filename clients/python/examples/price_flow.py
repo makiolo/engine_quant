@@ -1,5 +1,5 @@
-"""Flujo completo de ENGINE.CALC (PLAN.md §7.15) desde Python: Trade + Model + Market +
-PricingContext + ExecutionContext -> Engine.calc(...) con un lote de medidas en una sola
+"""Flujo completo de ENGINE.PRICE (PLAN.md §7.15) desde Python: Trade + Model + Market +
+PricingContext + ExecutionContext -> Engine.price(...) con un lote de medidas en una sola
 llamada. Sustituye al antiguo ejemplo de selección de backend (`backend_selection.py`,
 PLAN.md §7.12), que trataba un mecanismo -- el backend global de proceso -- eliminado en esta
 fase en favor de `ExecutionContext`.
@@ -32,7 +32,7 @@ def main():
 
     print(f"Backend resuelto: {execution.backend}")
 
-    result = eng.calc(trade, ["PV", "DV01", "ExpectedExposure", "PFE95", "UnilateralCVA"], model, market, pricing, execution)
+    result = eng.price(trade, ["PV", "DV01", "ExpectedExposure", "PFE95", "UnilateralCVA"], model, market, pricing, execution)
 
     print(f"PV             = {result['PV'].scalar:,.2f}")
     print(f"DV01           = {result['DV01'].scalar:,.2f}")

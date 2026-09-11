@@ -7,7 +7,7 @@
 
 namespace engine {
 
-// Contexto de valoración de una llamada a ENGINE.CALC (PLAN.md §7.15): agrupa lo que antes
+// Contexto de valoración de una llamada a ENGINE.PRICE (PLAN.md §7.15): agrupa lo que antes
 // vivía disperso en el `measure_params` de cada `ENGINE.EVALUATE` -- `n_paths`/`seed` (una
 // simulación Monte Carlo) más `n_steps`, ahora explícito (antes se calculaba internamente
 // una malla semanal fija, ver `crate::exposure::expected_exposure_profile`) -- y añade

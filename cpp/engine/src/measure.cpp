@@ -105,8 +105,8 @@ double par_rate_from_market(
 
 // Tipo fijo efectivo del contrato: el propio `fixed_rate()` si es explícito, o el par rate
 // calculado bajo `market` si el swap se pidió "a la par" (`use_par_rate() == true`) --
-// `calc_batch`/`calc_many`/`calc_grid` nunca llegan aquí con `use_par_rate() == true`
-// (`require_homogeneous_irs_batch` ya lo rechaza), solo `calc()` (trade único) lo necesita.
+// `price_batch`/`price_many`/`price_grid` nunca llegan aquí con `use_par_rate() == true`
+// (`require_homogeneous_irs_batch` ya lo rechaza), solo `price()` (trade único) lo necesita.
 double effective_fixed_rate(const MarketSnapshot& market, const IrSwapProduct& irs_product) {
     if (!irs_product.use_par_rate()) return irs_product.fixed_rate();
     return par_rate_from_market(market, irs_product.start(), irs_product.payment_times(), irs_product.accruals());
@@ -177,7 +177,7 @@ std::vector<double> dv01_bucketed_from_market(const MarketSnapshot& market, cons
 
 // Columnas notional/fixed_rate del lote (PLAN.md §7.19) -- el resto del calendario
 // (start/payment_times/accruals) se toma del primer trade, ya validado igual en todos por el
-// llamante (`engine::calc_batch`).
+// llamante (`engine::price_batch`).
 void columnarize(const std::vector<const IrSwapProduct*>& irs_products, std::vector<double>& notionals, std::vector<double>& fixed_rates) {
     notionals.reserve(irs_products.size());
     fixed_rates.reserve(irs_products.size());
@@ -245,7 +245,7 @@ std::vector<double> compute_npv_batch(const MarketSnapshot& market, const std::v
     std::vector<double> results;
     results.reserve(irs_products.size());
     for (const IrSwapProduct* irs : irs_products) {
-        // require_homogeneous_irs_batch (calc.cpp) ya garantiza use_par_rate() == false aquí.
+        // require_homogeneous_irs_batch (price.cpp) ya garantiza use_par_rate() == false aquí.
         results.push_back(npv_from_market(market, *irs, irs->fixed_rate()));
     }
     return results;
@@ -271,7 +271,7 @@ std::vector<std::vector<double>> compute_dv01_bucketed_batch(
     std::vector<std::vector<double>> results;
     results.reserve(irs_products.size());
     for (const IrSwapProduct* irs : irs_products) {
-        // require_homogeneous_irs_batch (calc.cpp) ya garantiza use_par_rate() == false aquí.
+        // require_homogeneous_irs_batch (price.cpp) ya garantiza use_par_rate() == false aquí.
         results.push_back(dv01_bucketed_from_market(market, *irs, bump));
     }
     return results;

@@ -6,9 +6,9 @@
 
 namespace engine {
 
-// Cómo ejecutar una llamada a ENGINE.CALC (PLAN.md §7.15): sustituye por completo el backend
+// Cómo ejecutar una llamada a ENGINE.PRICE (PLAN.md §7.15): sustituye por completo el backend
 // global de proceso de la Fase 5 (`ENGINE.SET_BACKEND`, PLAN.md §7.12, retirado) -- el
-// backend pasa a ser un dato explícito de este contexto, pasado a `ENGINE.CALC`, en vez de un
+// backend pasa a ser un dato explícito de este contexto, pasado a `ENGINE.PRICE`, en vez de un
 // estado mutable que hay que recordar cambiar (y que en Excel exigía recálculo manual tras
 // cada cambio). No es polimórfico (una sola forma concreta): `ENGINE.CREATE_EXECUTION` no
 // lleva nombre de tipo.

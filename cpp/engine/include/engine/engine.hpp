@@ -81,7 +81,7 @@ double unilateral_cva_from_exposure(
 bool is_gpu_backend_available();
 
 // NPV determinista (sin Monte Carlo) del IRS a t=0 y su derivada respecto a r0 (PLAN.md
-// §7.15: medidas "PV"/"DV01" de ENGINE.CALC, ver engine/measure.hpp). Siempre en CPU: una
+// §7.15: medidas "PV"/"DV01" de ENGINE.PRICE, ver engine/measure.hpp). Siempre en CPU: una
 // única evaluación no se beneficia de GPU.
 double irs_hull_white_npv(
     double a, double b, double sigma, double r0,

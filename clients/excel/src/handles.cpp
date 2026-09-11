@@ -10,7 +10,7 @@ HandleRegistry::HandleRegistry() { engine::register_builtins(registries_); }
 
 std::vector<std::string> HandleRegistry::list_models() const { return registries_.models.list(); }
 std::vector<std::string> HandleRegistry::list_products() const { return registries_.products.list(); }
-std::vector<std::string> HandleRegistry::list_measures() const { return engine::calc_measure_names(registries_); }
+std::vector<std::string> HandleRegistry::list_measures() const { return engine::price_measure_names(registries_); }
 std::vector<std::string> HandleRegistry::list_calibrators() const { return registries_.calibrators.list(); }
 
 std::string HandleRegistry::create_model(const std::string& name, const XLOPER12& params_arg) {
@@ -66,7 +66,7 @@ std::string HandleRegistry::create_calibrator(const std::string& name) {
     return handle;
 }
 
-engine::CalcResult HandleRegistry::calc(
+engine::PriceResult HandleRegistry::price(
     const std::string& product_handle,
     const std::vector<std::string>& measure_names,
     const std::string& model_handle,
@@ -95,7 +95,7 @@ engine::CalcResult HandleRegistry::calc(
         throw std::out_of_range("xlbridge: handle de contexto de ejecucion desconocido: " + execution_handle);
     }
 
-    return engine::calc(
+    return engine::price(
         registries_, *product_it->second, measure_names, *model_it->second,
         market_it->second, pricing_it->second, execution_it->second
     );
@@ -104,7 +104,7 @@ engine::CalcResult HandleRegistry::calc(
 namespace {
 
 // Resuelve una columna de handles de producto (PLAN.md §7.19) contra el mapa memoizado --
-// compartido por calc_batch/calc_many/calc_grid, mismo mensaje de error que ya usa calc() por
+// compartido por price_batch/price_many/price_grid, mismo mensaje de error que ya usa price() por
 // handle individual.
 std::vector<const engine::IProduct*> resolve_products(
     const std::unordered_map<std::string, std::unique_ptr<engine::IProduct>>& products,
@@ -154,7 +154,7 @@ std::vector<engine::MarketSnapshot> resolve_markets(
 
 } // namespace
 
-engine::CalcBatchResult HandleRegistry::calc_batch(
+engine::PriceBatchResult HandleRegistry::price_batch(
     const std::vector<std::string>& product_handles,
     const std::vector<std::string>& measure_names,
     const std::string& model_handle,
@@ -179,13 +179,13 @@ engine::CalcBatchResult HandleRegistry::calc_batch(
         throw std::out_of_range("xlbridge: handle de contexto de ejecucion desconocido: " + execution_handle);
     }
 
-    return engine::calc_batch(
+    return engine::price_batch(
         registries_, resolve_products(products_, product_handles), measure_names, *model_it->second,
         market_it->second, pricing_it->second, execution_it->second
     );
 }
 
-engine::CalcBatchResult HandleRegistry::calc_many(
+engine::PriceBatchResult HandleRegistry::price_many(
     const std::vector<std::string>& product_handles,
     const std::vector<std::string>& measure_names,
     const std::string& model_handle,
@@ -210,13 +210,13 @@ engine::CalcBatchResult HandleRegistry::calc_many(
         throw std::out_of_range("xlbridge: handle de contexto de ejecucion desconocido: " + execution_handle);
     }
 
-    return engine::calc_many(
+    return engine::price_many(
         registries_, resolve_products(products_, product_handles), measure_names, *model_it->second,
         market_it->second, pricing_it->second, execution_it->second
     );
 }
 
-engine::CalcGridResult HandleRegistry::calc_grid(
+engine::PriceGridResult HandleRegistry::price_grid(
     const std::vector<std::string>& product_handles,
     const std::vector<std::string>& measure_names,
     const std::vector<std::string>& model_handles,
@@ -233,7 +233,7 @@ engine::CalcGridResult HandleRegistry::calc_grid(
         throw std::out_of_range("xlbridge: handle de contexto de ejecucion desconocido: " + execution_handle);
     }
 
-    return engine::calc_grid(
+    return engine::price_grid(
         registries_, resolve_products(products_, product_handles), measure_names,
         resolve_models(models_, model_handles), resolve_markets(markets_, market_handles),
         pricing_it->second, execution_it->second

@@ -369,7 +369,7 @@ pub fn is_gpu_backend_available() -> bool {
 }
 
 /// NPV determinista (sin Monte Carlo) del IRS a `t=0` bajo Hull-White 1F — la medida "PV"
-/// de `ENGINE.CALC` (PLAN.md §7.15, `PresentValueMeasure`). Siempre en `CpuBackend`: una
+/// de `ENGINE.PRICE` (PLAN.md §7.15, `PresentValueMeasure`). Siempre en `CpuBackend`: una
 /// única evaluación no se beneficia de GPU (eso es cosa de `irs_hull_white_exposure_profile`,
 /// que vectoriza sobre paths), así que esta función no toma `backend` como parámetro.
 #[allow(clippy::too_many_arguments)]
@@ -394,7 +394,7 @@ pub fn irs_hull_white_npv(
 /// `d(NPV)/d(r0)` del IRS a `t=0` vía autodiff en modo reverse (PLAN.md §5.3, mismo patrón
 /// que `crate::smoke::hull_white_zero_coupon_bond_delta_r0` pero sobre el NPV del swap
 /// completo, no solo un bono cero-cupón) — la sensibilidad cruda detrás de la medida "DV01"
-/// de `ENGINE.CALC` (`Dv01Measure` multiplica esto por 0.0001 en la capa C++, no aquí).
+/// de `ENGINE.PRICE` (`Dv01Measure` multiplica esto por 0.0001 en la capa C++, no aquí).
 #[allow(clippy::too_many_arguments)]
 pub fn irs_hull_white_npv_delta_r0(
     a: f64,

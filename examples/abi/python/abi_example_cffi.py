@@ -1,4 +1,4 @@
-"""Ejemplo de Python consumiendo engine/abi.h (PLAN.md Fase 6, §5.5/§7.13; ENGINE.CALC en
+"""Ejemplo de Python consumiendo engine/abi.h (PLAN.md Fase 6, §5.5/§7.13; ENGINE.PRICE en
 PLAN.md §7.15) via `cffi`, en modo ABI (`ffi.dlopen`, sin compilar una extension C -- a
 diferencia del modo API de cffi, que sí compilaría un `.pyd`/`.so` propio y se parecería mas a
 `clients/python`). Mismo recorrido que `abi_example_ctypes.py`: comparar ambos ficheros lado a
@@ -90,12 +90,12 @@ _CDEF = """
         double scalar;
     } EngineMeasureResult;
 
-    typedef struct EngineCalcResultEntry {
+    typedef struct EnginePriceResultEntry {
         char* measure_name;
         EngineMeasureResult result;
-    } EngineCalcResultEntry;
+    } EnginePriceResultEntry;
 
-    int engine_abi_calc(
+    int engine_abi_price(
         const EngineProduct* product,
         const char** measure_names,
         size_t n_measure_names,
@@ -103,10 +103,10 @@ _CDEF = """
         const EngineMarketSnapshot* market,
         const EnginePricingContext* pricing,
         const EngineExecutionContext* execution,
-        EngineCalcResultEntry** out_entries,
+        EnginePriceResultEntry** out_entries,
         size_t* out_count
     );
-    void engine_abi_free_calc_results(EngineCalcResultEntry* entries, size_t count);
+    void engine_abi_free_price_results(EnginePriceResultEntry* entries, size_t count);
 
     int engine_abi_is_gpu_backend_available(void);
 
@@ -223,7 +223,7 @@ def main() -> None:
         lib.engine_abi_free_model(model)
         raise RuntimeError(f"engine_abi_create_product(IRSwap): {last_error(ffi, lib)}")
 
-    # --- ENGINE.CALC (PLAN.md §7.15): mismo caso base que cpp/engine/tests/test_registry.cpp
+    # --- ENGINE.PRICE (PLAN.md §7.15): mismo caso base que cpp/engine/tests/test_registry.cpp
     # (Registry.UnilateralCvaMatchesGoldenValue/ExposureProfileMatchesGoldenValue), pero aqui
     # basta con invariantes cualitativos -- este ejemplo verifica el mecanismo de la ABI, no
     # vuelve a fijar el numero exacto. --------------------------------------------------------
@@ -241,12 +241,12 @@ def main() -> None:
     measure_name_bufs = [ffi.new("char[]", name) for name in (b"PV", b"DV01", b"ExpectedExposure", b"PFE95", b"UnilateralCVA")]
     measure_names = ffi.new("const char*[]", measure_name_bufs)
 
-    entries_ptr = ffi.new("EngineCalcResultEntry **")
+    entries_ptr = ffi.new("EnginePriceResultEntry **")
     entry_count = ffi.new("size_t *")
-    rc = lib.engine_abi_calc(
+    rc = lib.engine_abi_price(
         product, measure_names, len(measure_name_bufs), model, market, pricing, execution, entries_ptr, entry_count
     )
-    assert rc == 0, f"engine_abi_calc: {last_error(ffi, lib)}"
+    assert rc == 0, f"engine_abi_price: {last_error(ffi, lib)}"
     entries = entries_ptr[0]
     count = entry_count[0]
 
@@ -267,18 +267,18 @@ def main() -> None:
     for i in range(ee.len):
         assert ee.primary[i] >= 0.0 and pfe.primary[i] >= ee.primary[i], "se esperaba PFE95 >= ExpectedExposure >= 0"
 
-    lib.engine_abi_free_calc_results(entries, count)
+    lib.engine_abi_free_price_results(entries, count)
 
     gpu_available = lib.engine_abi_is_gpu_backend_available() != 0
     print(f"gpu disponible: {'si' if gpu_available else 'no'}")
 
-    # --- engine_abi_calc rechaza un nombre de medida desconocido (PLAN.md §7.15): el error
+    # --- engine_abi_price rechaza un nombre de medida desconocido (PLAN.md §7.15): el error
     # queda en engine_abi_last_error(), nunca lanza/aborta a traves de esta frontera C. --------
     bad_name_buf = ffi.new("char[]", b"NoExiste")
     bad_names = ffi.new("const char*[]", [bad_name_buf])
-    bad_entries_ptr = ffi.new("EngineCalcResultEntry **")
+    bad_entries_ptr = ffi.new("EnginePriceResultEntry **")
     bad_count = ffi.new("size_t *")
-    rc = lib.engine_abi_calc(product, bad_names, 1, model, market, pricing, execution, bad_entries_ptr, bad_count)
+    rc = lib.engine_abi_price(product, bad_names, 1, model, market, pricing, execution, bad_entries_ptr, bad_count)
     assert rc != 0, "se esperaba error con un nombre de medida desconocido"
     print(f"error esperado al pedir una medida inexistente: {last_error(ffi, lib)}")
 
@@ -292,7 +292,7 @@ def main() -> None:
     assert unknown == ffi.NULL, "se esperaba NULL al pedir un modelo inexistente"
     print(f"error esperado al pedir un modelo inexistente: {last_error(ffi, lib)}")
 
-    print("OK: ejemplo de Python (cffi) sobre engine/abi.h (ENGINE.CALC) completado.")
+    print("OK: ejemplo de Python (cffi) sobre engine/abi.h (ENGINE.PRICE) completado.")
 
 
 if __name__ == "__main__":

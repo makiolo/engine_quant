@@ -120,7 +120,7 @@ int main() {
 
     int rc = auto_open();
     ok &= check(rc == 1, "xlAutoOpen devuelve 1");
-    // PLAN.md §7.19: +3 (ENGINE.CALC_BATCH/CALC_MANY/CALC_GRID) sobre las 12 anteriores.
+    // PLAN.md §7.19: +3 (ENGINE.PRICE_BATCH/CALC_MANY/CALC_GRID) sobre las 12 anteriores.
     ok &= check(g_register_calls == 15, "xlAutoOpen registra exactamente 15 UDFs via xlfRegister");
     for (const auto& name : g_registered_names) {
         ok &= check(name.rfind("ENGINE.", 0) == 0, "cada UDF registrada se llama ENGINE.*");
@@ -146,7 +146,7 @@ int main() {
         auto_free(models);
     }
 
-    // PLAN.md §7.15: ENGINE.LIST_MEASURES ahora devuelve los 5 nombres de ENGINE.CALC, no los
+    // PLAN.md §7.15: ENGINE.LIST_MEASURES ahora devuelve los 5 nombres de ENGINE.PRICE, no los
     // nombres registrados en crudo en Registry<IMeasure>.
     LPXLOPER12 measures = list_measures();
     ok &= check(measures != nullptr, "xlEngineListMeasures devuelve un XLOPER12");

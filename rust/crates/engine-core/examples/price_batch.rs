@@ -1,13 +1,13 @@
 //! Ejemplo de la capa Rust (PLAN.md §7.19): calibra el lote homogéneo, la parte que de
-//! verdad vive en Rust de `calc_batch`/`calc_many`/`calc_grid` (la orquestación -- agrupar,
-//! trasladar nombres de medida, recomponer resultados -- vive en la capa C++, `engine::calc_
-//! batch`/`calc_many`/`calc_grid`, ver `cpp/engine/src/calc.cpp`). Aquí se ejercitan
+//! verdad vive en Rust de `price_batch`/`price_many`/`price_grid` (la orquestación -- agrupar,
+//! trasladar nombres de medida, recomponer resultados -- vive en la capa C++, `engine::price_
+//! batch`/`price_many`/`price_grid`, ver `cpp/engine/src/price.cpp`). Aquí se ejercitan
 //! directamente los primitivos `f64` puros de `engine_core::api` que esa capa C++ consume:
 //! un lote de 3 swaps del mismo calendario, valorados con las 5 medidas de una sola llamada
 //! cada una, comparado contra un bucle de llamadas escalares para demostrar que el resultado
 //! es idéntico.
 //!
-//! `cargo run -p engine-core --example calc_batch`
+//! `cargo run -p engine-core --example price_batch`
 
 use engine_core::api::{
     irs_hull_white_exposure_profile, irs_hull_white_exposure_profile_batch, irs_hull_white_npv,

@@ -1,8 +1,8 @@
-# Ejemplos de la C ABI (`engine/abi.h`, PLAN.md Fase 6, §5.5/§7.13; ENGINE.CALC en PLAN.md §7.15)
+# Ejemplos de la C ABI (`engine/abi.h`, PLAN.md Fase 6, §5.5/§7.13; ENGINE.PRICE en PLAN.md §7.15)
 
 Cinco versiones del mismo recorrido -- listar modelos registrados, construir un IRS a 5 años
 bajo Hull-White 1F, calcular un lote de medidas (`PV`, `DV01`, `ExpectedExposure`, `PFE95`,
-`UnilateralCVA`) con `engine_abi_calc` y provocar dos errores controlados (medida y modelo
+`UnilateralCVA`) con `engine_abi_price` y provocar dos errores controlados (medida y modelo
 desconocidos) -- consumiendo únicamente la interfaz `extern "C"` de
 [`cpp/engine/include/engine/abi.h`](../../cpp/engine/include/engine/abi.h), nunca el registry
 C++ interno, `cxx` ni nanobind. El objetivo es documentar cómo se ve "de verdad" consumir el
@@ -15,7 +15,7 @@ exacto: el valor de referencia exacto para el mismo caso vive en
 `ExposureProfileMatchesGoldenValue`) y en
 [`clients/excel/README.md`](../../clients/excel/README.md) ("Verificación manual"). Si alguno
 de estos cinco falla sus invariantes, algo se rompió en la traducción C ABI ↔
-`engine::Registries`/`engine::calc` para ese lenguaje/librería concreto, no en el motor (que ya
+`engine::Registries`/`engine::price` para ese lenguaje/librería concreto, no en el motor (que ya
 validan los demás).
 
 El ejemplo en C (único de los cinco actualizado en PLAN.md §7.18/§7.19, ver "## C" más abajo)
@@ -23,8 +23,8 @@ añade además la calibración genérica de los dos modelos del motor
 (`engine_abi_create_calibrator`/`engine_abi_calibrate`, uno por `HullWhite1F` y `HullWhite2F`)
 hasta pasar el resultado a `engine_abi_create_model` -- cerrando el círculo Mercado → calibrar
 → Modelo calibrado también desde esta ABI -- y un lote homogéneo de 3 swaps con
-`engine_abi_calc_batch` (PLAN.md §7.19: mismo `EngineProduct**` genérico que `calc_many`/
-`calc_grid`, no repetido aquí por acotar el alcance). El resto de lenguajes seguirían exactamente el
+`engine_abi_price_batch` (PLAN.md §7.19: mismo `EngineProduct**` genérico que `price_many`/
+`price_grid`, no repetido aquí por acotar el alcance). El resto de lenguajes seguirían exactamente el
 mismo patrón (mismo `EngineCalibrator` opaco que `EngineModel`/`EngineProduct`), no repetido
 aquí por acotar el alcance.
 

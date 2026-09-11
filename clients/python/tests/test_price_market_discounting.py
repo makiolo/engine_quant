@@ -1,8 +1,8 @@
 """Sanity check explicitamente pedido por PLAN_REAPI.md §6 Fase 4: PV/DV01 pasan a descontar
 por la curva de `MarketSnapshot` (antes: modelo Hull-White). Equivalente Python de
-`cpp/engine/tests/test_registry.cpp::Calc.ParSwapWithExplicitParRateFromAMultiPillarCurveIsZero`
-/`Calc.ParSwapViaUseParRateMatchesExplicitParRateOnANonFlatCurve` -- a diferencia de
-`test_calc.py` (mercado de 1 pillar, curva plana por extrapolación), aquí la curva tiene forma
+`cpp/engine/tests/test_registry.cpp::Price.ParSwapWithExplicitParRateFromAMultiPillarCurveIsZero`
+/`Price.ParSwapViaUseParRateMatchesExplicitParRateOnANonFlatCurve` -- a diferencia de
+`test_price.py` (mercado de 1 pillar, curva plana por extrapolación), aquí la curva tiene forma
 real (no plana), así que "PV de un swap par ~ 0" no es una tautología del caso trivial.
 """
 
@@ -52,7 +52,7 @@ def test_par_swap_with_explicit_par_rate_from_a_multi_pillar_curve_is_zero():
     pricing = _deterministic_pricing()
     execution = _cpu_execution()
 
-    result = eng.calc(product, ["PV"], model, market, pricing, execution)
+    result = eng.price(product, ["PV"], model, market, pricing, execution)
     assert result["PV"].has_scalar
     assert math.isclose(result["PV"].scalar, 0.0, abs_tol=1e-6)
 
@@ -75,8 +75,8 @@ def test_bucketed_dv01_sums_to_the_parallel_dv01():
     pricing = _deterministic_pricing()
     execution = _cpu_execution()
 
-    parallel_dv01 = eng.calc(product, [("DV01", {})], model, market, pricing, execution)["DV01"].scalar
-    bucketed = eng.calc(product, [("DV01", {"bucketed": True})], model, market, pricing, execution)["DV01"]
+    parallel_dv01 = eng.price(product, [("DV01", {})], model, market, pricing, execution)["DV01"].scalar
+    bucketed = eng.price(product, [("DV01", {"bucketed": True})], model, market, pricing, execution)["DV01"]
 
     assert not bucketed.has_scalar
     assert len(bucketed.times) == len(market.pillars)
@@ -100,7 +100,7 @@ def test_par_swap_via_use_par_rate_matches_explicit_par_rate_on_a_non_flat_curve
         },  # fixed_rate omitido -- use_par_rate()==True
     )
 
-    result = eng.calc(par_product, ["PV", "DV01"], model, market, pricing, execution)
+    result = eng.price(par_product, ["PV", "DV01"], model, market, pricing, execution)
     assert math.isclose(result["PV"].scalar, 0.0, abs_tol=1e-6)
     assert result["DV01"].scalar > 0.0  # swap pagador: > 0 pase lo que pase con la forma de la curva
 

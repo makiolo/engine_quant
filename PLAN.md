@@ -2055,12 +2055,96 @@ valores nuevos. Python: toda la suite existente (`test_smoke`/`test_registry`/`t
 `test_calibration`) sin cambios de comportamiento salvo el ajuste de tolerancia de DV01 ya
 descrito y la actualización de `list_measures()` (gana "ExposureProfile" como nombre directo);
 cinco ficheros de test nuevos (`test_engine_typed_trade`/`_context`/`_measure`,
-`test_calc_measure_spec`, `test_calc_market_discounting`) y tres ejemplos nuevos
-(`calc_flow_typed_trade.py`, `calc_flow_typed.py` con curva multi-pillar real y salida de DV01
-bucketed por pillar) ejecutados de punta a punta contra el `Engine` real, no solo con mocks.
+`test_price_measure_spec`, `test_price_market_discounting` -- renombrados desde
+`test_calc_measure_spec`/`test_calc_market_discounting` en §7.22) y tres ejemplos nuevos
+(`price_flow_typed_trade.py`, `price_flow_typed.py` con curva multi-pillar real y salida de
+DV01 bucketed por pillar) ejecutados de punta a punta contra el `Engine` real, no solo con mocks.
 Cada una de las seis fases se commiteó y verificó por separado (build + tests en verde antes
 del siguiente paso), con un punto de control explícito con el usuario entre la Fase 3
 (aditiva) y la Fase 4 (cambio de contrato numérico) antes de tocar la fórmula de valoración.
+
+## 7.22 Renombrado `calc`/`calc_batch`/`calc_many`/`calc_grid` → `price`/`price_batch`/`price_many`/`price_grid`
+
+### Motivación
+
+Petición directa del usuario tras cerrar §7.21: el vocabulario `calc`/`ENGINE.CALC` no
+describe con precisión lo que hace la API (valorar un trade -- "pricing" -- no un cálculo
+genérico) y colisiona conceptualmente con "calibración" (`ENGINE.CALIBRATE`, ya usa la raíz
+`calibr-`). Renombrado puro en las cuatro capas confirmadas por el usuario (C++/C ABI/Python/
+Excel; Rust queda fuera salvo comentarios de referencia cruzada, ver Diseño) -- sin cambio de
+comportamiento ni de firma más allá del propio nombre.
+
+### Diseño
+
+Mismo patrón que §7.20 (`MarketSnapshot`→`Curve`, renombrado puro): cada identificador que
+contenía `calc`/`Calc`/`CALC` pasa a `price`/`Price`/`PRICE`, preservando mayúsculas/
+minúsculas y sin tocar ninguna firma, comportamiento o valor numérico.
+
+- **C++ core**: `cpp/engine/include/engine/calc.hpp`/`cpp/engine/src/calc.cpp` →
+  `price.hpp`/`price.cpp` (`git mv`, no solo contenido). `CalcResultEntry`/`CalcResult`/
+  `CalcBatchResultEntry`/`CalcBatchResult`/`CalcGridResultEntry`/`CalcGridResult` →
+  `Price*` equivalentes; `calc_measure_names`/`calc`/`calc_batch`/`calc_many`/`calc_grid` →
+  `price_measure_names`/`price`/`price_batch`/`price_many`/`price_grid`. `MeasureSpec`
+  (§7.21 Fase 3) no cambia de nombre -- no contiene la raíz `calc`.
+- **C ABI** (`abi.h`/`abi.cpp`): `engine_abi_calc(_batch|_many|_grid)?` →
+  `engine_abi_price(_batch|_many|_grid)?`, `engine_abi_free_calc_*` → `engine_abi_free_price_*`,
+  `EngineCalcResultEntry`/`EngineCalcBatchResultEntry`/`EngineCalcGridResultEntry` →
+  `EnginePrice*ResultEntry`. `engine_abi_version()` **no sube** -- mismo layout de structs,
+  solo cambian los nombres de función/tipo (la convención de versión de §5.5 solo sube cuando
+  cambia layout o firma, no por un renombrado 1:1).
+- **Python** (`engine_py_ext.cpp`): `Engine.calc`/`calc_batch`/`calc_many`/`calc_grid` →
+  `Engine.price`/`price_batch`/`price_many`/`price_grid` (nanobind `.def(...)`, no solo el
+  nombre C++ del método). `engine_typed.Measure.to_spec()` (§7.21 Fase 3) no cambia de forma,
+  solo los docstrings que mencionaban `Engine.calc(...)`.
+- **Excel**: `ENGINE.CALC`/`ENGINE.CALC_BATCH`/`ENGINE.CALC_MANY`/`ENGINE.CALC_GRID` →
+  `ENGINE.PRICE`/`ENGINE.PRICE_BATCH`/`ENGINE.PRICE_MANY`/`ENGINE.PRICE_GRID` (UDFs exportadas,
+  `xlEngineCalc*` → `xlEnginePrice*`, tabla `kFunctions` en `engine_excel.cpp`);
+  `HandleRegistry::calc(_batch|_many|_grid)?` → `price(_batch|_many|_grid)?`;
+  `xlbridge::new_calc_result`/`new_calc_batch_result`/`new_calc_grid_result` →
+  `new_price_result`/`new_price_batch_result`/`new_price_grid_result`.
+- **Ficheros de ejemplo/test renombrados** (`git mv`, no solo contenido): `calc_flow.py` →
+  `price_flow.py`, `calc_batch_flow.py` → `price_batch_flow.py`, `calc_flow_typed.py` →
+  `price_flow_typed.py`, `calc_flow_typed_trade.py` → `price_flow_typed_trade.py`,
+  `test_calc.py` → `test_price.py`, `test_calc_measure_spec.py` → `test_price_measure_spec.py`,
+  `test_calc_market_discounting.py` → `test_price_market_discounting.py`,
+  `rust/crates/engine-core/examples/calc_batch.rs` → `price_batch.rs` (el único cambio del
+  lado Rust: el core no expone nada llamado `calc`, solo un ejemplo con ese nombre y
+  comentarios de referencia cruzada a `ENGINE.CALC`/`calc_batch`/`calc_many`/`calc_grid`,
+  actualizados a `ENGINE.PRICE`/`price_batch`/`price_many`/`price_grid` por consistencia
+  documental -- `engine_core::api` en sí no tenía ningún identificador que renombrar).
+- **`PLAN.md`/`PLAN_REAPI.md` no se tocan** (salvo esta entrada): mismo criterio de historial
+  append-only que ya fijó §7.20/§7.21 -- las fases anteriores describen con precisión lo que
+  existía en el momento en que se escribieron (`calc.hpp`, `ENGINE.CALC`, etc.), reescribirlas
+  sería falsificar el registro histórico. Excepción puntual: el párrafo de Verificación de
+  §7.21 (escrito en el mismo turno que este renombrado, antes de que existiera la decisión) se
+  actualizó para referenciar los nombres de fichero ya renombrados, evitando una referencia
+  rota "en frío" al cerrar la propia Fase 21.
+
+**Riesgo de renombrado a ciegas**: el propio código fuente usa profusamente palabras españolas
+con la raíz `calcul-` (`calculado`, `calcular`, `cálculo`) en comentarios -- un `s/calc/price/g`
+ciego las habría corrompido (`calculado` → `priceulado`). Mitigado con reemplazos por
+identificador exacto (no por substring `calc` suelto salvo con límites de palabra `\b`, que
+`\bcalc\b` no casa dentro de `calculado` al no haber transición de carácter de palabra entre
+"calc" y "ulado") y verificación posterior (`grep` de `priceul` tras cada fichero, cero
+coincidencias).
+
+### Verificación
+
+Build limpio (`cmake --build build`, sin cambios de CMakeLists más allá de la ruta
+`src/price.cpp`) + `ctest -C Release` (112 tests, mismos que §7.21, todos en verde, nombres de
+test actualizados -- `NewPriceResult`/`NewPriceBatchResult`/`NewPriceGridResult` en vez de
+`NewCalcResult`/etc.). C ABI en C puro (`engine_abi_c_smoke.exe`), ejemplo C++
+(`engine_abi_cpp_example.exe`), ejemplo Rust (`cargo build` + ejecución manual copiando
+`engine_abi.dll`) y ambos ejemplos Python de la ABI (`ctypes`/`cffi`) reproducen exactamente
+los mismos valores numéricos que antes del renombrado (PV/DV01/EE/PFE95/CVA), con los mensajes
+de error ya usando `engine::price`/`engine_abi_price`. Toda la suite Python (`test_smoke`/
+`test_registry`/`test_price`/`test_calibration`/`test_price_measure_spec`/
+`test_price_market_discounting`/`test_engine_typed_*`) y los cuatro ejemplos Python renombrados
+ejecutados de punta a punta contra el `.pyd` reconstruido. `cargo check --workspace --examples`
+en verde tras renombrar `price_batch.rs`. Verificación exhaustiva de que no queda ningún
+identificador `calc`/`Calc`/`CALC`/`ENGINE.CALC` fuera de `PLAN.md`/`PLAN_REAPI.md` (`grep`
+dirigido sobre `clients/`, `cpp/`, `examples/`, `rust/`, `README.md`, `.github/`) y de que
+ninguna palabra española con raíz `calcul-` quedó corrompida.
 
 ---
 *Próxima iteración: confirmar en la práctica (no se pudo ejecutar GitHub Actions desde este

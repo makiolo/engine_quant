@@ -1,5 +1,5 @@
-"""Equivalente de `calc_flow.py` usando `engine_typed.IRSwap` en vez del dict dinámico
-(PLAN_REAPI.md §6 Fase 1): mismo `Engine.calc(...)`, la única diferencia es cómo se construye
+"""Equivalente de `price_flow.py` usando `engine_typed.IRSwap` en vez del dict dinámico
+(PLAN_REAPI.md §6 Fase 1): mismo `Engine.price(...)`, la única diferencia es cómo se construye
 el `product` -- `trade.to_params()` alimenta `eng.create_product(...)` sin tocar el core.
 """
 
@@ -32,7 +32,7 @@ def main():
 
     print(f"Backend resuelto: {execution.backend}")
 
-    result = eng.calc(product, ["PV", "DV01", "UnilateralCVA"], model, market, pricing, execution)
+    result = eng.price(product, ["PV", "DV01", "UnilateralCVA"], model, market, pricing, execution)
     print(f"PV             = {result['PV'].scalar:,.2f}")
     print(f"DV01           = {result['DV01'].scalar:,.2f}")
     print(f"UnilateralCVA  = {result['UnilateralCVA'].scalar:,.2f}")
@@ -44,7 +44,7 @@ def main():
         accruals=[1.0, 1.0, 1.0, 1.0, 1.0],
     )
     par_product = eng.create_product(par_trade.product_type, par_trade.to_params())
-    par_pv = eng.calc(par_product, ["PV"], model, market, pricing, execution)["PV"].scalar
+    par_pv = eng.price(par_product, ["PV"], model, market, pricing, execution)["PV"].scalar
     print(f"PV (swap par)  = {par_pv:,.6f}")
 
 

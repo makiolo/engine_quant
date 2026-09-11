@@ -6,7 +6,7 @@
  * frontera, para que cualquier lenguaje con FFI a C (Julia via ccall, .NET via P/Invoke, Go
  * via cgo, o C/C++ directamente) pueda enlazarlo sin un compilador de C++ ni conocer nada de
  * cxx/nanobind. No es una cuarta API distinta (PLAN.md §5.5): es la misma superficie que ya
- * consumen Python/Excel (Registries/register_builtins/Registry<T>::create/engine::calc, mas
+ * consumen Python/Excel (Registries/register_builtins/Registry<T>::create/engine::price, mas
  * Market/PricingContext/ExecutionContext de PLAN.md §7.15) expresada en C ABI.
  *
  * Convenciones de esta ABI (validas para toda funcion de este header salvo que se diga lo
@@ -16,11 +16,11 @@
  *     Nunca se debe hacer free()/delete directamente sobre ellos. Market/PricingContext/
  *     ExecutionContext NO son handles (no son polimorficos, no tienen ciclo de vida que
  *     gestionar): se pasan como structs planos por valor/puntero-const directamente a
- *     engine_abi_calc, igual que EngineParam.
+ *     engine_abi_price, igual que EngineParam.
  *   - Las cadenas de entrada (const char*) son UTF-8, terminadas en NUL, y no se retienen mas
  *     alla de la duracion de la llamada (se copian internamente si hace falta guardarlas).
  *   - Los structs planos que devuelven datos owned por esta libreria (EngineMeasureResult,
- *     EngineCalcResultEntry, las listas de engine_abi_list_*) se liberan con su
+ *     EnginePriceResultEntry, las listas de engine_abi_list_*) se liberan con su
  *     engine_abi_free_* correspondiente, nunca con el free()/delete del lenguaje que consume
  *     la ABI (los allocators pueden no coincidir entre el .dll/.so de este motor y el
  *     runtime del consumidor).
@@ -54,7 +54,7 @@ extern "C" {
 #endif
 
 /* Version de esta ABI (PLAN.md §5.5). Sube a 2 en PLAN.md §7.15: se elimina EngineMeasure/
- * engine_abi_create_measure/engine_abi_evaluate (sustituidos por engine_abi_calc), se
+ * engine_abi_create_measure/engine_abi_evaluate (sustituidos por engine_abi_price), se
  * elimina engine_abi_set_compute_backend/engine_abi_get_compute_backend (el backend pasa a
  * ser un campo de EngineExecutionContext, no un estado global), y cambia el layout de
  * EngineMarketSnapshot (gana hazard_rate/recovery_rate). Sube a 3 en PLAN.md §7.18: con un
@@ -90,7 +90,7 @@ typedef struct EngineParam {
     size_t count;           /* longitud de values; valido si kind es ENGINE_PARAM_VECTOR */
 } EngineParam;
 
-/* --- Listado de modelos/productos registrados (PLAN.md §5.4) y medidas de ENGINE.CALC
+/* --- Listado de modelos/productos registrados (PLAN.md §5.4) y medidas de ENGINE.PRICE
  * (PLAN.md §7.15: engine_abi_list_measures devuelve los nombres de cara al usuario -- "PV",
  * "DV01", "ExpectedExposure", "PFE95", "UnilateralCVA" -- no los nombres registrados en
  * Registry<IMeasure>, que quedan como detalle interno de extension) -----------------------
@@ -126,7 +126,7 @@ ENGINE_ABI_API void engine_abi_free_calibrator(EngineCalibrator* calibrator);
 
 /* --- Market / PricingContext / ExecutionContext (PLAN.md §7.15) -------------------------
  * Structs planos, no handles: se construyen y se pasan directamente a
- * engine_abi_calibrate/engine_abi_calc, sin creacion/liberacion propia. */
+ * engine_abi_calibrate/engine_abi_price, sin creacion/liberacion propia. */
 
 typedef struct EngineMarketSnapshot {
     const double* pillars;    /* anios desde hoy, estrictamente creciente */
@@ -145,7 +145,7 @@ typedef struct EnginePricingContext {
 
 typedef struct EngineExecutionContext {
     const char* backend;    /* "cpu"/"gpu"/"auto" (case-insensitive); "auto" se resuelve al
-                              * vuelo dentro de engine_abi_calc, no hay handle que lo fije */
+                              * vuelo dentro de engine_abi_price, no hay handle que lo fije */
     const char* precision;  /* solo "fp64" aceptado hoy (PLAN.md §5.1) */
 } EngineExecutionContext;
 
@@ -183,14 +183,14 @@ ENGINE_ABI_API int engine_abi_calibrate(
 );
 ENGINE_ABI_API void engine_abi_free_calibration_result(EngineCalibrationResult* result);
 
-/* --- ENGINE.CALC (PLAN.md §7.15) ---------------------------------------------------------
+/* --- ENGINE.PRICE (PLAN.md §7.15) ---------------------------------------------------------
  * Sustituye por completo engine_abi_create_measure/engine_abi_evaluate: calcula un lote de
  * medidas nombradas (ver engine_abi_list_measures) de una vez sobre el mismo product/model/
  * market/pricing/execution, en vez de una medida a la vez con un Params generico. */
 
 /* times/primary/secondary tienen longitud `len` (0 y NULL para las tres si la medida es
  * puramente escalar, ej. "PV"/"DV01"/"UnilateralCVA" -- ver has_scalar/scalar). Mismo shape
- * que la version pre-§7.15 de esta ABI, ahora anidado dentro de EngineCalcResultEntry. */
+ * que la version pre-§7.15 de esta ABI, ahora anidado dentro de EnginePriceResultEntry. */
 typedef struct EngineMeasureResult {
     double* times;
     double* primary;
@@ -200,17 +200,17 @@ typedef struct EngineMeasureResult {
     double scalar;      /* valido solo si has_scalar == 1 */
 } EngineMeasureResult;
 
-typedef struct EngineCalcResultEntry {
+typedef struct EnginePriceResultEntry {
     char* measure_name; /* copia owned por la libreria, mismo texto que se pidio */
     EngineMeasureResult result;
-} EngineCalcResultEntry;
+} EnginePriceResultEntry;
 
 /* Devuelve 0 en exito (`*out_entries`/`*out_count` quedan rellenos, liberar con
- * engine_abi_free_calc_results) o != 0 en error (parametros invalidos -- un nombre de
+ * engine_abi_free_price_results) o != 0 en error (parametros invalidos -- un nombre de
  * `measure_names` que no aparece en engine_abi_list_measures, model/product/execution
  * invalidos -- ver engine_abi_last_error; `*out_entries` queda NULL, `*out_count` a 0). Los
  * resultados se devuelven en el mismo orden que `measure_names`. */
-ENGINE_ABI_API int engine_abi_calc(
+ENGINE_ABI_API int engine_abi_price(
     const EngineProduct* product,
     const char** measure_names,
     size_t n_measure_names,
@@ -218,17 +218,17 @@ ENGINE_ABI_API int engine_abi_calc(
     const EngineMarketSnapshot* market,
     const EnginePricingContext* pricing,
     const EngineExecutionContext* execution,
-    EngineCalcResultEntry** out_entries,
+    EnginePriceResultEntry** out_entries,
     size_t* out_count
 );
-ENGINE_ABI_API void engine_abi_free_calc_results(EngineCalcResultEntry* entries, size_t count);
+ENGINE_ABI_API void engine_abi_free_price_results(EnginePriceResultEntry* entries, size_t count);
 
-/* --- ENGINE.CALC_BATCH / ENGINE.CALC_MANY / ENGINE.CALC_GRID (PLAN.md §7.17/§7.19) --------
- * Tres niveles de la API de calculo por lotes: calc_batch (homogeneo -- todos los `products`
+/* --- ENGINE.PRICE_BATCH / ENGINE.PRICE_MANY / ENGINE.PRICE_GRID (PLAN.md §7.17/§7.19) --------
+ * Tres niveles de la API de calculo por lotes: price_batch (homogeneo -- todos los `products`
  * deben ser del mismo tipo registrado y, para IRSwap, compartir calendario y traer fixed_rate
- * explicito, sin use_par_rate) y calc_many (heterogeneo -- agrupa internamente por tipo +
- * calendario y llama a calc_batch por grupo, nunca falla por heterogeneidad) devuelven la
- * MISMA forma: una fila por trade con su indice explicito. calc_grid explota products x
+ * explicito, sin use_par_rate) y price_many (heterogeneo -- agrupa internamente por tipo +
+ * calendario y llama a price_batch por grupo, nunca falla por heterogeneidad) devuelven la
+ * MISMA forma: una fila por trade con su indice explicito. price_grid explota products x
  * models x markets (PricingContext/ExecutionContext compartidos, no forman parte de la
  * rejilla), una fila por (trade, model, market).
  *
@@ -236,17 +236,17 @@ ENGINE_ABI_API void engine_abi_free_calc_results(EngineCalcResultEntry* entries,
  * const*, const EngineModel* const*) -- primera vez que esta ABI recibe un array de handles en
  * vez de uno solo, mismo patron array+count que el resto (EngineParam*, measure_names).
  * `markets` es un array de EngineMarketSnapshot por VALOR (struct plano, no handle). */
-typedef struct EngineCalcBatchResultEntry {
+typedef struct EnginePriceBatchResultEntry {
     size_t trade_index;
-    EngineCalcResultEntry* measures; /* array owned por la libreria, n_measures largo */
+    EnginePriceResultEntry* measures; /* array owned por la libreria, n_measures largo */
     size_t n_measures;
-} EngineCalcBatchResultEntry;
+} EnginePriceBatchResultEntry;
 
 /* Devuelve 0 en exito (`*out_entries`/`*out_count` rellenos, liberar con
- * engine_abi_free_calc_batch_results) o != 0 en error (products vacio o con NULL, tipo de
+ * engine_abi_free_price_batch_results) o != 0 en error (products vacio o con NULL, tipo de
  * producto no soportado para lote, calendarios distintos entre trades, algun trade con
  * use_par_rate, nombre de medida desconocido -- ver engine_abi_last_error). */
-ENGINE_ABI_API int engine_abi_calc_batch(
+ENGINE_ABI_API int engine_abi_price_batch(
     const EngineProduct** products,
     size_t n_products,
     const char** measure_names,
@@ -255,12 +255,12 @@ ENGINE_ABI_API int engine_abi_calc_batch(
     const EngineMarketSnapshot* market,
     const EnginePricingContext* pricing,
     const EngineExecutionContext* execution,
-    EngineCalcBatchResultEntry** out_entries,
+    EnginePriceBatchResultEntry** out_entries,
     size_t* out_count
 );
-/* Misma firma que engine_abi_calc_batch; a diferencia de ella, acepta products de tipos/
+/* Misma firma que engine_abi_price_batch; a diferencia de ella, acepta products de tipos/
  * calendarios distintos (los agrupa internamente) y nunca falla por heterogeneidad. */
-ENGINE_ABI_API int engine_abi_calc_many(
+ENGINE_ABI_API int engine_abi_price_many(
     const EngineProduct** products,
     size_t n_products,
     const char** measure_names,
@@ -269,22 +269,22 @@ ENGINE_ABI_API int engine_abi_calc_many(
     const EngineMarketSnapshot* market,
     const EnginePricingContext* pricing,
     const EngineExecutionContext* execution,
-    EngineCalcBatchResultEntry** out_entries,
+    EnginePriceBatchResultEntry** out_entries,
     size_t* out_count
 );
-ENGINE_ABI_API void engine_abi_free_calc_batch_results(EngineCalcBatchResultEntry* entries, size_t count);
+ENGINE_ABI_API void engine_abi_free_price_batch_results(EnginePriceBatchResultEntry* entries, size_t count);
 
-typedef struct EngineCalcGridResultEntry {
+typedef struct EnginePriceGridResultEntry {
     size_t trade_index;
     size_t model_index;
     size_t market_index;
-    EngineCalcResultEntry* measures;
+    EnginePriceResultEntry* measures;
     size_t n_measures;
-} EngineCalcGridResultEntry;
+} EnginePriceGridResultEntry;
 
 /* Devuelve 0 en exito o != 0 en error (products/models/markets vacios, mismos errores que
- * engine_abi_calc_many por cada combinacion model x market -- ver engine_abi_last_error). */
-ENGINE_ABI_API int engine_abi_calc_grid(
+ * engine_abi_price_many por cada combinacion model x market -- ver engine_abi_last_error). */
+ENGINE_ABI_API int engine_abi_price_grid(
     const EngineProduct** products,
     size_t n_products,
     const char** measure_names,
@@ -295,10 +295,10 @@ ENGINE_ABI_API int engine_abi_calc_grid(
     size_t n_markets,
     const EnginePricingContext* pricing,
     const EngineExecutionContext* execution,
-    EngineCalcGridResultEntry** out_entries,
+    EnginePriceGridResultEntry** out_entries,
     size_t* out_count
 );
-ENGINE_ABI_API void engine_abi_free_calc_grid_results(EngineCalcGridResultEntry* entries, size_t count);
+ENGINE_ABI_API void engine_abi_free_price_grid_results(EnginePriceGridResultEntry* entries, size_t count);
 
 ENGINE_ABI_API int engine_abi_is_gpu_backend_available(void);
 

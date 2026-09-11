@@ -287,7 +287,7 @@ XLOPER12* new_measure_result(const engine::MeasureResult& result) {
     return out;
 }
 
-XLOPER12* new_calc_result(const engine::CalcResult& result) {
+XLOPER12* new_price_result(const engine::PriceResult& result) {
     RW total_rows = 0;
     for (const auto& entry : result) {
         total_rows += entry.result.has_scalar ? 1 : static_cast<RW>(entry.result.times.size());
@@ -312,7 +312,7 @@ XLOPER12* new_calc_result(const engine::CalcResult& result) {
             cells[row * 3 + 2].val.num = entry.result.scalar;
             ++row;
         } else {
-            // ExpectedExposure/PFE95 (PLAN.md §7.15): calc.cpp ya copia la serie pedida
+            // ExpectedExposure/PFE95 (PLAN.md §7.15): price.cpp ya copia la serie pedida
             // (primary o secondary del origen) al campo `primary` de este resultado, así que
             // basta con leer siempre `primary` aquí sin saber cuál era el campo de origen.
             for (std::size_t i = 0; i < entry.result.times.size(); ++i) {
@@ -336,22 +336,22 @@ XLOPER12* new_calc_result(const engine::CalcResult& result) {
 
 namespace {
 
-// Numero de filas que ocupa un engine::CalcResult en formato largo (una por medida escalar,
-// una por fecha de las de perfil) -- compartido por new_calc_batch_result/new_calc_grid_result
-// (PLAN.md §7.19), mismo criterio que ya usa new_calc_result inline.
-std::size_t calc_result_row_count(const engine::CalcResult& result) {
+// Numero de filas que ocupa un engine::PriceResult en formato largo (una por medida escalar,
+// una por fecha de las de perfil) -- compartido por new_price_batch_result/new_price_grid_result
+// (PLAN.md §7.19), mismo criterio que ya usa new_price_result inline.
+std::size_t calc_result_row_count(const engine::PriceResult& result) {
     std::size_t n = 0;
     for (const auto& entry : result) n += entry.result.has_scalar ? 1 : entry.result.times.size();
     return n;
 }
 
-// Escribe las columnas [MeasureName, Time, Value] de un CalcResult en `cells`, empezando en la
+// Escribe las columnas [MeasureName, Time, Value] de un PriceResult en `cells`, empezando en la
 // fila `start_row` y en la columna `index_columns` (las columnas de indice -- TradeIndex, o
 // TradeIndex+ModelIndex+MarketIndex -- ya escritas a su izquierda por el llamante). Devuelve la
 // fila siguiente libre. `total_columns` es el ancho total de la tabla (para el stride
 // row*total_columns).
 RW write_calc_result_rows(
-    XLOPER12* cells, RW start_row, COL total_columns, COL index_columns, const engine::CalcResult& result
+    XLOPER12* cells, RW start_row, COL total_columns, COL index_columns, const engine::PriceResult& result
 ) {
     RW row = start_row;
     for (const auto& entry : result) {
@@ -385,7 +385,7 @@ RW write_calc_result_rows(
 
 } // namespace
 
-XLOPER12* new_calc_batch_result(const engine::CalcBatchResult& result) {
+XLOPER12* new_price_batch_result(const engine::PriceBatchResult& result) {
     RW total_rows = 0;
     for (const auto& entry : result) total_rows += static_cast<RW>(calc_result_row_count(entry.measures));
     if (total_rows == 0) return new_error(xlerrNA);
@@ -410,7 +410,7 @@ XLOPER12* new_calc_batch_result(const engine::CalcBatchResult& result) {
     return out;
 }
 
-XLOPER12* new_calc_grid_result(const engine::CalcGridResult& result) {
+XLOPER12* new_price_grid_result(const engine::PriceGridResult& result) {
     RW total_rows = 0;
     for (const auto& entry : result) total_rows += static_cast<RW>(calc_result_row_count(entry.measures));
     if (total_rows == 0) return new_error(xlerrNA);

@@ -31,7 +31,7 @@
 
 #include "XLCALL.H"
 #include "engine/bootstrap.hpp"
-#include "engine/calc.hpp"
+#include "engine/price.hpp"
 #include "engine/execution_context.hpp"
 #include "engine/market.hpp"
 #include "engine/pricing_context.hpp"
@@ -44,9 +44,9 @@ public:
 
     std::vector<std::string> list_models() const;
     std::vector<std::string> list_products() const;
-    // Nombres de ENGINE.CALC (PLAN.md §7.15: "PV"/"DV01"/"ExpectedExposure"/"PFE95"/
+    // Nombres de ENGINE.PRICE (PLAN.md §7.15: "PV"/"DV01"/"ExpectedExposure"/"PFE95"/
     // "UnilateralCVA"), no los nombres registrados en Registry<IMeasure> -- ver
-    // engine::calc_measure_names().
+    // engine::price_measure_names().
     std::vector<std::string> list_measures() const;
     std::vector<std::string> list_calibrators() const;
 
@@ -66,7 +66,7 @@ public:
 
     // Sustituye por completo create_measure/evaluate (PLAN.md §7.15): calcula un lote de
     // medidas nombradas de una vez sobre el mismo product/model/market/pricing/execution.
-    engine::CalcResult calc(
+    engine::PriceResult price(
         const std::string& product_handle,
         const std::vector<std::string>& measure_names,
         const std::string& model_handle,
@@ -76,8 +76,8 @@ public:
     ) const;
 
     // Nivel 3, lote homogeneo (PLAN.md §7.17/§7.19): product_handles debe ser una columna de
-    // handles del mismo tipo/calendario, sin use_par_rate -- ver engine::calc_batch.
-    engine::CalcBatchResult calc_batch(
+    // handles del mismo tipo/calendario, sin use_par_rate -- ver engine::price_batch.
+    engine::PriceBatchResult price_batch(
         const std::vector<std::string>& product_handles,
         const std::vector<std::string>& measure_names,
         const std::string& model_handle,
@@ -86,9 +86,9 @@ public:
         const std::string& execution_handle
     ) const;
 
-    // Nivel 2, lista heterogenea (PLAN.md §7.17/§7.19): misma forma que calc_batch, pero
-    // product_handles puede mezclar tipos/calendarios distintos -- ver engine::calc_many.
-    engine::CalcBatchResult calc_many(
+    // Nivel 2, lista heterogenea (PLAN.md §7.17/§7.19): misma forma que price_batch, pero
+    // product_handles puede mezclar tipos/calendarios distintos -- ver engine::price_many.
+    engine::PriceBatchResult price_many(
         const std::vector<std::string>& product_handles,
         const std::vector<std::string>& measure_names,
         const std::string& model_handle,
@@ -98,8 +98,8 @@ public:
     ) const;
 
     // Explosion de combinaciones Trades x Models x Markets (PLAN.md §7.19): pricing/execution
-    // son compartidos, no forman parte de la rejilla -- ver engine::calc_grid.
-    engine::CalcGridResult calc_grid(
+    // son compartidos, no forman parte de la rejilla -- ver engine::price_grid.
+    engine::PriceGridResult price_grid(
         const std::vector<std::string>& product_handles,
         const std::vector<std::string>& measure_names,
         const std::vector<std::string>& model_handles,

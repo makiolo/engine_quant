@@ -31,7 +31,7 @@ pub type Autodiff<B> = burn::backend::Autodiff<B>;
 /// proceso, ver el historial de §7.12 para el diseño anterior). Los alias de arriba son
 /// tipos — la elección real de cuál usar para una llamada concreta es un valor en tiempo de
 /// ejecución, porque viene de fuera del proceso Rust (Excel/Python construyen un
-/// `ExecutionContext` y lo pasan a `ENGINE.CALC`): este enum es el puente entre ambos mundos.
+/// `ExecutionContext` y lo pasan a `ENGINE.PRICE`): este enum es el puente entre ambos mundos.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ComputeBackend {
     Cpu,

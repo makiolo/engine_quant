@@ -22,7 +22,7 @@ market = engine.MarketSnapshot(pillars=[1.0, 2.0], zero_rates=[0.02, 0.02], haza
 pricing = engine.PricingContext({"pricing_date": 0.0, "n_paths": 5000.0, "n_steps": 208.0, "seed": 7.0})
 execution = engine.ExecutionContext({"backend": "auto", "precision": "FP64"})
 
-result = eng.calc(product, ["PV", "DV01", "ExpectedExposure", "PFE95", "UnilateralCVA"], model, market, pricing, execution)
+result = eng.price(product, ["PV", "DV01", "ExpectedExposure", "PFE95", "UnilateralCVA"], model, market, pricing, execution)
 print(result["UnilateralCVA"].scalar)  # CVA unilateral
 ```
 
@@ -58,8 +58,8 @@ product = eng.create_product(trade.product_type, trade.to_params())
 `PricingContext`, `ExecutionContext` y `Measure` (`q.PV()`, `q.DV01(bump=0.0002)`,
 `q.DV01(bucketed=True)` -- un delta por pillar de la curva en vez de un escalar --,
 `q.ExposureProfile()`, `q.UnilateralCVA()`, vía `.to_spec()`) -- ver
-`clients/python/examples/calc_flow_typed.py` para el flujo completo sin dicts crudos. `PV`/
+`clients/python/examples/price_flow_typed.py` para el flujo completo sin dicts crudos. `PV`/
 `DV01` descuentan por la curva de `Market` observada (ya no dependen del modelo);
 `ExpectedExposure`/`PFE95`/`UnilateralCVA` siguen dependiendo del modelo (Monte Carlo).
-`Engine.calc`/`calc_batch`/`calc_many`/`calc_grid` aceptan tanto strings "pelados" como tuplas
+`Engine.price`/`price_batch`/`price_many`/`price_grid` aceptan tanto strings "pelados" como tuplas
 `(nombre, params)` en la misma llamada.

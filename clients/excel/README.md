@@ -1,7 +1,7 @@
 # Cliente Excel (XLL)
 
 Cliente Excel del motor XVA (PLAN.md, Fase 4, §7.8; API rediseñada en §7.15): expone el mismo
-registry C++ (`Registries`/`register_builtins`/`Registry<T>::create`/`engine::calc`, PLAN.md
+registry C++ (`Registries`/`register_builtins`/`Registry<T>::create`/`engine::price`, PLAN.md
 §5.4/§7.15) que ya consumen `cpp/engine/tests` (Fase 2) y `clients/python` (Fase 3), con el
 mismo modelo mental (PLAN.md §4: "la API debe sentirse equivalente en Python y en Excel").
 
@@ -30,10 +30,10 @@ El resultado es `build/clients/excel/engine_excel.xll`. Solo se construye en Win
 | `ENGINE.CREATE_MARKET(params)` | `MarketSnapshot(...)` |
 | `ENGINE.CREATE_CONTEXT(params)` | `PricingContext({...})` |
 | `ENGINE.CREATE_EXECUTION(params)` | `ExecutionContext({...})` |
-| `ENGINE.CALC(trade, medidas, modelo, mercado, contexto, ejecucion)` | `Engine().calc(trade, medidas, modelo, market, pricing, execution)` |
-| `ENGINE.CALC_BATCH(trades, medidas, modelo, mercado, contexto, ejecucion)` | `Engine().calc_batch(trades, medidas, modelo, market, pricing, execution)` |
-| `ENGINE.CALC_MANY(trades, medidas, modelo, mercado, contexto, ejecucion)` | `Engine().calc_many(trades, medidas, modelo, market, pricing, execution)` |
-| `ENGINE.CALC_GRID(trades, medidas, modelos, mercados, contexto, ejecucion)` | `Engine().calc_grid(trades, medidas, modelos, markets, pricing, execution)` |
+| `ENGINE.PRICE(trade, medidas, modelo, mercado, contexto, ejecucion)` | `Engine().price(trade, medidas, modelo, market, pricing, execution)` |
+| `ENGINE.PRICE_BATCH(trades, medidas, modelo, mercado, contexto, ejecucion)` | `Engine().price_batch(trades, medidas, modelo, market, pricing, execution)` |
+| `ENGINE.PRICE_MANY(trades, medidas, modelo, mercado, contexto, ejecucion)` | `Engine().price_many(trades, medidas, modelo, market, pricing, execution)` |
+| `ENGINE.PRICE_GRID(trades, medidas, modelos, mercados, contexto, ejecucion)` | `Engine().price_grid(trades, medidas, modelos, markets, pricing, execution)` |
 | `ENGINE.LIST_CALIBRATORS()` | `Engine().list_calibrators()` |
 | `ENGINE.CREATE_CALIBRATOR(nombre)` | `Engine().create_calibrator(nombre)` |
 | `ENGINE.CALIBRATE(calibrador, mercado, estimacion_inicial)` | `Calibrator.calibrate(market, initial_guess)` |
@@ -55,7 +55,7 @@ determinista. Las instancias creadas viven hasta que se descarga el complemento
 (`xlAutoClose`); no hace falta "liberarlas" explícitamente, pero tampoco se liberan hoja a
 hoja (limitación conocida, ver "Alcance y limitaciones" más abajo).
 
-## `ENGINE.CALC` (PLAN.md §7.15)
+## `ENGINE.PRICE` (PLAN.md §7.15)
 
 Sustituye por completo a las antiguas `ENGINE.CREATE_MEASURE`/`ENGINE.EVALUATE`: calcula un
 **lote** de medidas nombradas de una sola vez sobre el mismo trade/modelo/mercado/contexto de
@@ -69,24 +69,24 @@ Model    =ENGINE.CREATE_MODEL("HullWhite1F", <rango Hull-White>)
 Market   =ENGINE.CREATE_MARKET(<rango mercado>)
 Pricing  =ENGINE.CREATE_CONTEXT(<rango contexto de valoracion>)
 Compute  =ENGINE.CREATE_EXECUTION(<rango contexto de ejecucion>)
-         =ENGINE.CALC(Trade, {"PV";"DV01";"ExpectedExposure";"PFE95";"UnilateralCVA"}, Model, Market, Pricing, Compute)
+         =ENGINE.PRICE(Trade, {"PV";"DV01";"ExpectedExposure";"PFE95";"UnilateralCVA"}, Model, Market, Pricing, Compute)
 ```
 
 Medidas disponibles hoy (`ENGINE.LIST_MEASURES()`): `PV`, `DV01` (ambas deterministas, no usan
 Monte Carlo), `ExpectedExposure`, `PFE95` (comparten una sola simulación Monte Carlo por
-detrás, `ENGINE.CALC` la calcula una vez aunque se pidan las dos), `ExposureProfile` (el mismo
+detrás, `ENGINE.PRICE` la calcula una vez aunque se pidan las dos), `ExposureProfile` (el mismo
 cálculo que `ExpectedExposure`/`PFE95`, pero devuelto en un único `MeasureResult` con ambos
 campos a la vez) y `UnilateralCVA`. Las fechas de monitorización de `ExpectedExposure`/
 `PFE95`/`ExposureProfile` se derivan automáticamente de las propias fechas de reseteo del
 trade — ya no es un parámetro que haya que pasar a mano.
 
-`ENGINE.CALC` ya no está limitado a esta lista curada: acepta cualquier nombre presente en el
+`ENGINE.PRICE` ya no está limitado a esta lista curada: acepta cualquier nombre presente en el
 registry de medidas del motor (PLAN_REAPI.md §6 Fase 3) — `ENGINE.LIST_MEASURES()` sigue
 siendo la forma de descubrirlos. Configurar una medida (p.ej. el `bump` de `DV01`) no está
 expuesto todavía desde Excel/C ABI -- solo desde Python (`engine_typed`, ver
-`clients/python/README_PYPI.md`); `ENGINE.CALC` con solo nombres sigue funcionando igual.
+`clients/python/README_PYPI.md`); `ENGINE.PRICE` con solo nombres sigue funcionando igual.
 
-`ENGINE.CALC` devuelve una tabla en **formato largo**: columnas `[MeasureName, Time, Value]`
+`ENGINE.PRICE` devuelve una tabla en **formato largo**: columnas `[MeasureName, Time, Value]`
 — las medidas escalares (`PV`, `DV01`, `UnilateralCVA`) dan 1 fila (`Time` en blanco), las de
 perfil (`ExpectedExposure`, `PFE95`) dan una fila por fecha de monitorización. Un único
 formato homogéneo para todo el lote, fácil de filtrar/dinamizar en Excel (Tabla dinámica sobre
@@ -106,43 +106,43 @@ se resuelve una vez, en el momento de crear el contexto, a `"gpu"` si este build
 `GpuBackend` compilado, si no a `"cpu"`) y `precision` (opcional, por defecto `"fp64"`, único
 valor soportado hoy).
 
-## `ENGINE.CALC_BATCH` / `ENGINE.CALC_MANY` / `ENGINE.CALC_GRID` (PLAN.md §7.17/§7.19)
+## `ENGINE.PRICE_BATCH` / `ENGINE.PRICE_MANY` / `ENGINE.PRICE_GRID` (PLAN.md §7.17/§7.19)
 
 Tres niveles de la API de cálculo por lotes, cada uno construido sobre el anterior. Las tres
 reciben `trades` como una **columna** de handles de trade (`ENGINE.CREATE_PRODUCT`), no un
-handle suelto como `ENGINE.CALC` — mismo mecanismo que ya usa `medidas` (un rango de celdas de
+handle suelto como `ENGINE.PRICE` — mismo mecanismo que ya usa `medidas` (un rango de celdas de
 texto).
 
-- **`ENGINE.CALC_BATCH`** — lote *homogéneo*: todos los `trades` deben ser del mismo tipo de
+- **`ENGINE.PRICE_BATCH`** — lote *homogéneo*: todos los `trades` deben ser del mismo tipo de
   producto y, para `IRSwap`, compartir calendario (`start`/`payment_times`/`accruals`) y traer
-  `fixed_rate` explícito — a diferencia de `ENGINE.CALC`, el lote **no** soporta "a la par"
+  `fixed_rate` explícito — a diferencia de `ENGINE.PRICE`, el lote **no** soporta "a la par"
   (`fixed_rate` ausente): lanza `#VALUE!` si algún trade lo omite o si los calendarios no
   coinciden. Vectorizado sin bucle: el tipo corto se simula una única vez para todo el lote.
-- **`ENGINE.CALC_MANY`** — lote *heterogéneo*: misma firma y forma de resultado, pero admite
+- **`ENGINE.PRICE_MANY`** — lote *heterogéneo*: misma firma y forma de resultado, pero admite
   `trades` de tipos/calendarios distintos — los agrupa internamente por `(tipo, calendario)` y
-  llama a `ENGINE.CALC_BATCH` por grupo (grupos de tamaño 1 incluidos), recomponiendo el
+  llama a `ENGINE.PRICE_BATCH` por grupo (grupos de tamaño 1 incluidos), recomponiendo el
   resultado en el orden de entrada. Nunca falla por heterogeneidad.
-- **`ENGINE.CALC_GRID`** — la explosión de combinaciones **Trades × Modelos × Mercados**:
+- **`ENGINE.PRICE_GRID`** — la explosión de combinaciones **Trades × Modelos × Mercados**:
   `modelos`/`mercados` son también columnas de handles; por cada par (modelo, mercado) se
-  calcula `ENGINE.CALC_MANY` sobre `trades` entero. `Pricing`/`Compute` son compartidos, no
+  calcula `ENGINE.PRICE_MANY` sobre `trades` entero. `Pricing`/`Compute` son compartidos, no
   forman parte de la rejilla.
 
 ```
 Trades   =A1:A3      (columna de handles ENGINE.CREATE_PRODUCT, cada uno con fixed_rate propio)
-         =ENGINE.CALC_BATCH(Trades, {"PV";"UnilateralCVA"}, Model, Market, Pricing, Compute)
+         =ENGINE.PRICE_BATCH(Trades, {"PV";"UnilateralCVA"}, Model, Market, Pricing, Compute)
 
 ; o, con trades de calendarios distintos:
-         =ENGINE.CALC_MANY(Trades, {"PV"}, Model, Market, Pricing, Compute)
+         =ENGINE.PRICE_MANY(Trades, {"PV"}, Model, Market, Pricing, Compute)
 
 ; o, la rejilla completa:
 Models   =B1:B2      (columna de handles ENGINE.CREATE_MODEL)
 Markets  =C1:C2      (columna de handles ENGINE.CREATE_MARKET)
-         =ENGINE.CALC_GRID(Trades, {"PV";"UnilateralCVA"}, Models, Markets, Pricing, Compute)
+         =ENGINE.PRICE_GRID(Trades, {"PV";"UnilateralCVA"}, Models, Markets, Pricing, Compute)
 ```
 
-Las tres devuelven el mismo formato largo que `ENGINE.CALC` (`[MeasureName, Time, Value]`) con
-columnas de índice al frente — `ENGINE.CALC_BATCH`/`ENGINE.CALC_MANY` añaden `TradeIndex`
-(`[TradeIndex, MeasureName, Time, Value]`); `ENGINE.CALC_GRID` añade las tres
+Las tres devuelven el mismo formato largo que `ENGINE.PRICE` (`[MeasureName, Time, Value]`) con
+columnas de índice al frente — `ENGINE.PRICE_BATCH`/`ENGINE.PRICE_MANY` añaden `TradeIndex`
+(`[TradeIndex, MeasureName, Time, Value]`); `ENGINE.PRICE_GRID` añade las tres
 (`[TradeIndex, ModelIndex, MarketIndex, MeasureName, Time, Value]`). Cada índice es la posición
 (0-based) del trade/modelo/mercado correspondiente en la columna de handles de entrada — fácil
 de cruzar de vuelta con `INDICE`/`ÍNDICE` sobre esa misma columna si hace falta el handle o
@@ -154,7 +154,7 @@ Antes de esta fase (PLAN.md §7.12, ya retirado), el backend de cómputo era un 
 del proceso** (`ENGINE.SET_BACKEND`/`ENGINE.GET_BACKEND`) que leían todas las llamadas
 siguientes a `ENGINE.EVALUATE` — con el problema de que Excel no recalculaba automáticamente
 las celdas ya existentes al cambiar de backend (hacía falta Ctrl+Alt+Intro manual). Ahora el
-backend es un campo más de `ExecutionContext`, un argumento explícito de `ENGINE.CALC`: al ser
+backend es un campo más de `ExecutionContext`, un argumento explícito de `ENGINE.PRICE`: al ser
 un argumento normal de la fórmula, Excel sí recalcula automáticamente cuando cambia (por
 ejemplo, si `Compute` es una celda con `="cpu"`/`"gpu"` referenciada desde el rango de
 `ENGINE.CREATE_EXECUTION`).
@@ -220,8 +220,8 @@ CI (`windows-latest`, PLAN.md §7.4) no tiene Excel instalado, así que la capa 
 ("el mismo caso ejecutado desde Python y desde Excel debe producir el mismo resultado
 numérico") no puede automatizarse ahí. `clients/excel/tests/test_xloper.cpp` cubre la mitad
 que sí es automatizable (que el bridge invoca exactamente el mismo `engine::Registries`/
-`engine::calc` que Python, con los mismos parámetros/semillas que
-`test_calc.py`/`test_registry.cpp` — ver `HandleRegistry.ExpectedExposureAndPfe95MatchOtherClients`
+`engine::price` que Python, con los mismos parámetros/semillas que
+`test_price.py`/`test_registry.cpp` — ver `HandleRegistry.ExpectedExposureAndPfe95MatchOtherClients`
 y `HandleRegistry.UnilateralCvaIsPositiveForNonzeroHazardRate`); falta confirmar que **Excel
 real**, cargando el `.xll`, reproduce esos mismos números a través de `xlAutoOpen`/las UDFs
 exportadas. Pasos:
@@ -240,10 +240,10 @@ exportadas. Pasos:
 5. Rango de contexto de valoración: `pricing_date=0`, `n_paths=5000`, `n_steps=208`, `seed=7`.
    Rango de contexto de ejecución: `backend=cpu`, `precision=fp64`.
    `=ENGINE.CREATE_CONTEXT(<rango de arriba>)`, `=ENGINE.CREATE_EXECUTION(<rango de arriba>)`.
-6. `=ENGINE.CALC(<handle trade>, {"PV";"DV01";"ExpectedExposure";"PFE95";"UnilateralCVA"}, <handle modelo>, <handle mercado>, <handle contexto>, <handle ejecucion>)`
+6. `=ENGINE.PRICE(<handle trade>, {"PV";"DV01";"ExpectedExposure";"PFE95";"UnilateralCVA"}, <handle modelo>, <handle mercado>, <handle contexto>, <handle ejecucion>)`
    — con esta semilla (`seed=7`) debe "derramar" (mismos valores que
    `Registry.UnilateralCvaMatchesGoldenValue`/`Registry.ExposureProfileMatchesGoldenValue` en
-   `cpp/engine/tests/test_registry.cpp` y `test_calc.py` para `ExpectedExposure`/`PFE95`/
+   `cpp/engine/tests/test_registry.cpp` y `test_price.py` para `ExpectedExposure`/`PFE95`/
    `UnilateralCVA`; `PV`/`DV01` recalculados el 2026-09-11 tras PLAN_REAPI.md §6 Fase 4 --
    descuento por la curva de `Market` en vez del modelo, ver más abajo):
 
@@ -289,22 +289,22 @@ Excel, mismo motor C++/Rust por debajo). Actualizar esta sección si cambia el c
   bump-and-reval de un movimiento paralelo de `bump` (`Params` opcional de la medida, default
   0.0001) en todos los `zero_rates` de la curva.
 - **Errores siempre como `#VALUE!`**: cualquier excepción de C++ (parámetro faltante, tipo
-  no registrado, medida desconocida en `ENGINE.CALC`, medida incompatible con el
+  no registrado, medida desconocida en `ENGINE.PRICE`, medida incompatible con el
   modelo/producto) se traduce al mismo código de error de Excel, sin distinguir el motivo en
   la celda (sí se puede diferenciar poniendo un breakpoint/depurando el XLL, pero no hay UDF
   de "última razón de error" en esta fase).
 - **`xlAutoClose` no desregistra explícitamente las UDFs** (`xlfUnregister`/`xlfSetName`):
   solo libera los handles memoizados. Excel limpia el registro al descargar la DLL; no se ha
   observado que esto deje nombres huérfanos en sesiones normales de trabajo.
-- **`ENGINE.CALC_BATCH`/`ENGINE.CALC_MANY` no soportan `use_par_rate`** (PLAN.md §7.19): cada
+- **`ENGINE.PRICE_BATCH`/`ENGINE.PRICE_MANY` no soportan `use_par_rate`** (PLAN.md §7.19): cada
   trade del lote debe traer `fixed_rate` explícito — el primitivo Rust de lote no calcula "a la
-  par" por trade. `ENGINE.CALC_BATCH` además exige el mismo calendario
-  (`start`/`payment_times`/`accruals`) en todos los trades; `ENGINE.CALC_MANY` no tiene esa
-  restricción (agrupa internamente). `ENGINE.CALC_GRID` comparte `Pricing`/`Compute` entre
+  par" por trade. `ENGINE.PRICE_BATCH` además exige el mismo calendario
+  (`start`/`payment_times`/`accruals`) en todos los trades; `ENGINE.PRICE_MANY` no tiene esa
+  restricción (agrupa internamente). `ENGINE.PRICE_GRID` comparte `Pricing`/`Compute` entre
   todas las celdas de la rejilla — no forman parte de la explosión de combinaciones.
 - **`DV01` en lote no es una sola pasada de diferenciación automática** (PLAN.md §7.19): con
   `r0` compartido por todos los trades del lote, una única pasada solo da la *suma* de las
-  sensibilidades, no cada una por separado — `ENGINE.CALC_BATCH`/`ENGINE.CALC_MANY` calculan
+  sensibilidades, no cada una por separado — `ENGINE.PRICE_BATCH`/`ENGINE.PRICE_MANY` calculan
   `DV01` correctamente (una pasada por trade, internamente en Rust), pero sin el ahorro de
   cómputo que sí tienen `PV`/`ExpectedExposure`/`PFE95`/`UnilateralCVA` en lote — solo evitan
   los *round-trips* de Excel/C++/FFI, no el propio coste de diferenciar.

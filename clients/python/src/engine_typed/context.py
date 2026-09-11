@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, field_validator
 
 
 class PricingContext(BaseModel):
-    """Contexto de valoración de `Engine.calc` (`engine::PricingContext`, PLAN.md §7.15)."""
+    """Contexto de valoración de `Engine.price` (`engine::PricingContext`, PLAN.md §7.15)."""
 
     model_config = ConfigDict(frozen=True)
 
@@ -37,9 +37,9 @@ class PricingContext(BaseModel):
 
 
 class ExecutionContext(BaseModel):
-    """Cómo ejecutar `Engine.calc` (`engine::ExecutionContext`, PLAN.md §7.15). A diferencia
+    """Cómo ejecutar `Engine.price` (`engine::ExecutionContext`, PLAN.md §7.15). A diferencia
     del constructor C++ (donde "backend" es requerido), aquí tiene default "auto" -- misma
-    conveniencia que ya ofrece el ejemplo `calc_flow.py`."""
+    conveniencia que ya ofrece el ejemplo `price_flow.py`."""
 
     model_config = ConfigDict(frozen=True)
 

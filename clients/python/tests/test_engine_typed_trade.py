@@ -1,6 +1,6 @@
 """Tests de `engine_typed.TradeSpec`/`IRSwap` (PLAN_REAPI.md §6 Fase 1): construcción,
 rechazo de `fixed_rate` ausente, `IRSwap.par(...)`, `to_params()` y round-trip contra el
-`Engine` real -- mismo caso base que `clients/python/tests/test_calc.py`.
+`Engine` real -- mismo caso base que `clients/python/tests/test_price.py`.
 """
 
 import sys
@@ -66,8 +66,8 @@ def test_irswap_to_params_feeds_the_real_engine():
     pricing = engine.PricingContext({"pricing_date": 0.0, "n_paths": 1.0, "n_steps": 208.0, "seed": 1.0})
     execution = engine.ExecutionContext({"backend": "cpu", "precision": "fp64"})
 
-    result = eng.calc(product, ["PV"], model, market, pricing, execution)
-    assert result["PV"].has_scalar  # swap par: PV ~ 0, ya cubierto por test_calc.py
+    result = eng.price(product, ["PV"], model, market, pricing, execution)
+    assert result["PV"].has_scalar  # swap par: PV ~ 0, ya cubierto por test_price.py
 
 
 if __name__ == "__main__":

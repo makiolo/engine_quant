@@ -1,4 +1,4 @@
-//! Ejemplo de Rust consumiendo `engine/abi.h` (PLAN.md Fase 6, §5.5/§7.13; ENGINE.CALC en
+//! Ejemplo de Rust consumiendo `engine/abi.h` (PLAN.md Fase 6, §5.5/§7.13; ENGINE.PRICE en
 //! PLAN.md §7.15) vía FFI directa a C, SIN pasar por los crates internos
 //! `engine-core`/`engine-ffi` (esos hablan con la capa C++ vía `cxx`, un mecanismo distinto e
 //! interno) -- deliberado: demuestra que incluso Rust, que ya tiene acceso privilegiado al
@@ -81,7 +81,7 @@ struct EngineMeasureResult {
 }
 
 #[repr(C)]
-struct EngineCalcResultEntry {
+struct EnginePriceResultEntry {
     measure_name: *mut c_char,
     result: EngineMeasureResult,
 }
@@ -101,7 +101,7 @@ extern "C" {
     fn engine_abi_free_model(model: *mut EngineModel);
     fn engine_abi_free_product(product: *mut EngineProduct);
 
-    fn engine_abi_calc(
+    fn engine_abi_price(
         product: *const EngineProduct,
         measure_names: *const *const c_char,
         n_measure_names: usize,
@@ -109,10 +109,10 @@ extern "C" {
         market: *const EngineMarketSnapshot,
         pricing: *const EnginePricingContext,
         execution: *const EngineExecutionContext,
-        out_entries: *mut *mut EngineCalcResultEntry,
+        out_entries: *mut *mut EnginePriceResultEntry,
         out_count: *mut usize,
     ) -> c_int;
-    fn engine_abi_free_calc_results(entries: *mut EngineCalcResultEntry, count: usize);
+    fn engine_abi_free_price_results(entries: *mut EnginePriceResultEntry, count: usize);
 
     fn engine_abi_is_gpu_backend_available() -> c_int;
 
@@ -143,9 +143,9 @@ fn vector_param(key: &CStr, values: &[f64]) -> EngineParam {
     }
 }
 
-// Busca una medida por nombre en el array crudo que devuelve engine_abi_calc -- lifetime
-// ligado a `entries`, liberado explícitamente por el llamador con engine_abi_free_calc_results.
-unsafe fn find_measure<'a>(entries: &'a [EngineCalcResultEntry], name: &str) -> &'a EngineMeasureResult {
+// Busca una medida por nombre en el array crudo que devuelve engine_abi_price -- lifetime
+// ligado a `entries`, liberado explícitamente por el llamador con engine_abi_free_price_results.
+unsafe fn find_measure<'a>(entries: &'a [EnginePriceResultEntry], name: &str) -> &'a EngineMeasureResult {
     for entry in entries {
         if CStr::from_ptr(entry.measure_name).to_str() == Ok(name) {
             return &entry.result;
@@ -195,7 +195,7 @@ fn main() {
             panic!("engine_abi_create_product(IRSwap): {msg}");
         }
 
-        // --- ENGINE.CALC (PLAN.md §7.15): mismo caso base que cpp/engine/tests/
+        // --- ENGINE.PRICE (PLAN.md §7.15): mismo caso base que cpp/engine/tests/
         // test_registry.cpp (Registry.UnilateralCvaMatchesGoldenValue/
         // ExposureProfileMatchesGoldenValue), pero aquí basta con invariantes cualitativos --
         // esta sonda verifica el mecanismo de la ABI, no vuelve a fijar el numero exacto. -----
@@ -215,9 +215,9 @@ fn main() {
         let measure_names = [c_string("PV"), c_string("DV01"), c_string("ExpectedExposure"), c_string("PFE95"), c_string("UnilateralCVA")];
         let measure_name_ptrs: Vec<*const c_char> = measure_names.iter().map(|s| s.as_ptr()).collect();
 
-        let mut entries_ptr: *mut EngineCalcResultEntry = std::ptr::null_mut();
+        let mut entries_ptr: *mut EnginePriceResultEntry = std::ptr::null_mut();
         let mut entry_count: usize = 0;
-        let rc = engine_abi_calc(
+        let rc = engine_abi_price(
             product,
             measure_name_ptrs.as_ptr(),
             measure_name_ptrs.len(),
@@ -228,7 +228,7 @@ fn main() {
             &mut entries_ptr,
             &mut entry_count,
         );
-        assert_eq!(rc, 0, "engine_abi_calc: {}", last_error());
+        assert_eq!(rc, 0, "engine_abi_price: {}", last_error());
         let entries = std::slice::from_raw_parts(entries_ptr, entry_count);
 
         let pv = find_measure(entries, "PV");
@@ -253,17 +253,17 @@ fn main() {
             assert!(ee_values[i] >= 0.0 && pfe_values[i] >= ee_values[i], "se esperaba ExpectedExposure >= 0 y PFE95 >= ExpectedExposure");
         }
 
-        engine_abi_free_calc_results(entries_ptr, entry_count);
+        engine_abi_free_price_results(entries_ptr, entry_count);
 
         println!("gpu disponible: {}", if engine_abi_is_gpu_backend_available() != 0 { "si" } else { "no" });
 
-        // engine_abi_calc rechaza un nombre de medida desconocido (PLAN.md §7.15): el error
+        // engine_abi_price rechaza un nombre de medida desconocido (PLAN.md §7.15): el error
         // queda en engine_abi_last_error(), nunca panic/abort a traves de esta frontera C.
         let bad_name = c_string("NoExiste");
         let bad_name_ptrs = [bad_name.as_ptr()];
-        let mut bad_entries: *mut EngineCalcResultEntry = std::ptr::null_mut();
+        let mut bad_entries: *mut EnginePriceResultEntry = std::ptr::null_mut();
         let mut bad_count: usize = 0;
-        let rc = engine_abi_calc(
+        let rc = engine_abi_price(
             product, bad_name_ptrs.as_ptr(), 1, model, &market, &pricing, &execution, &mut bad_entries, &mut bad_count,
         );
         assert_ne!(rc, 0, "se esperaba error con un nombre de medida desconocido");
@@ -279,7 +279,7 @@ fn main() {
         assert!(unknown.is_null(), "se esperaba NULL al pedir un modelo inexistente");
         println!("error esperado al pedir un modelo inexistente: {}", last_error());
 
-        println!("OK: ejemplo de Rust sobre engine/abi.h (ENGINE.CALC) completado.");
+        println!("OK: ejemplo de Rust sobre engine/abi.h (ENGINE.PRICE) completado.");
     }
 }
 

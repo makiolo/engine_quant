@@ -107,7 +107,7 @@ mod ffi {
         fn is_gpu_backend_available() -> bool;
 
         // NPV determinista del IRS a t=0 y su sensibilidad a r0 (PLAN.md §7.15: medidas "PV"/
-        // "DV01" de ENGINE.CALC) — siempre en CpuBackend, ver `crate::api` para el porqué.
+        // "DV01" de ENGINE.PRICE) — siempre en CpuBackend, ver `crate::api` para el porqué.
         fn irs_hull_white_npv(
             a: f64,
             b: f64,
@@ -134,7 +134,7 @@ mod ffi {
             accruals: Vec<f64>,
         ) -> f64;
 
-        // Lote homogéneo (PLAN.md §7.17/§7.19): las cinco medidas de ENGINE.CALC vectorizadas
+        // Lote homogéneo (PLAN.md §7.17/§7.19): las cinco medidas de ENGINE.PRICE vectorizadas
         // sobre N trades del mismo tipo/calendario, sin bucle escalar en la frontera C++ --
         // notionals/fixed_rates son columnas, un valor por trade. `irs_hull_white_npv_batch`
         // ya existía en `engine_core::api` pero sin bridgear a C++ (§7.17 la dejó como

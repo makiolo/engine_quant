@@ -1,11 +1,11 @@
 """Medidas tipadas (PLAN_REAPI.md §6 Fase 3, propuesta 3): `q.PV()`, `q.DV01(bump=0.0002)`,
 `q.ExposureProfile()`, `q.UnilateralCVA()` en vez de strings sueltos. `.to_spec()` produce la
-tupla `(nombre, params)` que ya acepta `Engine.calc`/`calc_batch`/`calc_many`/`calc_grid`
+tupla `(nombre, params)` que ya acepta `Engine.price`/`price_batch`/`price_many`/`price_grid`
 (`clients/python/src/engine_py_ext.cpp::to_measure_spec`) -- un string "pelado" sigue
-funcionando igual (`eng.calc(product, ["PV", "DV01"], ...)`), `.to_spec()` es solo necesario
+funcionando igual (`eng.price(product, ["PV", "DV01"], ...)`), `.to_spec()` es solo necesario
 cuando una medida lleva configuración real.
 
-    result = eng.calc(product, [q.PV().to_spec(), q.DV01(bump=0.0002).to_spec()], ...)
+    result = eng.price(product, [q.PV().to_spec(), q.DV01(bump=0.0002).to_spec()], ...)
 """
 
 from typing import ClassVar, Tuple
@@ -23,7 +23,7 @@ class Measure(BaseModel):
         raise NotImplementedError
 
     def to_spec(self) -> Tuple[str, dict]:
-        """`(nombre, params)`: lo que espera `Engine.calc(...)` para pasar configuración por
+        """`(nombre, params)`: lo que espera `Engine.price(...)` para pasar configuración por
         medida (PLAN_REAPI.md §6 Fase 3)."""
         return (self.measure_name, self.to_params())
 

@@ -55,12 +55,12 @@ struct ProductHandle {
     EngineProduct* ptr;
     ~ProductHandle() { engine_abi_free_product(ptr); }
 };
-struct CalcResultsHandle {
-    EngineCalcResultEntry* entries = nullptr;
+struct PriceResultsHandle {
+    EnginePriceResultEntry* entries = nullptr;
     std::size_t count = 0;
-    ~CalcResultsHandle() { engine_abi_free_calc_results(entries, count); }
+    ~PriceResultsHandle() { engine_abi_free_price_results(entries, count); }
 
-    const EngineCalcResultEntry* find(const char* name) const {
+    const EnginePriceResultEntry* find(const char* name) const {
         for (std::size_t i = 0; i < count; ++i) {
             if (std::strcmp(entries[i].measure_name, name) == 0) return &entries[i];
         }
@@ -108,7 +108,7 @@ struct ParIrs5y {
     }
 };
 
-// Con fixed_rate explícito (PLAN.md §7.19): engine_abi_calc_batch/_many no soportan
+// Con fixed_rate explícito (PLAN.md §7.19): engine_abi_price_batch/_many no soportan
 // use_par_rate, a diferencia de ParIrs5y.
 struct Irs5y {
     double notional;
@@ -144,19 +144,19 @@ struct Irs3y {
     }
 };
 
-struct CalcBatchResultsHandle {
-    EngineCalcBatchResultEntry* entries = nullptr;
+struct PriceBatchResultsHandle {
+    EnginePriceBatchResultEntry* entries = nullptr;
     std::size_t count = 0;
-    ~CalcBatchResultsHandle() { engine_abi_free_calc_batch_results(entries, count); }
+    ~PriceBatchResultsHandle() { engine_abi_free_price_batch_results(entries, count); }
 };
 
-struct CalcGridResultsHandle {
-    EngineCalcGridResultEntry* entries = nullptr;
+struct PriceGridResultsHandle {
+    EnginePriceGridResultEntry* entries = nullptr;
     std::size_t count = 0;
-    ~CalcGridResultsHandle() { engine_abi_free_calc_grid_results(entries, count); }
+    ~PriceGridResultsHandle() { engine_abi_free_price_grid_results(entries, count); }
 };
 
-const EngineCalcResultEntry* find_measure(const EngineCalcResultEntry* entries, std::size_t count, const char* name) {
+const EnginePriceResultEntry* find_measure(const EnginePriceResultEntry* entries, std::size_t count, const char* name) {
     for (std::size_t i = 0; i < count; ++i) {
         if (std::strcmp(entries[i].measure_name, name) == 0) return &entries[i];
     }
@@ -166,7 +166,7 @@ const EngineCalcResultEntry* find_measure(const EngineCalcResultEntry* entries, 
 } // namespace
 
 TEST(Abi, VersionIsAtLeastTwo) {
-    // Version 2 (PLAN.md §7.15): engine_abi_calc sustituye a engine_abi_create_measure/
+    // Version 2 (PLAN.md §7.15): engine_abi_price sustituye a engine_abi_create_measure/
     // engine_abi_evaluate, EngineMarketSnapshot gana hazard_rate/recovery_rate.
     EXPECT_GE(engine_abi_version(), 2);
 }
@@ -197,7 +197,7 @@ TEST(Abi, ListModelsIncludesHullWhite2F) {
     engine_abi_free_string_list(names, count);
 }
 
-TEST(Abi, ListMeasuresIncludesTheFiveCalcNames) {
+TEST(Abi, ListMeasuresIncludesTheFivePriceNames) {
     const char** names = nullptr;
     std::size_t count = engine_abi_list_measures(&names);
     ASSERT_GT(count, 0u);
@@ -224,9 +224,9 @@ TEST(Abi, CreateUnknownModelReturnsNullAndSetsLastError) {
 
 TEST(Abi, CalcRejectsNullHandles) {
     const char* names[] = {"PV"};
-    EngineCalcResultEntry* entries = nullptr;
+    EnginePriceResultEntry* entries = nullptr;
     std::size_t count = 0;
-    int rc = engine_abi_calc(nullptr, names, 1, nullptr, nullptr, nullptr, nullptr, &entries, &count);
+    int rc = engine_abi_price(nullptr, names, 1, nullptr, nullptr, nullptr, nullptr, &entries, &count);
     EXPECT_NE(rc, 0);
     EXPECT_EQ(entries, nullptr);
     EXPECT_EQ(count, 0u);
@@ -254,9 +254,9 @@ TEST(Abi, CalcRejectsUnknownMeasureName) {
     execution.precision = "FP64";
 
     const char* names[] = {"NoExiste"};
-    EngineCalcResultEntry* entries = nullptr;
+    EnginePriceResultEntry* entries = nullptr;
     std::size_t count = 0;
-    int rc = engine_abi_calc(
+    int rc = engine_abi_price(
         product.ptr, names, 1, model.ptr, &market, &pricing, &execution, &entries, &count);
     EXPECT_NE(rc, 0);
     EXPECT_EQ(entries, nullptr);
@@ -287,28 +287,28 @@ TEST(Abi, CalcComputesAllFiveMeasuresInOneBatch) {
     execution.precision = "FP64";
 
     const char* names[] = {"PV", "DV01", "ExpectedExposure", "PFE95", "UnilateralCVA"};
-    CalcResultsHandle results;
-    int rc = engine_abi_calc(
+    PriceResultsHandle results;
+    int rc = engine_abi_price(
         product.ptr, names, 5, model.ptr, &market, &pricing, &execution, &results.entries, &results.count);
     ASSERT_EQ(rc, 0) << last_error();
     ASSERT_EQ(results.count, 5u);
 
-    const EngineCalcResultEntry* pv = results.find("PV");
+    const EnginePriceResultEntry* pv = results.find("PV");
     ASSERT_NE(pv, nullptr);
     EXPECT_TRUE(pv->result.has_scalar);
     EXPECT_NEAR(pv->result.scalar, 0.0, 1e-6); // swap a la par: NPV ~ 0 en start
 
-    const EngineCalcResultEntry* dv01 = results.find("DV01");
+    const EnginePriceResultEntry* dv01 = results.find("DV01");
     ASSERT_NE(dv01, nullptr);
     EXPECT_TRUE(dv01->result.has_scalar);
     EXPECT_GT(dv01->result.scalar, 0.0); // swap pagador: sube de valor cuando suben los tipos
 
     // ExpectedExposure/PFE95 comparten una sola simulación (PLAN.md §7.15): 5 fechas de
     // reseteo auto-derivadas del swap (0,1,2,3,4), no una lista pedida a mano.
-    const EngineCalcResultEntry* ee = results.find("ExpectedExposure");
+    const EnginePriceResultEntry* ee = results.find("ExpectedExposure");
     ASSERT_NE(ee, nullptr);
     ASSERT_EQ(ee->result.len, 5u);
-    const EngineCalcResultEntry* pfe = results.find("PFE95");
+    const EnginePriceResultEntry* pfe = results.find("PFE95");
     ASSERT_NE(pfe, nullptr);
     ASSERT_EQ(pfe->result.len, 5u);
     for (std::size_t i = 0; i < ee->result.len; ++i) {
@@ -316,13 +316,13 @@ TEST(Abi, CalcComputesAllFiveMeasuresInOneBatch) {
         EXPECT_GE(pfe->result.primary[i], ee->result.primary[i]);
     }
 
-    const EngineCalcResultEntry* cva = results.find("UnilateralCVA");
+    const EnginePriceResultEntry* cva = results.find("UnilateralCVA");
     ASSERT_NE(cva, nullptr);
     EXPECT_TRUE(cva->result.has_scalar);
     EXPECT_GT(cva->result.scalar, 0.0);
 }
 
-// Interfaz homogénea (PLAN.md §7.16) llevada hasta la ABI en C: mismo engine_abi_calc, mismo
+// Interfaz homogénea (PLAN.md §7.16) llevada hasta la ABI en C: mismo engine_abi_price, mismo
 // EngineModel* opaco, solo cambia el nombre pasado a engine_abi_create_model -- ni un
 // consumidor en Julia/.NET/Go tendría que distinguir HullWhite1F de HullWhite2F salvo por el
 // nombre y los parámetros.
@@ -350,26 +350,26 @@ TEST(Abi, CalcComputesAllFiveMeasuresInOneBatchUnderHullWhite2F) {
     execution.precision = "FP64";
 
     const char* names[] = {"PV", "DV01", "ExpectedExposure", "PFE95", "UnilateralCVA"};
-    CalcResultsHandle results;
-    int rc = engine_abi_calc(
+    PriceResultsHandle results;
+    int rc = engine_abi_price(
         product.ptr, names, 5, model.ptr, &market, &pricing, &execution, &results.entries, &results.count);
     ASSERT_EQ(rc, 0) << last_error();
     ASSERT_EQ(results.count, 5u);
 
-    const EngineCalcResultEntry* pv = results.find("PV");
+    const EnginePriceResultEntry* pv = results.find("PV");
     ASSERT_NE(pv, nullptr);
     EXPECT_TRUE(pv->result.has_scalar);
     EXPECT_NEAR(pv->result.scalar, 0.0, 1e-6);
 
-    const EngineCalcResultEntry* dv01 = results.find("DV01");
+    const EnginePriceResultEntry* dv01 = results.find("DV01");
     ASSERT_NE(dv01, nullptr);
     EXPECT_TRUE(dv01->result.has_scalar);
     EXPECT_GT(dv01->result.scalar, 0.0);
 
-    const EngineCalcResultEntry* ee = results.find("ExpectedExposure");
+    const EnginePriceResultEntry* ee = results.find("ExpectedExposure");
     ASSERT_NE(ee, nullptr);
     ASSERT_EQ(ee->result.len, 5u);
-    const EngineCalcResultEntry* pfe = results.find("PFE95");
+    const EnginePriceResultEntry* pfe = results.find("PFE95");
     ASSERT_NE(pfe, nullptr);
     ASSERT_EQ(pfe->result.len, 5u);
     for (std::size_t i = 0; i < ee->result.len; ++i) {
@@ -377,15 +377,15 @@ TEST(Abi, CalcComputesAllFiveMeasuresInOneBatchUnderHullWhite2F) {
         EXPECT_GE(pfe->result.primary[i], ee->result.primary[i]);
     }
 
-    const EngineCalcResultEntry* cva = results.find("UnilateralCVA");
+    const EnginePriceResultEntry* cva = results.find("UnilateralCVA");
     ASSERT_NE(cva, nullptr);
     EXPECT_TRUE(cva->result.has_scalar);
     EXPECT_GT(cva->result.scalar, 0.0);
 }
 
-// PLAN.md §7.19: engine_abi_calc_batch (lote homogéneo) debe coincidir, trade a trade, con
-// llamar a engine_abi_calc una vez por trade.
-TEST(Abi, CalcBatchMatchesALoopOfScalarCallsPerTrade) {
+// PLAN.md §7.19: engine_abi_price_batch (lote homogéneo) debe coincidir, trade a trade, con
+// llamar a engine_abi_price una vez por trade.
+TEST(Abi, PriceBatchMatchesALoopOfScalarCallsPerTrade) {
     ModelHandle model = create_hull_white();
     Irs5y irs_a{1'000'000.0, 0.02};
     Irs5y irs_b{2'500'000.0, 0.015};
@@ -414,22 +414,22 @@ TEST(Abi, CalcBatchMatchesALoopOfScalarCallsPerTrade) {
     const char* names[] = {"PV", "DV01", "ExpectedExposure", "PFE95", "UnilateralCVA"};
     const EngineProduct* products[] = {product_a.ptr, product_b.ptr, product_c.ptr};
 
-    CalcBatchResultsHandle batch;
-    int rc = engine_abi_calc_batch(
+    PriceBatchResultsHandle batch;
+    int rc = engine_abi_price_batch(
         products, 3, names, 5, model.ptr, &market, &pricing, &execution, &batch.entries, &batch.count);
     ASSERT_EQ(rc, 0) << last_error();
     ASSERT_EQ(batch.count, 3u);
 
     for (std::size_t i = 0; i < 3; ++i) {
         EXPECT_EQ(batch.entries[i].trade_index, i);
-        CalcResultsHandle scalar;
-        int scalar_rc = engine_abi_calc(
+        PriceResultsHandle scalar;
+        int scalar_rc = engine_abi_price(
             products[i], names, 5, model.ptr, &market, &pricing, &execution, &scalar.entries, &scalar.count);
         ASSERT_EQ(scalar_rc, 0) << last_error();
 
         for (const char* name : names) {
-            const EngineCalcResultEntry* from_batch = find_measure(batch.entries[i].measures, batch.entries[i].n_measures, name);
-            const EngineCalcResultEntry* from_scalar = find_measure(scalar.entries, scalar.count, name);
+            const EnginePriceResultEntry* from_batch = find_measure(batch.entries[i].measures, batch.entries[i].n_measures, name);
+            const EnginePriceResultEntry* from_scalar = find_measure(scalar.entries, scalar.count, name);
             ASSERT_NE(from_batch, nullptr);
             ASSERT_NE(from_scalar, nullptr);
             if (from_scalar->result.has_scalar) {
@@ -444,7 +444,7 @@ TEST(Abi, CalcBatchMatchesALoopOfScalarCallsPerTrade) {
     }
 }
 
-TEST(Abi, CalcBatchRejectsMismatchedCalendars) {
+TEST(Abi, PriceBatchRejectsMismatchedCalendars) {
     ModelHandle model = create_hull_white();
     Irs5y irs_5y{1'000'000.0, 0.02};
     Irs3y irs_3y{1'000'000.0, 0.02};
@@ -467,16 +467,16 @@ TEST(Abi, CalcBatchRejectsMismatchedCalendars) {
 
     const char* names[] = {"PV"};
     const EngineProduct* products[] = {product_5y.ptr, product_3y.ptr};
-    CalcBatchResultsHandle batch;
-    int rc = engine_abi_calc_batch(
+    PriceBatchResultsHandle batch;
+    int rc = engine_abi_price_batch(
         products, 2, names, 1, model.ptr, &market, &pricing, &execution, &batch.entries, &batch.count);
     EXPECT_NE(rc, 0);
     EXPECT_FALSE(last_error().empty());
 }
 
-// PLAN.md §7.19, Nivel 2: engine_abi_calc_many agrupa internamente por calendario y nunca
-// falla por heterogeneidad (a diferencia de engine_abi_calc_batch en el test anterior).
-TEST(Abi, CalcManyGroupsHeterogeneousCalendars) {
+// PLAN.md §7.19, Nivel 2: engine_abi_price_many agrupa internamente por calendario y nunca
+// falla por heterogeneidad (a diferencia de engine_abi_price_batch en el test anterior).
+TEST(Abi, PriceManyGroupsHeterogeneousCalendars) {
     ModelHandle model = create_hull_white();
     Irs5y irs_5y{1'000'000.0, 0.02};
     Irs3y irs_3y{2'000'000.0, 0.018};
@@ -501,8 +501,8 @@ TEST(Abi, CalcManyGroupsHeterogeneousCalendars) {
 
     const char* names[] = {"PV"};
     const EngineProduct* products[] = {product_5y.ptr, product_3y.ptr};
-    CalcBatchResultsHandle many;
-    int rc = engine_abi_calc_many(
+    PriceBatchResultsHandle many;
+    int rc = engine_abi_price_many(
         products, 2, names, 1, model.ptr, &market, &pricing, &execution, &many.entries, &many.count);
     ASSERT_EQ(rc, 0) << last_error();
     ASSERT_EQ(many.count, 2u);
@@ -510,8 +510,8 @@ TEST(Abi, CalcManyGroupsHeterogeneousCalendars) {
     EXPECT_EQ(many.entries[1].trade_index, 1u);
 }
 
-// PLAN.md §7.19: engine_abi_calc_grid explota Trades x Models x Markets.
-TEST(Abi, CalcGridComputesTradesTimesModelsTimesMarkets) {
+// PLAN.md §7.19: engine_abi_price_grid explota Trades x Models x Markets.
+TEST(Abi, PriceGridComputesTradesTimesModelsTimesMarkets) {
     ModelHandle model_1f = create_hull_white();
     ModelHandle model_2f = create_hull_white_2f();
     Irs5y irs_a{1'000'000.0, 0.02};
@@ -547,8 +547,8 @@ TEST(Abi, CalcGridComputesTradesTimesModelsTimesMarkets) {
     const EngineModel* models[] = {model_1f.ptr, model_2f.ptr};
     EngineMarketSnapshot markets[] = {market_a, market_b};
 
-    CalcGridResultsHandle grid;
-    int rc = engine_abi_calc_grid(
+    PriceGridResultsHandle grid;
+    int rc = engine_abi_price_grid(
         products, 2, names, 2, models, 2, markets, 2, &pricing, &execution, &grid.entries, &grid.count);
     ASSERT_EQ(rc, 0) << last_error();
     ASSERT_EQ(grid.count, 8u); // 2 trades x 2 models x 2 markets
@@ -558,13 +558,13 @@ TEST(Abi, CalcGridComputesTradesTimesModelsTimesMarkets) {
         EXPECT_LT(cell.trade_index, 2u);
         EXPECT_LT(cell.model_index, 2u);
         EXPECT_LT(cell.market_index, 2u);
-        const EngineCalcResultEntry* pv = find_measure(cell.measures, cell.n_measures, "PV");
+        const EnginePriceResultEntry* pv = find_measure(cell.measures, cell.n_measures, "PV");
         ASSERT_NE(pv, nullptr);
         EXPECT_TRUE(pv->result.has_scalar);
     }
 }
 
-TEST(Abi, CalcGridRejectsEmptyModelsOrMarkets) {
+TEST(Abi, PriceGridRejectsEmptyModelsOrMarkets) {
     ModelHandle model = create_hull_white();
     Irs5y irs{1'000'000.0, 0.02};
     ProductHandle product = irs.create();
@@ -586,8 +586,8 @@ TEST(Abi, CalcGridRejectsEmptyModelsOrMarkets) {
     const EngineProduct* products[] = {product.ptr};
     const EngineModel* models[] = {model.ptr};
 
-    CalcGridResultsHandle grid;
-    int rc = engine_abi_calc_grid(
+    PriceGridResultsHandle grid;
+    int rc = engine_abi_price_grid(
         products, 1, names, 1, models, 0, &market, 1, &pricing, &execution, &grid.entries, &grid.count);
     EXPECT_NE(rc, 0);
     EXPECT_FALSE(last_error().empty());

@@ -8,7 +8,7 @@
 #include <nanobind/stl/unique_ptr.h>
 #include <nanobind/stl/vector.h>
 
-#include "engine/calc.hpp"
+#include "engine/price.hpp"
 #include "engine/calibrator.hpp"
 #include "engine/engine.hpp"
 
@@ -42,7 +42,7 @@ engine::Params dict_to_params(const nb::dict& params) {
     return result;
 }
 
-// Traduce un elemento de la lista `measures` de Engine.calc/calc_batch/calc_many/calc_grid a
+// Traduce un elemento de la lista `measures` de Engine.price/price_batch/price_many/price_grid a
 // un engine::MeasureSpec (PLAN_REAPI.md §6 Fase 3): un string "pelado" (measure_names de
 // siempre, PLAN.md §7.15/§7.19) es MeasureSpec{name, {}}; una tupla (nombre, dict) es
 // MeasureSpec{name, dict_to_params(dict)} -- así engine_typed.DV01(bump=...).to_spec() (una
@@ -54,13 +54,13 @@ engine::MeasureSpec to_measure_spec(nb::handle item) {
     if (nb::isinstance<nb::tuple>(item)) {
         nb::tuple spec = nb::borrow<nb::tuple>(item);
         if (spec.size() != 2) {
-            throw std::invalid_argument("Engine.calc: una medida-tupla debe ser (nombre, params)");
+            throw std::invalid_argument("Engine.price: una medida-tupla debe ser (nombre, params)");
         }
         std::string name = nb::cast<std::string>(spec[0]);
         nb::dict params = nb::cast<nb::dict>(spec[1]);
         return engine::MeasureSpec{std::move(name), dict_to_params(params)};
     }
-    throw std::invalid_argument("Engine.calc: cada medida debe ser un string o una tupla (nombre, params)");
+    throw std::invalid_argument("Engine.price: cada medida debe ser un string o una tupla (nombre, params)");
 }
 
 std::vector<engine::MeasureSpec> to_measure_specs(const nb::list& measures) {
@@ -86,7 +86,7 @@ nb::dict params_to_dict(const engine::Params& params) {
 
 // Envuelve engine::Registries + register_builtins (PLAN.md §5.4, §7.6) en un único objeto
 // Python: se instancia una vez (register_builtins se ejecuta en el constructor) y expone
-// list_*/create_*/calc como métodos, en vez de dejar que el cliente Python tenga que llamar a
+// list_*/create_*/price como métodos, en vez de dejar que el cliente Python tenga que llamar a
 // una función de bootstrap suelta.
 class Engine {
 public:
@@ -94,11 +94,11 @@ public:
 
     std::vector<std::string> list_models() const { return registries_.models.list(); }
     std::vector<std::string> list_products() const { return registries_.products.list(); }
-    // Nombres de ENGINE.CALC (PLAN.md §7.15: "PV"/"DV01"/"ExpectedExposure"/"PFE95"/
+    // Nombres de ENGINE.PRICE (PLAN.md §7.15: "PV"/"DV01"/"ExpectedExposure"/"PFE95"/
     // "UnilateralCVA"), no los nombres registrados en Registry<IMeasure> -- ese registro
     // sigue siendo el mecanismo de extensión (PLAN.md §5.4), pero ya no se expone
-    // directamente: se consume a través de calc().
-    std::vector<std::string> list_measures() const { return engine::calc_measure_names(registries_); }
+    // directamente: se consume a través de price().
+    std::vector<std::string> list_measures() const { return engine::price_measure_names(registries_); }
     std::vector<std::string> list_calibrators() const { return registries_.calibrators.list(); }
 
     std::unique_ptr<engine::IModel> create_model(const std::string& name, const nb::dict& params) const {
@@ -117,7 +117,7 @@ public:
     // de medidas de una vez, devolviendo un dict {nombre: MeasureResult} en vez de una medida
     // a la vez con un dict de parámetros genérico. Cada elemento de `measures` es un string
     // "pelado" o una tupla (nombre, params) -- PLAN_REAPI.md §6 Fase 3, ver to_measure_spec.
-    nb::dict calc(
+    nb::dict price(
         const engine::IProduct& product,
         const nb::list& measures,
         const engine::IModel& model,
@@ -125,8 +125,8 @@ public:
         const engine::PricingContext& pricing,
         const engine::ExecutionContext& execution
     ) const {
-        engine::CalcResult result =
-            engine::calc(registries_, product, to_measure_specs(measures), model, market, pricing, execution);
+        engine::PriceResult result =
+            engine::price(registries_, product, to_measure_specs(measures), model, market, pricing, execution);
         nb::dict out;
         for (const auto& entry : result) {
             out[entry.measure_name.c_str()] = entry.result;
@@ -136,9 +136,9 @@ public:
 
     // Nivel 3, lote homogéneo (PLAN.md §7.17/§7.19): `products` debe ser del mismo tipo
     // registrado y, para IRSwap, compartir calendario y traer fixed_rate explícito (sin
-    // use_par_rate) -- ver engine::calc_batch. Devuelve list[BatchResult], no una lista
+    // use_par_rate) -- ver engine::price_batch. Devuelve list[BatchResult], no una lista
     // anidada: cada fila lleva su trade_index explícito, misma filosofía en las cinco capas.
-    std::vector<engine::CalcBatchResultEntry> calc_batch(
+    std::vector<engine::PriceBatchResultEntry> price_batch(
         const std::vector<const engine::IProduct*>& products,
         const nb::list& measures,
         const engine::IModel& model,
@@ -146,13 +146,13 @@ public:
         const engine::PricingContext& pricing,
         const engine::ExecutionContext& execution
     ) const {
-        return engine::calc_batch(registries_, products, to_measure_specs(measures), model, market, pricing, execution);
+        return engine::price_batch(registries_, products, to_measure_specs(measures), model, market, pricing, execution);
     }
 
     // Nivel 2, lista heterogénea (PLAN.md §7.17/§7.19): misma forma de resultado que
-    // calc_batch, pero products puede mezclar tipos/calendarios distintos -- se agrupan
-    // internamente y nunca falla por heterogeneidad (ver engine::calc_many).
-    std::vector<engine::CalcBatchResultEntry> calc_many(
+    // price_batch, pero products puede mezclar tipos/calendarios distintos -- se agrupan
+    // internamente y nunca falla por heterogeneidad (ver engine::price_many).
+    std::vector<engine::PriceBatchResultEntry> price_many(
         const std::vector<const engine::IProduct*>& products,
         const nb::list& measures,
         const engine::IModel& model,
@@ -160,12 +160,12 @@ public:
         const engine::PricingContext& pricing,
         const engine::ExecutionContext& execution
     ) const {
-        return engine::calc_many(registries_, products, to_measure_specs(measures), model, market, pricing, execution);
+        return engine::price_many(registries_, products, to_measure_specs(measures), model, market, pricing, execution);
     }
 
     // Explosión de combinaciones Trades x Models x Markets (PLAN.md §7.19): pricing/execution
-    // son compartidos, no forman parte de la rejilla -- ver engine::calc_grid.
-    std::vector<engine::CalcGridResultEntry> calc_grid(
+    // son compartidos, no forman parte de la rejilla -- ver engine::price_grid.
+    std::vector<engine::PriceGridResultEntry> price_grid(
         const std::vector<const engine::IProduct*>& products,
         const nb::list& measures,
         const std::vector<const engine::IModel*>& models,
@@ -173,17 +173,17 @@ public:
         const engine::PricingContext& pricing,
         const engine::ExecutionContext& execution
     ) const {
-        return engine::calc_grid(registries_, products, to_measure_specs(measures), models, markets, pricing, execution);
+        return engine::price_grid(registries_, products, to_measure_specs(measures), models, markets, pricing, execution);
     }
 
 private:
     engine::Registries registries_;
 };
 
-// Traduce un engine::CalcResult (usado dentro de BatchResult/GridResult) a un dict
-// {nombre_medida: MeasureResult} -- misma forma que ya devuelve Engine.calc, extraída aquí
+// Traduce un engine::PriceResult (usado dentro de BatchResult/GridResult) a un dict
+// {nombre_medida: MeasureResult} -- misma forma que ya devuelve Engine.price, extraída aquí
 // para no duplicarla entre BatchResult y GridResult (PLAN.md §7.19).
-nb::dict calc_result_to_dict(const engine::CalcResult& result) {
+nb::dict calc_result_to_dict(const engine::PriceResult& result) {
     nb::dict out;
     for (const auto& entry : result) {
         out[entry.measure_name.c_str()] = entry.result;
@@ -195,7 +195,7 @@ nb::dict calc_result_to_dict(const engine::CalcResult& result) {
 
 // Fase 0: cadena de humo del pipeline de build (PLAN.md §7.1).
 // Fase 3 (PLAN.md §6): binding 1:1 (o casi) con la API pública del registry C++ de Fase 2
-// (Registries/register_builtins/Registry<T>::create/engine::calc, PLAN.md §7.6/§7.15), además
+// (Registries/register_builtins/Registry<T>::create/engine::price, PLAN.md §7.6/§7.15), además
 // de las funciones de cadena de humo ampliada que ya se exponían desde Fase 0-1 (siguen
 // existiendo tal cual, PLAN.md §7.6).
 NB_MODULE(engine, m) {
@@ -280,27 +280,27 @@ NB_MODULE(engine, m) {
                    " has_scalar=" + (self.has_scalar ? std::string("True") : std::string("False")) + ">";
         });
 
-    // --- calc_batch / calc_many / calc_grid (PLAN.md §7.17/§7.19) ---
+    // --- price_batch / price_many / price_grid (PLAN.md §7.17/§7.19) ---
     // Cada fila lleva su(s) índice(s) explícito(s) -- nunca una lista anidada -- misma
     // filosofía en las cinco capas (C++/C ABI/Python/Excel).
 
-    nb::class_<engine::CalcBatchResultEntry>(m, "BatchResult")
-        .def_ro("trade_index", &engine::CalcBatchResultEntry::trade_index)
+    nb::class_<engine::PriceBatchResultEntry>(m, "BatchResult")
+        .def_ro("trade_index", &engine::PriceBatchResultEntry::trade_index)
         .def_prop_ro(
-            "measures", [](const engine::CalcBatchResultEntry& self) { return calc_result_to_dict(self.measures); }
+            "measures", [](const engine::PriceBatchResultEntry& self) { return calc_result_to_dict(self.measures); }
         )
-        .def("__repr__", [](const engine::CalcBatchResultEntry& self) {
+        .def("__repr__", [](const engine::PriceBatchResultEntry& self) {
             return "<BatchResult trade_index=" + std::to_string(self.trade_index) + ">";
         });
 
-    nb::class_<engine::CalcGridResultEntry>(m, "GridResult")
-        .def_ro("trade_index", &engine::CalcGridResultEntry::trade_index)
-        .def_ro("model_index", &engine::CalcGridResultEntry::model_index)
-        .def_ro("market_index", &engine::CalcGridResultEntry::market_index)
+    nb::class_<engine::PriceGridResultEntry>(m, "GridResult")
+        .def_ro("trade_index", &engine::PriceGridResultEntry::trade_index)
+        .def_ro("model_index", &engine::PriceGridResultEntry::model_index)
+        .def_ro("market_index", &engine::PriceGridResultEntry::market_index)
         .def_prop_ro(
-            "measures", [](const engine::CalcGridResultEntry& self) { return calc_result_to_dict(self.measures); }
+            "measures", [](const engine::PriceGridResultEntry& self) { return calc_result_to_dict(self.measures); }
         )
-        .def("__repr__", [](const engine::CalcGridResultEntry& self) {
+        .def("__repr__", [](const engine::PriceGridResultEntry& self) {
             return "<GridResult trade_index=" + std::to_string(self.trade_index) +
                    " model_index=" + std::to_string(self.model_index) +
                    " market_index=" + std::to_string(self.market_index) + ">";
@@ -319,7 +319,7 @@ NB_MODULE(engine, m) {
             "un instante dado: pillars (anios desde hoy, estrictamente creciente) + "
             "zero_rates (tipos cero de capitalizacion continua, mismo largo). "
             "hazard_rate/recovery_rate (opcionales, default 0.0) son datos de credito que "
-            "solo usa la medida 'UnilateralCVA' de Engine.calc."
+            "solo usa la medida 'UnilateralCVA' de Engine.price."
         )
         .def_prop_ro("pillars", &engine::MarketSnapshot::pillars)
         .def_prop_ro("zero_rates", &engine::MarketSnapshot::zero_rates)
@@ -368,7 +368,7 @@ NB_MODULE(engine, m) {
                 new (self) engine::PricingContext(dict_to_params(params));
             },
             nb::arg("params"),
-            "Contexto de valoracion de Engine.calc (PLAN.md §7.15): dict con 'pricing_date' "
+            "Contexto de valoracion de Engine.price (PLAN.md §7.15): dict con 'pricing_date' "
             "(opcional, default 0.0 -- metadato, sin aritmetica de calendario todavia), "
             "'n_paths', 'n_steps' y 'seed' (todos requeridos)."
         )
@@ -388,7 +388,7 @@ NB_MODULE(engine, m) {
                 new (self) engine::ExecutionContext(dict_to_params(params));
             },
             nb::arg("params"),
-            "Como ejecutar Engine.calc (PLAN.md §7.15, sustituye el backend global de la Fase "
+            "Como ejecutar Engine.price (PLAN.md §7.15, sustituye el backend global de la Fase "
             "5/§7.12): dict con 'backend' ('cpu'/'gpu'/'auto', resuelto aqui mismo) y "
             "'precision' (opcional, default 'fp64' -- unico valor soportado hoy)."
         )
@@ -435,8 +435,8 @@ NB_MODULE(engine, m) {
         .def("create_product", &Engine::create_product, nb::arg("name"), nb::arg("params") = nb::dict())
         .def("create_calibrator", &Engine::create_calibrator, nb::arg("name"))
         .def(
-            "calc",
-            &Engine::calc,
+            "price",
+            &Engine::price,
             nb::arg("product"),
             nb::arg("measure_names"),
             nb::arg("model"),
@@ -446,12 +446,12 @@ NB_MODULE(engine, m) {
             "Calcula un lote de medidas nombradas (ver list_measures()) sobre el mismo "
             "product/model/market/pricing/execution de una vez. Devuelve un dict {nombre: "
             "MeasureResult} en el mismo orden que measure_names.\n\n"
-            ">>> eng.calc(trade, ['PV', 'DV01', 'ExpectedExposure', 'PFE95', 'UnilateralCVA'],\n"
+            ">>> eng.price(trade, ['PV', 'DV01', 'ExpectedExposure', 'PFE95', 'UnilateralCVA'],\n"
             "...          model, market, pricing, execution)"
         )
         .def(
-            "calc_batch",
-            &Engine::calc_batch,
+            "price_batch",
+            &Engine::price_batch,
             nb::arg("products"),
             nb::arg("measure_names"),
             nb::arg("model"),
@@ -464,21 +464,21 @@ NB_MODULE(engine, m) {
             "trade en el mismo orden que products."
         )
         .def(
-            "calc_many",
-            &Engine::calc_many,
+            "price_many",
+            &Engine::price_many,
             nb::arg("products"),
             nb::arg("measure_names"),
             nb::arg("model"),
             nb::arg("market"),
             nb::arg("pricing"),
             nb::arg("execution"),
-            "Nivel 2 (PLAN.md §7.17/§7.19): igual que calc_batch pero products puede mezclar "
+            "Nivel 2 (PLAN.md §7.17/§7.19): igual que price_batch pero products puede mezclar "
             "tipos/calendarios distintos -- se agrupan internamente (nunca falla por "
             "heterogeneidad) y el resultado se devuelve en el orden de entrada original."
         )
         .def(
-            "calc_grid",
-            &Engine::calc_grid,
+            "price_grid",
+            &Engine::price_grid,
             nb::arg("products"),
             nb::arg("measure_names"),
             nb::arg("models"),
@@ -486,7 +486,7 @@ NB_MODULE(engine, m) {
             nb::arg("pricing"),
             nb::arg("execution"),
             "Explosion de combinaciones Trades x Models x Markets (PLAN.md §7.19): por cada "
-            "par (modelo, mercado), llama a calc_many sobre products entero. pricing/execution "
+            "par (modelo, mercado), llama a price_many sobre products entero. pricing/execution "
             "son compartidos, no forman parte de la rejilla. Devuelve list[GridResult]."
         );
 }

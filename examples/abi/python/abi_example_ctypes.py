@@ -1,4 +1,4 @@
-"""Ejemplo de Python consumiendo engine/abi.h (PLAN.md Fase 6, §5.5/§7.13; ENGINE.CALC en
+"""Ejemplo de Python consumiendo engine/abi.h (PLAN.md Fase 6, §5.5/§7.13; ENGINE.PRICE en
 PLAN.md §7.15) via `ctypes` (solo libreria estandar), SIN pasar por el binding nanobind de
 clients/python (ese es un `.pyd` compilado para una version exacta de CPython -- ver
 clients/python/CMakeLists.txt -- mientras que esta C ABI es un `.dll`/`.so` plano que ctypes
@@ -74,7 +74,7 @@ class EngineMeasureResult(ctypes.Structure):
     ]
 
 
-class EngineCalcResultEntry(ctypes.Structure):
+class EnginePriceResultEntry(ctypes.Structure):
     _fields_ = [
         ("measure_name", ctypes.c_char_p),
         ("result", EngineMeasureResult),
@@ -120,7 +120,7 @@ def load_engine_abi() -> ctypes.CDLL:
     lib.engine_abi_free_model.argtypes = [ctypes.c_void_p]
     lib.engine_abi_free_product.argtypes = [ctypes.c_void_p]
 
-    lib.engine_abi_calc.argtypes = [
+    lib.engine_abi_price.argtypes = [
         ctypes.c_void_p,
         ctypes.POINTER(ctypes.c_char_p),
         ctypes.c_size_t,
@@ -128,11 +128,11 @@ def load_engine_abi() -> ctypes.CDLL:
         ctypes.POINTER(EngineMarketSnapshot),
         ctypes.POINTER(EnginePricingContext),
         ctypes.POINTER(EngineExecutionContext),
-        ctypes.POINTER(ctypes.POINTER(EngineCalcResultEntry)),
+        ctypes.POINTER(ctypes.POINTER(EnginePriceResultEntry)),
         ctypes.POINTER(ctypes.c_size_t),
     ]
-    lib.engine_abi_calc.restype = ctypes.c_int
-    lib.engine_abi_free_calc_results.argtypes = [ctypes.POINTER(EngineCalcResultEntry), ctypes.c_size_t]
+    lib.engine_abi_price.restype = ctypes.c_int
+    lib.engine_abi_free_price_results.argtypes = [ctypes.POINTER(EnginePriceResultEntry), ctypes.c_size_t]
 
     lib.engine_abi_is_gpu_backend_available.restype = ctypes.c_int
 
@@ -193,7 +193,7 @@ def main() -> None:
         lib.engine_abi_free_model(model)
         raise RuntimeError(f"engine_abi_create_product(IRSwap): {last_error(lib)}")
 
-    # --- ENGINE.CALC (PLAN.md §7.15): mismo caso base que cpp/engine/tests/test_registry.cpp
+    # --- ENGINE.PRICE (PLAN.md §7.15): mismo caso base que cpp/engine/tests/test_registry.cpp
     # (Registry.UnilateralCvaMatchesGoldenValue/ExposureProfileMatchesGoldenValue), pero aqui
     # basta con invariantes cualitativos -- este ejemplo verifica el mecanismo de la ABI, no
     # vuelve a fijar el numero exacto. --------------------------------------------------------
@@ -204,13 +204,13 @@ def main() -> None:
     execution = EngineExecutionContext(backend=b"cpu", precision=b"FP64")
 
     measure_names = (ctypes.c_char_p * 5)(b"PV", b"DV01", b"ExpectedExposure", b"PFE95", b"UnilateralCVA")
-    entries_ptr = ctypes.POINTER(EngineCalcResultEntry)()
+    entries_ptr = ctypes.POINTER(EnginePriceResultEntry)()
     entry_count = ctypes.c_size_t()
-    rc = lib.engine_abi_calc(
+    rc = lib.engine_abi_price(
         product, measure_names, len(measure_names), model, ctypes.byref(market), ctypes.byref(pricing),
         ctypes.byref(execution), ctypes.byref(entries_ptr), ctypes.byref(entry_count)
     )
-    assert rc == 0, f"engine_abi_calc: {last_error(lib)}"
+    assert rc == 0, f"engine_abi_price: {last_error(lib)}"
 
     pv = find_measure(entries_ptr, entry_count.value, "PV")
     dv01 = find_measure(entries_ptr, entry_count.value, "DV01")
@@ -229,17 +229,17 @@ def main() -> None:
     for i in range(ee.len):
         assert ee.primary[i] >= 0.0 and pfe.primary[i] >= ee.primary[i], "se esperaba PFE95 >= ExpectedExposure >= 0"
 
-    lib.engine_abi_free_calc_results(entries_ptr, entry_count)
+    lib.engine_abi_free_price_results(entries_ptr, entry_count)
 
     gpu_available = lib.engine_abi_is_gpu_backend_available() != 0
     print(f"gpu disponible: {'si' if gpu_available else 'no'}")
 
-    # --- engine_abi_calc rechaza un nombre de medida desconocido (PLAN.md §7.15): el error
+    # --- engine_abi_price rechaza un nombre de medida desconocido (PLAN.md §7.15): el error
     # queda en engine_abi_last_error(), nunca lanza/aborta a traves de esta frontera C. --------
     bad_names = (ctypes.c_char_p * 1)(b"NoExiste")
-    bad_entries_ptr = ctypes.POINTER(EngineCalcResultEntry)()
+    bad_entries_ptr = ctypes.POINTER(EnginePriceResultEntry)()
     bad_count = ctypes.c_size_t()
-    rc = lib.engine_abi_calc(
+    rc = lib.engine_abi_price(
         product, bad_names, 1, model, ctypes.byref(market), ctypes.byref(pricing), ctypes.byref(execution),
         ctypes.byref(bad_entries_ptr), ctypes.byref(bad_count)
     )
@@ -255,7 +255,7 @@ def main() -> None:
     assert not unknown, "se esperaba NULL al pedir un modelo inexistente"
     print(f"error esperado al pedir un modelo inexistente: {last_error(lib)}")
 
-    print("OK: ejemplo de Python (ctypes) sobre engine/abi.h (ENGINE.CALC) completado.")
+    print("OK: ejemplo de Python (ctypes) sobre engine/abi.h (ENGINE.PRICE) completado.")
 
 
 if __name__ == "__main__":

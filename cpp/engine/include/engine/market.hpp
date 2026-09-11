@@ -60,7 +60,7 @@ private:
 // sea "falso" o "real" es una cuestión de de dónde salen los números (fabricados aquí mismo,
 // leídos de un fichero/feed en el futuro), no de un tipo C++ distinto.
 //
-// `hazard_rate`/`recovery_rate` (PLAN.md §7.15, añadidos junto con `ENGINE.CALC`): datos de
+// `hazard_rate`/`recovery_rate` (PLAN.md §7.15, añadidos junto con `ENGINE.PRICE`): datos de
 // crédito observables, opcionales (default 0.0 -- "sin riesgo de default"), que solo consume
 // `UnilateralCvaMeasure`. Encajan en `Market` por la misma razón que `pillars`/`zero_rates`:
 // son observables desde fuera del `Trade`, no parámetros del modelo ni del producto.

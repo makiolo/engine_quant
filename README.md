@@ -43,9 +43,9 @@ The result is one vocabulary and one calculation path across every client.
 | Clients | Python extension, Excel XLL, native C++ API, and versioned C ABI |
 | Distribution | Windows wheels, Excel add-in package, and all-in-one Inno Setup installer produced by the release workflow |
 
-`Engine.calc(...)` accepts a batch of measure names. `ExpectedExposure` and `PFE95`, for
-example, reuse one exposure simulation rather than running Monte Carlo twice. `calc_batch`/
-`calc_many`/`calc_grid` extend that batching across trades, and across models and markets.
+`Engine.price(...)` accepts a batch of measure names. `ExpectedExposure` and `PFE95`, for
+example, reuse one exposure simulation rather than running Monte Carlo twice. `price_batch`/
+`price_many`/`price_grid` extend that batching across trades, and across models and markets.
 
 ## Architecture
 
@@ -58,7 +58,7 @@ example, reuse one exposure simulation rather than running Monte Carlo twice. `c
                                   ▼
               ┌───────────────────────────────────────┐
               │ C++17 domain and orchestration layer │
-              │ registries · contexts · batched calc │
+              │ registries · contexts · batched price │
               └───────────────────┬───────────────────┘
                                   │ cxx bridge
                                   ▼
@@ -116,7 +116,7 @@ pricing = engine.PricingContext(
 )
 execution = engine.ExecutionContext({"backend": "auto", "precision": "FP64"})
 
-results = eng.calc(
+results = eng.price(
     trade,
     ["PV", "DV01", "ExpectedExposure", "PFE95", "UnilateralCVA"],
     model,
@@ -167,20 +167,20 @@ tests; they are not a substitute for a real calibration instrument set.
 ## Batch and grid calculation
 
 Three layers, each built on the one before, let a single call price a portfolio instead of
-looping over `calc(...)` per trade:
+looping over `price(...)` per trade:
 
-- **`calc_batch`** — a *homogeneous* batch: every trade must share the same product type and,
+- **`price_batch`** — a *homogeneous* batch: every trade must share the same product type and,
   for `IRSwap`, the same schedule (`start`/`payment_times`/`accruals`) and an explicit
   `fixed_rate` (no par-rate trades in a batch). The short-rate path is simulated once for the
   whole batch, not once per trade.
-- **`calc_many`** — a *heterogeneous* list: trades may mix schedules or (in the future)
-  product types. They are grouped internally and each group is priced with `calc_batch`;
+- **`price_many`** — a *heterogeneous* list: trades may mix schedules or (in the future)
+  product types. They are grouped internally and each group is priced with `price_batch`;
   heterogeneity never raises an error.
-- **`calc_grid`** — the full **Trades × Models × Markets** combination: `calc_many` runs once
+- **`price_grid`** — the full **Trades × Models × Markets** combination: `price_many` runs once
   per (model, market) pair. `PricingContext`/`ExecutionContext` are shared, not part of the
   grid.
 
-All three return one row per trade (and, for `calc_grid`, per model/market too) with its
+All three return one row per trade (and, for `price_grid`, per model/market too) with its
 index attached explicitly — never a nested list:
 
 ```python
@@ -191,7 +191,7 @@ trades = [
                                    "payment_times": [1, 2, 3, 4, 5], "accruals": [1] * 5}),
 ]
 
-for row in eng.calc_batch(trades, ["PV", "UnilateralCVA"], model, market, pricing, execution):
+for row in eng.price_batch(trades, ["PV", "UnilateralCVA"], model, market, pricing, execution):
     print(row.trade_index, row.measures["PV"].scalar, row.measures["UnilateralCVA"].scalar)
 ```
 
@@ -241,7 +241,7 @@ To run the Python checks against the module produced in `build/clients/python`:
 ```bash
 python clients/python/tests/test_smoke.py build/clients/python
 python clients/python/tests/test_registry.py build/clients/python
-python clients/python/tests/test_calc.py build/clients/python
+python clients/python/tests/test_price.py build/clients/python
 python clients/python/tests/test_calibration.py build/clients/python
 ```
 
@@ -267,7 +267,7 @@ Excel exposes the same object flow through handles and worksheet functions:
 =ENGINE.CREATE_MARKET(MarketParams)
 =ENGINE.CREATE_CONTEXT(PricingParams)
 =ENGINE.CREATE_EXECUTION(ExecutionParams)
-=ENGINE.CALC(Trade, Measures, Model, Market, Pricing, Execution)
+=ENGINE.PRICE(Trade, Measures, Model, Market, Pricing, Execution)
 ```
 
 ## Repository layout

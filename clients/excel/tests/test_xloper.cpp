@@ -224,7 +224,7 @@ XLOPER12 par_irs_5y_params_table(std::vector<std::vector<XCHAR>>& bufs, std::vec
     return make_table(cells, 3, 6);
 }
 
-// Con fixed_rate explicito (PLAN.md §7.19): HandleRegistry::calc_batch/calc_many no soportan
+// Con fixed_rate explicito (PLAN.md §7.19): HandleRegistry::price_batch/price_many no soportan
 // use_par_rate, a diferencia de par_irs_5y_params_table.
 XLOPER12 irs_5y_params_table(
     std::vector<std::vector<XCHAR>>& bufs, std::vector<XLOPER12>& cells, double notional, double fixed_rate
@@ -239,7 +239,7 @@ XLOPER12 irs_5y_params_table(
 }
 
 // Mismo calendario que irs_5y_params_table, distinto tenor (3 años) -- para ejercitar el
-// agrupamiento heterogéneo de calc_many.
+// agrupamiento heterogéneo de price_many.
 XLOPER12 irs_3y_params_table(
     std::vector<std::vector<XCHAR>>& bufs, std::vector<XLOPER12>& cells, double notional, double fixed_rate
 ) {
@@ -362,7 +362,7 @@ TEST(HandleRegistry, CreateUnknownModelThrows) {
 TEST(HandleRegistry, CalcUnknownHandleThrows) {
     xlbridge::HandleRegistry registry = make_registry();
     EXPECT_THROW(
-        registry.calc(
+        registry.price(
             "product:NoExiste", {"PV"}, "model:NoExiste", "market:NoExiste", "pricing:NoExiste", "execution:NoExiste"
         ),
         std::out_of_range
@@ -380,13 +380,13 @@ TEST(HandleRegistry, CalcRejectsUnknownMeasureName) {
     std::string pricing = registry.create_context(pricing_context_table(pricing_bufs, pricing_cells, 100.0, 1.0));
     std::string execution = registry.create_execution(cpu_execution_table(execution_bufs, execution_cells));
 
-    EXPECT_THROW(registry.calc(product, {"NoExiste"}, model, market, pricing, execution), std::invalid_argument);
+    EXPECT_THROW(registry.price(product, {"NoExiste"}, model, market, pricing, execution), std::invalid_argument);
 }
 
-// PLAN.md §7.19: HandleRegistry::calc_batch (lote homogéneo) debe coincidir, trade a trade,
-// con llamar a calc() una vez por trade -- mismo espíritu que Calc.MatchesALoopOfScalarCalls
+// PLAN.md §7.19: HandleRegistry::price_batch (lote homogéneo) debe coincidir, trade a trade,
+// con llamar a price() una vez por trade -- mismo espíritu que Price.MatchesALoopOfScalarCalls
 // en cpp/engine/tests/test_registry.cpp.
-TEST(HandleRegistry, CalcBatchMatchesALoopOfScalarCallsPerTrade) {
+TEST(HandleRegistry, PriceBatchMatchesALoopOfScalarCallsPerTrade) {
     xlbridge::HandleRegistry registry = make_registry();
     std::vector<std::vector<XCHAR>> model_bufs, product_a_bufs, product_b_bufs, market_bufs, pricing_bufs, execution_bufs;
     std::vector<XLOPER12> model_cells, product_a_cells, product_b_cells, market_cells, pricing_cells, execution_cells;
@@ -401,12 +401,12 @@ TEST(HandleRegistry, CalcBatchMatchesALoopOfScalarCallsPerTrade) {
     std::vector<std::string> products{product_a, product_b};
     std::vector<std::string> measures{"PV", "DV01", "ExpectedExposure", "PFE95", "UnilateralCVA"};
 
-    engine::CalcBatchResult batch = registry.calc_batch(products, measures, model, market, pricing, execution);
+    engine::PriceBatchResult batch = registry.price_batch(products, measures, model, market, pricing, execution);
     ASSERT_EQ(batch.size(), products.size());
 
     for (std::size_t i = 0; i < products.size(); ++i) {
         EXPECT_EQ(batch[i].trade_index, i);
-        engine::CalcResult scalar = registry.calc(products[i], measures, model, market, pricing, execution);
+        engine::PriceResult scalar = registry.price(products[i], measures, model, market, pricing, execution);
         for (std::size_t m = 0; m < measures.size(); ++m) {
             if (scalar[m].result.has_scalar) {
                 EXPECT_NEAR(batch[i].measures[m].result.scalar, scalar[m].result.scalar, 1e-6) << measures[m];
@@ -419,7 +419,7 @@ TEST(HandleRegistry, CalcBatchMatchesALoopOfScalarCallsPerTrade) {
     }
 }
 
-TEST(HandleRegistry, CalcBatchRejectsMismatchedCalendars) {
+TEST(HandleRegistry, PriceBatchRejectsMismatchedCalendars) {
     xlbridge::HandleRegistry registry = make_registry();
     std::vector<std::vector<XCHAR>> model_bufs, product_5y_bufs, product_3y_bufs, market_bufs, pricing_bufs, execution_bufs;
     std::vector<XLOPER12> model_cells, product_5y_cells, product_3y_cells, market_cells, pricing_cells, execution_cells;
@@ -432,14 +432,14 @@ TEST(HandleRegistry, CalcBatchRejectsMismatchedCalendars) {
     std::string execution = registry.create_execution(cpu_execution_table(execution_bufs, execution_cells));
 
     EXPECT_THROW(
-        registry.calc_batch({product_5y, product_3y}, {"PV"}, model, market, pricing, execution), std::invalid_argument
+        registry.price_batch({product_5y, product_3y}, {"PV"}, model, market, pricing, execution), std::invalid_argument
     );
 }
 
-// PLAN.md §7.19, Nivel 2: calc_many agrupa internamente por calendario y devuelve el
+// PLAN.md §7.19, Nivel 2: price_many agrupa internamente por calendario y devuelve el
 // resultado en el orden de entrada, nunca falla por heterogeneidad (a diferencia de
-// calc_batch en el test anterior).
-TEST(HandleRegistry, CalcManyGroupsHeterogeneousCalendars) {
+// price_batch en el test anterior).
+TEST(HandleRegistry, PriceManyGroupsHeterogeneousCalendars) {
     xlbridge::HandleRegistry registry = make_registry();
     std::vector<std::vector<XCHAR>> model_bufs, product_5y_bufs, product_3y_bufs, market_bufs, pricing_bufs, execution_bufs;
     std::vector<XLOPER12> model_cells, product_5y_cells, product_3y_cells, market_cells, pricing_cells, execution_cells;
@@ -452,14 +452,14 @@ TEST(HandleRegistry, CalcManyGroupsHeterogeneousCalendars) {
     std::string execution = registry.create_execution(cpu_execution_table(execution_bufs, execution_cells));
 
     std::vector<std::string> products{product_5y, product_3y};
-    engine::CalcBatchResult many = registry.calc_many(products, {"PV"}, model, market, pricing, execution);
+    engine::PriceBatchResult many = registry.price_many(products, {"PV"}, model, market, pricing, execution);
     ASSERT_EQ(many.size(), 2u);
     EXPECT_EQ(many[0].trade_index, 0u);
     EXPECT_EQ(many[1].trade_index, 1u);
 }
 
-// PLAN.md §7.19: calc_grid explota Trades x Models x Markets.
-TEST(HandleRegistry, CalcGridComputesTradesTimesModelsTimesMarkets) {
+// PLAN.md §7.19: price_grid explota Trades x Models x Markets.
+TEST(HandleRegistry, PriceGridComputesTradesTimesModelsTimesMarkets) {
     xlbridge::HandleRegistry registry = make_registry();
     std::vector<std::vector<XCHAR>> model_1f_bufs, model_2f_bufs, product_a_bufs, product_b_bufs;
     std::vector<std::vector<XCHAR>> market_a_bufs, market_b_bufs, pricing_bufs, execution_bufs;
@@ -480,12 +480,12 @@ TEST(HandleRegistry, CalcGridComputesTradesTimesModelsTimesMarkets) {
     std::vector<std::string> markets{market_a, market_b};
     std::vector<std::string> measures{"PV", "UnilateralCVA"};
 
-    engine::CalcGridResult grid = registry.calc_grid(products, measures, models, markets, pricing, execution);
+    engine::PriceGridResult grid = registry.price_grid(products, measures, models, markets, pricing, execution);
     ASSERT_EQ(grid.size(), products.size() * models.size() * markets.size());
 
     for (const auto& cell : grid) {
-        engine::CalcResult scalar =
-            registry.calc(products[cell.trade_index], measures, models[cell.model_index], markets[cell.market_index], pricing, execution);
+        engine::PriceResult scalar =
+            registry.price(products[cell.trade_index], measures, models[cell.model_index], markets[cell.market_index], pricing, execution);
         for (std::size_t m = 0; m < measures.size(); ++m) {
             EXPECT_NEAR(cell.measures[m].result.scalar, scalar[m].result.scalar, 1e-6);
         }
@@ -494,7 +494,7 @@ TEST(HandleRegistry, CalcGridComputesTradesTimesModelsTimesMarkets) {
 
 // Mismos parámetros/semilla que Registry.ExposureProfileMatchesGoldenValue (cpp/engine/tests/
 // test_registry.cpp) y test_exposure_profile_matches_golden_value (clients/python/tests/
-// test_calc.py): confirma que el bridge de Excel reproduce el mismo resultado numérico que
+// test_price.py): confirma que el bridge de Excel reproduce el mismo resultado numérico que
 // los otros dos clientes para el mismo caso base (PLAN.md §5.2, §5.6 capa 4).
 TEST(HandleRegistry, ExpectedExposureAndPfe95MatchOtherClients) {
     xlbridge::HandleRegistry registry = make_registry();
@@ -507,7 +507,7 @@ TEST(HandleRegistry, ExpectedExposureAndPfe95MatchOtherClients) {
     std::string pricing = registry.create_context(pricing_context_table(pricing_bufs, pricing_cells, 5000.0, 7.0));
     std::string execution = registry.create_execution(cpu_execution_table(execution_bufs, execution_cells));
 
-    engine::CalcResult result = registry.calc(product, {"ExpectedExposure", "PFE95"}, model, market, pricing, execution);
+    engine::PriceResult result = registry.price(product, {"ExpectedExposure", "PFE95"}, model, market, pricing, execution);
 
     ASSERT_EQ(result.size(), 2u);
     const engine::MeasureResult& ee = result[0].result;
@@ -530,14 +530,14 @@ TEST(HandleRegistry, UnilateralCvaIsPositiveForNonzeroHazardRate) {
     std::string pricing = registry.create_context(pricing_context_table(pricing_bufs, pricing_cells, 5000.0, 7.0));
     std::string execution = registry.create_execution(cpu_execution_table(execution_bufs, execution_cells));
 
-    engine::CalcResult result = registry.calc(product, {"UnilateralCVA"}, model, market, pricing, execution);
+    engine::PriceResult result = registry.price(product, {"UnilateralCVA"}, model, market, pricing, execution);
 
     ASSERT_EQ(result.size(), 1u);
     EXPECT_TRUE(result[0].result.has_scalar);
     EXPECT_GT(result[0].result.scalar, 0.0);
 }
 
-// Interfaz homogénea (PLAN.md §7.16): mismo HandleRegistry::calc, mismos nombres de medida,
+// Interfaz homogénea (PLAN.md §7.16): mismo HandleRegistry::price, mismos nombres de medida,
 // solo cambia el nombre de modelo/params pasados a create_model -- confirma que el bridge de
 // Excel no necesita saber que existen dos modelos de tipo corto distintos.
 TEST(HandleRegistry, ExpectedExposureAndPfe95MatchOtherClientsUnderHullWhite2F) {
@@ -551,7 +551,7 @@ TEST(HandleRegistry, ExpectedExposureAndPfe95MatchOtherClientsUnderHullWhite2F) 
     std::string pricing = registry.create_context(pricing_context_table(pricing_bufs, pricing_cells, 5000.0, 7.0));
     std::string execution = registry.create_execution(cpu_execution_table(execution_bufs, execution_cells));
 
-    engine::CalcResult result = registry.calc(product, {"ExpectedExposure", "PFE95"}, model, market, pricing, execution);
+    engine::PriceResult result = registry.price(product, {"ExpectedExposure", "PFE95"}, model, market, pricing, execution);
 
     ASSERT_EQ(result.size(), 2u);
     const engine::MeasureResult& ee = result[0].result;
@@ -574,7 +574,7 @@ TEST(HandleRegistry, UnilateralCvaIsPositiveForNonzeroHazardRateUnderHullWhite2F
     std::string pricing = registry.create_context(pricing_context_table(pricing_bufs, pricing_cells, 5000.0, 7.0));
     std::string execution = registry.create_execution(cpu_execution_table(execution_bufs, execution_cells));
 
-    engine::CalcResult result = registry.calc(product, {"UnilateralCVA"}, model, market, pricing, execution);
+    engine::PriceResult result = registry.price(product, {"UnilateralCVA"}, model, market, pricing, execution);
 
     ASSERT_EQ(result.size(), 1u);
     EXPECT_TRUE(result[0].result.has_scalar);
@@ -709,8 +709,8 @@ DWORD xl_base_type(const XLOPER12& x) { return x.xltype & ~static_cast<DWORD>(xl
 
 } // namespace
 
-TEST(NewCalcResult, MixesScalarAndProfileRowsInLongFormat) {
-    engine::CalcResult result;
+TEST(NewPriceResult, MixesScalarAndProfileRowsInLongFormat) {
+    engine::PriceResult result;
 
     engine::MeasureResult pv;
     pv.has_scalar = true;
@@ -723,7 +723,7 @@ TEST(NewCalcResult, MixesScalarAndProfileRowsInLongFormat) {
     ee.primary = {0.0, 12862.62};
     result.push_back({"ExpectedExposure", ee});
 
-    XLOPER12* out = xlbridge::new_calc_result(result);
+    XLOPER12* out = xlbridge::new_price_result(result);
     ASSERT_EQ(xl_base_type(*out), static_cast<DWORD>(xltypeMulti));
     EXPECT_EQ(out->val.array.columns, 3);
     ASSERT_EQ(out->val.array.rows, 3); // 1 fila de PV (escalar) + 2 filas de ExpectedExposure
@@ -741,16 +741,16 @@ TEST(NewCalcResult, MixesScalarAndProfileRowsInLongFormat) {
     xlbridge::free_xloper(out);
 }
 
-TEST(NewCalcResult, EmptyResultBecomesNaError) {
-    engine::CalcResult result;
-    XLOPER12* out = xlbridge::new_calc_result(result);
+TEST(NewPriceResult, EmptyResultBecomesNaError) {
+    engine::PriceResult result;
+    XLOPER12* out = xlbridge::new_price_result(result);
     EXPECT_EQ(xl_base_type(*out), static_cast<DWORD>(xltypeErr));
     xlbridge::free_xloper(out);
 }
 
-// PLAN.md §7.19: mismo formato largo que new_calc_result, con una columna TradeIndex al
+// PLAN.md §7.19: mismo formato largo que new_price_result, con una columna TradeIndex al
 // frente.
-TEST(NewCalcBatchResult, PrependsTradeIndexColumn) {
+TEST(NewPriceBatchResult, PrependsTradeIndexColumn) {
     engine::MeasureResult pv_a;
     pv_a.has_scalar = true;
     pv_a.scalar = 100.0;
@@ -758,11 +758,11 @@ TEST(NewCalcBatchResult, PrependsTradeIndexColumn) {
     pv_b.has_scalar = true;
     pv_b.scalar = 200.0;
 
-    engine::CalcBatchResult result;
+    engine::PriceBatchResult result;
     result.push_back({0, {{"PV", pv_a}}});
     result.push_back({1, {{"PV", pv_b}}});
 
-    XLOPER12* out = xlbridge::new_calc_batch_result(result);
+    XLOPER12* out = xlbridge::new_price_batch_result(result);
     ASSERT_EQ(xl_base_type(*out), static_cast<DWORD>(xltypeMulti));
     EXPECT_EQ(out->val.array.columns, 4);
     ASSERT_EQ(out->val.array.rows, 2);
@@ -777,23 +777,23 @@ TEST(NewCalcBatchResult, PrependsTradeIndexColumn) {
     xlbridge::free_xloper(out);
 }
 
-TEST(NewCalcBatchResult, EmptyResultBecomesNaError) {
-    engine::CalcBatchResult result;
-    XLOPER12* out = xlbridge::new_calc_batch_result(result);
+TEST(NewPriceBatchResult, EmptyResultBecomesNaError) {
+    engine::PriceBatchResult result;
+    XLOPER12* out = xlbridge::new_price_batch_result(result);
     EXPECT_EQ(xl_base_type(*out), static_cast<DWORD>(xltypeErr));
     xlbridge::free_xloper(out);
 }
 
 // PLAN.md §7.19: mismo formato largo, con tres columnas de indice al frente.
-TEST(NewCalcGridResult, PrependsTradeModelMarketIndexColumns) {
+TEST(NewPriceGridResult, PrependsTradeModelMarketIndexColumns) {
     engine::MeasureResult pv;
     pv.has_scalar = true;
     pv.scalar = 42.0;
 
-    engine::CalcGridResult result;
+    engine::PriceGridResult result;
     result.push_back({1, 0, 1, {{"PV", pv}}});
 
-    XLOPER12* out = xlbridge::new_calc_grid_result(result);
+    XLOPER12* out = xlbridge::new_price_grid_result(result);
     ASSERT_EQ(xl_base_type(*out), static_cast<DWORD>(xltypeMulti));
     EXPECT_EQ(out->val.array.columns, 6);
     ASSERT_EQ(out->val.array.rows, 1);
@@ -808,9 +808,9 @@ TEST(NewCalcGridResult, PrependsTradeModelMarketIndexColumns) {
     xlbridge::free_xloper(out);
 }
 
-TEST(NewCalcGridResult, EmptyResultBecomesNaError) {
-    engine::CalcGridResult result;
-    XLOPER12* out = xlbridge::new_calc_grid_result(result);
+TEST(NewPriceGridResult, EmptyResultBecomesNaError) {
+    engine::PriceGridResult result;
+    XLOPER12* out = xlbridge::new_price_grid_result(result);
     EXPECT_EQ(xl_base_type(*out), static_cast<DWORD>(xltypeErr));
     xlbridge::free_xloper(out);
 }

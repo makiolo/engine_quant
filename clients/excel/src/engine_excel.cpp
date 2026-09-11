@@ -55,7 +55,7 @@ struct FnSpec {
 
 // --- UDFs (PLAN.md §7.8/§7.15: mismo modelo mental que engine.Engine en Python -- list_models/
 // list_products/list_measures/create_model/create_product/create_market/create_context/
-// create_execution/Engine.calc -- via los mismos Registries/Registry<T>::create/engine::calc).
+// create_execution/Engine.price -- via los mismos Registries/Registry<T>::create/engine::price).
 // xlbridge::guarded (xloper.hpp) centraliza el try/catch -> #VALUE!: ninguna excepcion de
 // C++ puede cruzar la frontera con Excel.
 
@@ -114,13 +114,13 @@ extern "C" __declspec(dllexport) LPXLOPER12 WINAPI xlEngineCreateExecution(LPXLO
 // Sustituye por completo ENGINE.CREATE_MEASURE + ENGINE.EVALUATE (PLAN.md §7.15): calcula un
 // lote de medidas nombradas de una vez. measure_names es un rango/array de celdas de texto
 // (xlbridge::read_string_list); el resultado es una tabla en formato largo [MeasureName,
-// Time, Value] (xlbridge::new_calc_result).
-extern "C" __declspec(dllexport) LPXLOPER12 WINAPI xlEngineCalc(
+// Time, Value] (xlbridge::new_price_result).
+extern "C" __declspec(dllexport) LPXLOPER12 WINAPI xlEnginePrice(
     LPXLOPER12 trade, LPXLOPER12 measure_names, LPXLOPER12 model, LPXLOPER12 market,
     LPXLOPER12 pricing, LPXLOPER12 execution
 ) {
     return xlbridge::guarded([&] {
-        return xlbridge::new_calc_result(xlbridge::shared().calc(
+        return xlbridge::new_price_result(xlbridge::shared().price(
             xlbridge::read_string(*trade), xlbridge::read_string_list(*measure_names),
             xlbridge::read_string(*model), xlbridge::read_string(*market),
             xlbridge::read_string(*pricing), xlbridge::read_string(*execution)));
@@ -128,15 +128,15 @@ extern "C" __declspec(dllexport) LPXLOPER12 WINAPI xlEngineCalc(
 }
 
 // Nivel 3, lote homogeneo (PLAN.md §7.17/§7.19): "trades" es una COLUMNA de handles de
-// producto (xlbridge::read_string_list, mismo mecanismo que "medidas" en ENGINE.CALC), no un
+// producto (xlbridge::read_string_list, mismo mecanismo que "medidas" en ENGINE.PRICE), no un
 // handle suelto -- todos deben ser del mismo tipo/calendario, sin use_par_rate. Resultado en
-// formato largo con una columna TradeIndex al frente (xlbridge::new_calc_batch_result).
-extern "C" __declspec(dllexport) LPXLOPER12 WINAPI xlEngineCalcBatch(
+// formato largo con una columna TradeIndex al frente (xlbridge::new_price_batch_result).
+extern "C" __declspec(dllexport) LPXLOPER12 WINAPI xlEnginePriceBatch(
     LPXLOPER12 trades, LPXLOPER12 measure_names, LPXLOPER12 model, LPXLOPER12 market,
     LPXLOPER12 pricing, LPXLOPER12 execution
 ) {
     return xlbridge::guarded([&] {
-        return xlbridge::new_calc_batch_result(xlbridge::shared().calc_batch(
+        return xlbridge::new_price_batch_result(xlbridge::shared().price_batch(
             xlbridge::read_string_list(*trades), xlbridge::read_string_list(*measure_names),
             xlbridge::read_string(*model), xlbridge::read_string(*market),
             xlbridge::read_string(*pricing), xlbridge::read_string(*execution)));
@@ -144,14 +144,14 @@ extern "C" __declspec(dllexport) LPXLOPER12 WINAPI xlEngineCalcBatch(
 }
 
 // Nivel 2, lista heterogenea (PLAN.md §7.17/§7.19): misma firma/forma de resultado que
-// ENGINE.CALC_BATCH, pero "trades" puede mezclar tipos/calendarios distintos -- se agrupan
+// ENGINE.PRICE_BATCH, pero "trades" puede mezclar tipos/calendarios distintos -- se agrupan
 // internamente, nunca falla por heterogeneidad.
-extern "C" __declspec(dllexport) LPXLOPER12 WINAPI xlEngineCalcMany(
+extern "C" __declspec(dllexport) LPXLOPER12 WINAPI xlEnginePriceMany(
     LPXLOPER12 trades, LPXLOPER12 measure_names, LPXLOPER12 model, LPXLOPER12 market,
     LPXLOPER12 pricing, LPXLOPER12 execution
 ) {
     return xlbridge::guarded([&] {
-        return xlbridge::new_calc_batch_result(xlbridge::shared().calc_many(
+        return xlbridge::new_price_batch_result(xlbridge::shared().price_many(
             xlbridge::read_string_list(*trades), xlbridge::read_string_list(*measure_names),
             xlbridge::read_string(*model), xlbridge::read_string(*market),
             xlbridge::read_string(*pricing), xlbridge::read_string(*execution)));
@@ -161,13 +161,13 @@ extern "C" __declspec(dllexport) LPXLOPER12 WINAPI xlEngineCalcMany(
 // Explosion de combinaciones Trades x Models x Markets (PLAN.md §7.19): "modelos"/"mercados"
 // son tambien columnas de handles (mismo mecanismo). pricing/ejecucion son compartidos, no
 // forman parte de la rejilla. Resultado en formato largo con TradeIndex/ModelIndex/MarketIndex
-// al frente (xlbridge::new_calc_grid_result).
-extern "C" __declspec(dllexport) LPXLOPER12 WINAPI xlEngineCalcGrid(
+// al frente (xlbridge::new_price_grid_result).
+extern "C" __declspec(dllexport) LPXLOPER12 WINAPI xlEnginePriceGrid(
     LPXLOPER12 trades, LPXLOPER12 measure_names, LPXLOPER12 models, LPXLOPER12 markets,
     LPXLOPER12 pricing, LPXLOPER12 execution
 ) {
     return xlbridge::guarded([&] {
-        return xlbridge::new_calc_grid_result(xlbridge::shared().calc_grid(
+        return xlbridge::new_price_grid_result(xlbridge::shared().price_grid(
             xlbridge::read_string_list(*trades), xlbridge::read_string_list(*measure_names),
             xlbridge::read_string_list(*models), xlbridge::read_string_list(*markets),
             xlbridge::read_string(*pricing), xlbridge::read_string(*execution)));
@@ -225,25 +225,25 @@ constexpr FnSpec kFunctions[] = {
                       L"Crea un contexto de ejecucion (params: backend 'cpu'/'gpu'/'auto', "
                       L"precision opcional) y devuelve su handle."),
     ENGINE_XLL_ENTRY(
-        xlEngineCalc, L"UQQQQQQ", L"ENGINE.CALC", L"trade,medidas,modelo,mercado,contexto,ejecucion",
+        xlEnginePrice, L"UQQQQQQ", L"ENGINE.PRICE", L"trade,medidas,modelo,mercado,contexto,ejecucion",
         L"Calcula un lote de medidas (PV, DV01, ExpectedExposure, PFE95, UnilateralCVA) sobre "
         L"un trade/modelo/mercado/contexto de valoracion/contexto de ejecucion. Resultado en "
         L"formato largo: [MeasureName, Time, Value]."
     ),
     ENGINE_XLL_ENTRY(
-        xlEngineCalcBatch, L"UQQQQQQ", L"ENGINE.CALC_BATCH", L"trades,medidas,modelo,mercado,contexto,ejecucion",
-        L"Como ENGINE.CALC pero para una COLUMNA de trades del mismo tipo/calendario (sin "
+        xlEnginePriceBatch, L"UQQQQQQ", L"ENGINE.PRICE_BATCH", L"trades,medidas,modelo,mercado,contexto,ejecucion",
+        L"Como ENGINE.PRICE pero para una COLUMNA de trades del mismo tipo/calendario (sin "
         L"tipo fijo 'a la par'), vectorizado sin bucle. Resultado en formato largo: "
         L"[TradeIndex, MeasureName, Time, Value]."
     ),
     ENGINE_XLL_ENTRY(
-        xlEngineCalcMany, L"UQQQQQQ", L"ENGINE.CALC_MANY", L"trades,medidas,modelo,mercado,contexto,ejecucion",
-        L"Como ENGINE.CALC_BATCH pero admite trades de tipos/calendarios distintos: los agrupa "
+        xlEnginePriceMany, L"UQQQQQQ", L"ENGINE.PRICE_MANY", L"trades,medidas,modelo,mercado,contexto,ejecucion",
+        L"Como ENGINE.PRICE_BATCH pero admite trades de tipos/calendarios distintos: los agrupa "
         L"internamente y nunca falla por heterogeneidad. Resultado en el mismo formato largo, "
         L"en el orden de entrada de trades."
     ),
     ENGINE_XLL_ENTRY(
-        xlEngineCalcGrid, L"UQQQQQQ", L"ENGINE.CALC_GRID", L"trades,medidas,modelos,mercados,contexto,ejecucion",
+        xlEnginePriceGrid, L"UQQQQQQ", L"ENGINE.PRICE_GRID", L"trades,medidas,modelos,mercados,contexto,ejecucion",
         L"Calcula la rejilla Trades x Modelos x Mercados (columnas de handles); contexto de "
         L"valoracion/ejecucion compartidos, no forman parte de la rejilla. Resultado en "
         L"formato largo: [TradeIndex, ModelIndex, MarketIndex, MeasureName, Time, Value]."

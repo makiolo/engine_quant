@@ -1,5 +1,5 @@
 """Tests de `engine_typed.Measure` (PLAN_REAPI.md §6 Fase 3): `.to_spec()` produce la tupla
-`(nombre, params)` que consume `Engine.calc`, y `DV01(bump=...)` tiene efecto real de punta a
+`(nombre, params)` que consume `Engine.price`, y `DV01(bump=...)` tiene efecto real de punta a
 punta.
 """
 
@@ -45,8 +45,8 @@ def test_dv01_bump_has_a_real_effect_through_the_engine():
     eng_pricing = engine.PricingContext(pricing.to_params())
     eng_execution = engine.ExecutionContext(execution.to_params())
 
-    default_dv01 = eng.calc(product, [q.DV01().to_spec()], eng_model, eng_market, eng_pricing, eng_execution)["DV01"].scalar
-    doubled_dv01 = eng.calc(
+    default_dv01 = eng.price(product, [q.DV01().to_spec()], eng_model, eng_market, eng_pricing, eng_execution)["DV01"].scalar
+    doubled_dv01 = eng.price(
         product, [q.DV01(bump=0.0002).to_spec()], eng_model, eng_market, eng_pricing, eng_execution
     )["DV01"].scalar
 
@@ -72,15 +72,15 @@ def test_dv01_bucketed_sums_to_the_parallel_dv01_through_the_engine():
     eng_pricing = engine.PricingContext(pricing.to_params())
     eng_execution = engine.ExecutionContext(execution.to_params())
 
-    parallel = eng.calc(product, [q.DV01().to_spec()], eng_model, eng_market, eng_pricing, eng_execution)["DV01"]
-    bucketed = eng.calc(product, [q.DV01(bucketed=True).to_spec()], eng_model, eng_market, eng_pricing, eng_execution)["DV01"]
+    parallel = eng.price(product, [q.DV01().to_spec()], eng_model, eng_market, eng_pricing, eng_execution)["DV01"]
+    bucketed = eng.price(product, [q.DV01(bucketed=True).to_spec()], eng_model, eng_market, eng_pricing, eng_execution)["DV01"]
 
     assert not bucketed.has_scalar
     assert len(bucketed.primary) == len(market.pillars)
     assert math.isclose(sum(bucketed.primary), parallel.scalar, abs_tol=1e-6)
 
 
-def test_calc_mixes_typed_measures_and_plain_strings():
+def test_price_mixes_typed_measures_and_plain_strings():
     eng = engine.Engine()
     trade = q.IRSwap(
         notional=1_000_000.0, fixed_rate=0.02,
@@ -97,7 +97,7 @@ def test_calc_mixes_typed_measures_and_plain_strings():
     eng_pricing = engine.PricingContext(pricing.to_params())
     eng_execution = engine.ExecutionContext(execution.to_params())
 
-    result = eng.calc(
+    result = eng.price(
         product, [q.PV().to_spec(), q.DV01(bump=0.0002).to_spec(), "UnilateralCVA"],
         eng_model, eng_market, eng_pricing, eng_execution,
     )
@@ -110,5 +110,5 @@ if __name__ == "__main__":
     test_dv01_to_spec_carries_bucketed()
     test_dv01_bump_has_a_real_effect_through_the_engine()
     test_dv01_bucketed_sums_to_the_parallel_dv01_through_the_engine()
-    test_calc_mixes_typed_measures_and_plain_strings()
+    test_price_mixes_typed_measures_and_plain_strings()
     print("OK: tests de engine_typed.Measure pasaron")

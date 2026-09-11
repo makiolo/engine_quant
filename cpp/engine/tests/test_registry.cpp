@@ -16,7 +16,7 @@
 #include <gtest/gtest.h>
 
 #include "engine/bootstrap.hpp"
-#include "engine/calc.hpp"
+#include "engine/price.hpp"
 
 namespace {
 
@@ -58,8 +58,8 @@ Params par_irs_5y_params() {
     };
 }
 
-// Con fixed_rate explícito (PLAN.md §7.19): calc_batch/calc_many no soportan use_par_rate, a
-// diferencia de calc() -- cada trade de un lote debe traer ya su tipo fijo.
+// Con fixed_rate explícito (PLAN.md §7.19): price_batch/price_many no soportan use_par_rate, a
+// diferencia de price() -- cada trade de un lote debe traer ya su tipo fijo.
 Params irs_5y_params(double notional, double fixed_rate) {
     return Params{
         {"notional", notional},
@@ -70,7 +70,7 @@ Params irs_5y_params(double notional, double fixed_rate) {
 }
 
 // Mismo calendario que irs_5y_params, distinto tenor (3 años) -- usado para ejercitar el
-// agrupamiento heterogéneo de calc_many.
+// agrupamiento heterogéneo de price_many.
 Params irs_3y_params(double notional, double fixed_rate) {
     return Params{
         {"notional", notional},
@@ -223,7 +223,7 @@ TEST(Registry, UnilateralCvaIsZeroWhenHazardRateIsZero) {
 
 // Caso/semilla de referencia que documenta clients/excel/README.md ("Verificación manual",
 // PLAN.md §5.6 capa 4): el mismo IRS 5y a la par + Hull-White 1F, evaluado a través de
-// ENGINE.CALC en Python/Excel, debe dar exactamente este número.
+// ENGINE.PRICE en Python/Excel, debe dar exactamente este número.
 TEST(Registry, UnilateralCvaMatchesGoldenValue) {
     Registries registries;
     register_builtins(registries);
@@ -281,7 +281,7 @@ TEST(Registry, Dv01OfAPayerSwapIsPositive) {
 // Interfaz homogénea (PLAN.md §7.16): exactamente los mismos IMeasure (ExposureProfile/
 // UnilateralCVA/PV/DV01, ni una línea distinta) evaluados sobre HullWhite2F en vez de
 // HullWhite1F -- measure.cpp despacha internamente al modelo correcto, sin que este test (ni
-// ENGINE.CALC en Python/Excel) necesite saber que existen dos implementaciones.
+// ENGINE.PRICE en Python/Excel) necesite saber que existen dos implementaciones.
 TEST(Registry, ExposureProfile2FIsNonNegativeAndPfeDominatesEe) {
     Registries registries;
     register_builtins(registries);
@@ -376,7 +376,7 @@ TEST(Registry, Dv01OfAPayerSwap2FIsPositive) {
     EXPECT_GT(result.scalar, 0.0);
 }
 
-TEST(Calc, ComputesTheFullBatchInOneCallUnderHullWhite2F) {
+TEST(Price, ComputesTheFullBatchInOneCallUnderHullWhite2F) {
     Registries registries;
     register_builtins(registries);
 
@@ -386,7 +386,7 @@ TEST(Calc, ComputesTheFullBatchInOneCallUnderHullWhite2F) {
     PricingContext pricing = golden_pricing(5000, 7);
     ExecutionContext execution = cpu_execution();
 
-    engine::CalcResult result = engine::calc(
+    engine::PriceResult result = engine::price(
         registries, *product, {"PV", "DV01", "ExpectedExposure", "PFE95", "UnilateralCVA"},
         *model, market, pricing, execution
     );
@@ -419,7 +419,7 @@ TEST(Registry, MeasureRejectsWrongProductType) {
     EXPECT_THROW(measure->evaluate(*model, fake_product, market, pricing, execution), std::invalid_argument);
 }
 
-TEST(Calc, ComputesTheFullBatchInOneCall) {
+TEST(Price, ComputesTheFullBatchInOneCall) {
     Registries registries;
     register_builtins(registries);
 
@@ -429,7 +429,7 @@ TEST(Calc, ComputesTheFullBatchInOneCall) {
     PricingContext pricing = golden_pricing(5000, 7);
     ExecutionContext execution = cpu_execution();
 
-    engine::CalcResult result = engine::calc(
+    engine::PriceResult result = engine::price(
         registries, *product, {"PV", "DV01", "ExpectedExposure", "PFE95", "UnilateralCVA"},
         *model, market, pricing, execution
     );
@@ -445,7 +445,7 @@ TEST(Calc, ComputesTheFullBatchInOneCall) {
     }
 }
 
-TEST(Calc, RejectsUnknownMeasureName) {
+TEST(Price, RejectsUnknownMeasureName) {
     Registries registries;
     register_builtins(registries);
 
@@ -456,16 +456,16 @@ TEST(Calc, RejectsUnknownMeasureName) {
     ExecutionContext execution = cpu_execution();
 
     EXPECT_THROW(
-        engine::calc(registries, *product, {"NoExiste"}, *model, market, pricing, execution),
+        engine::price(registries, *product, {"NoExiste"}, *model, market, pricing, execution),
         std::invalid_argument
     );
 }
 
-// PLAN_REAPI.md §6 Fase 3 (propuesta 3): calc() ya no está limitado a la tabla curada de 5
+// PLAN_REAPI.md §6 Fase 3 (propuesta 3): price() ya no está limitado a la tabla curada de 5
 // nombres -- "ExposureProfile" (el type_name() real de la medida detrás de "ExpectedExposure"/
 // "PFE95") resuelve directamente contra el registry y devuelve el MeasureResult completo (times
 // + primary=EE + secondary=PFE95), sin recortar campos.
-TEST(Calc, ResolvesMeasureNameDirectlyFromTheRegistry) {
+TEST(Price, ResolvesMeasureNameDirectlyFromTheRegistry) {
     Registries registries;
     register_builtins(registries);
 
@@ -475,7 +475,7 @@ TEST(Calc, ResolvesMeasureNameDirectlyFromTheRegistry) {
     PricingContext pricing = golden_pricing(5000, 7);
     ExecutionContext execution = cpu_execution();
 
-    engine::CalcResult result = engine::calc(registries, *product, {"ExposureProfile"}, *model, market, pricing, execution);
+    engine::PriceResult result = engine::price(registries, *product, {"ExposureProfile"}, *model, market, pricing, execution);
 
     ASSERT_EQ(result.size(), 1u);
     EXPECT_EQ(result[0].measure_name, "ExposureProfile");
@@ -494,7 +494,7 @@ TEST(Calc, ResolvesMeasureNameDirectlyFromTheRegistry) {
 // `d(NPV)/d(r0)` exacto vía autodiff): hay una convexidad de segundo orden real en
 // `exp(-zero_rate(t)*t)` que hace que duplicar el bump no duplique el DV01 al bit exacto
 // (tolerancia relativa, no absoluta -- ver el propio valor para la magnitud del efecto).
-TEST(Calc, Dv01BumpIsConfigurableViaMeasureSpec) {
+TEST(Price, Dv01BumpIsConfigurableViaMeasureSpec) {
     Registries registries;
     register_builtins(registries);
 
@@ -508,7 +508,7 @@ TEST(Calc, Dv01BumpIsConfigurableViaMeasureSpec) {
         {"DV01", {}},                                  // default: bump=0.0001
         {"DV01", {{"bump", 0.0002}}},
     };
-    engine::CalcResult result = engine::calc(registries, *product, measures, *model, market, pricing, execution);
+    engine::PriceResult result = engine::price(registries, *product, measures, *model, market, pricing, execution);
 
     ASSERT_EQ(result.size(), 2u);
     ASSERT_TRUE(result[0].result.has_scalar);
@@ -523,7 +523,7 @@ TEST(Calc, Dv01BumpIsConfigurableViaMeasureSpec) {
 // curva NO plana debe dar PV ≈ 0 -- a diferencia de market_with_credit() (1 pillar, plana por
 // extrapolación), aquí la curva tiene forma real, así que esto no es una tautología del caso
 // "1 pillar" -- es la regresión barata que exige el punto de control de la Fase 4.
-TEST(Calc, ParSwapWithExplicitParRateFromAMultiPillarCurveIsZero) {
+TEST(Price, ParSwapWithExplicitParRateFromAMultiPillarCurveIsZero) {
     Registries registries;
     register_builtins(registries);
 
@@ -550,7 +550,7 @@ TEST(Calc, ParSwapWithExplicitParRateFromAMultiPillarCurveIsZero) {
     PricingContext pricing = golden_pricing(1, 1); // PV es determinista
     ExecutionContext execution = cpu_execution();
 
-    engine::CalcResult result = engine::calc(registries, *product, {"PV"}, *model, market, pricing, execution);
+    engine::PriceResult result = engine::price(registries, *product, {"PV"}, *model, market, pricing, execution);
 
     ASSERT_TRUE(result[0].result.has_scalar);
     EXPECT_NEAR(result[0].result.scalar, 0.0, 1e-6);
@@ -559,7 +559,7 @@ TEST(Calc, ParSwapWithExplicitParRateFromAMultiPillarCurveIsZero) {
 // Mismo caso que arriba pero via el sentinel use_par_rate() (fixed_rate omitido) -- confirma
 // que ambos caminos (par rate calculado a mano vs. delegado al motor) coinciden, sobre la
 // MISMA curva no plana.
-TEST(Calc, ParSwapViaUseParRateMatchesExplicitParRateOnANonFlatCurve) {
+TEST(Price, ParSwapViaUseParRateMatchesExplicitParRateOnANonFlatCurve) {
     Registries registries;
     register_builtins(registries);
 
@@ -569,7 +569,7 @@ TEST(Calc, ParSwapViaUseParRateMatchesExplicitParRateOnANonFlatCurve) {
     PricingContext pricing = golden_pricing(1, 1);
     ExecutionContext execution = cpu_execution();
 
-    engine::CalcResult result = engine::calc(
+    engine::PriceResult result = engine::price(
         registries, *par_product, std::vector<std::string>{"PV", "DV01"}, *model, market, pricing, execution
     );
 
@@ -583,7 +583,7 @@ TEST(Calc, ParSwapViaUseParRateMatchesExplicitParRateOnANonFlatCurve) {
 // individualmente -- la suma de los deltas por pillar debe coincidir con el DV01 "parcial"
 // (bump paralelo) sobre la MISMA curva/bump, exactamente el test de consistencia que pide el
 // propio PLAN_REAPI.md.
-TEST(Calc, BucketedDv01SumsToTheParallelDv01) {
+TEST(Price, BucketedDv01SumsToTheParallelDv01) {
     Registries registries;
     register_builtins(registries);
 
@@ -597,7 +597,7 @@ TEST(Calc, BucketedDv01SumsToTheParallelDv01) {
         {"DV01", {}},                                       // escalar, bump paralelo
         {"DV01", {{"bucketed", true}}},                      // vector de deltas por pillar
     };
-    engine::CalcResult result = engine::calc(registries, *product, measures, *model, market, pricing, execution);
+    engine::PriceResult result = engine::price(registries, *product, measures, *model, market, pricing, execution);
 
     ASSERT_EQ(result.size(), 2u);
     ASSERT_TRUE(result[0].result.has_scalar);
@@ -610,10 +610,10 @@ TEST(Calc, BucketedDv01SumsToTheParallelDv01) {
     EXPECT_NEAR(bucketed_sum, result[0].result.scalar, 1e-6);
 }
 
-// Equivalente de lote (PLAN.md §7.19-style): calc_batch con DV01(bucketed=true) debe coincidir,
-// trade a trade, con llamar a calc() una vez por trade -- mismo patrón que
-// CalcBatch.MatchesALoopOfScalarCallsPerTrade para el resto de medidas.
-TEST(CalcBatch, BucketedDv01MatchesALoopOfScalarCalls) {
+// Equivalente de lote (PLAN.md §7.19-style): price_batch con DV01(bucketed=true) debe coincidir,
+// trade a trade, con llamar a price() una vez por trade -- mismo patrón que
+// PriceBatch.MatchesALoopOfScalarCallsPerTrade para el resto de medidas.
+TEST(PriceBatch, BucketedDv01MatchesALoopOfScalarCalls) {
     Registries registries;
     register_builtins(registries);
 
@@ -627,11 +627,11 @@ TEST(CalcBatch, BucketedDv01MatchesALoopOfScalarCalls) {
     std::vector<const engine::IProduct*> products{product_a.get(), product_b.get()};
     std::vector<engine::MeasureSpec> measures = {{"DV01", {{"bucketed", true}}}};
 
-    engine::CalcBatchResult batch = engine::calc_batch(registries, products, measures, *model, market, pricing, execution);
+    engine::PriceBatchResult batch = engine::price_batch(registries, products, measures, *model, market, pricing, execution);
     ASSERT_EQ(batch.size(), products.size());
 
     for (std::size_t i = 0; i < products.size(); ++i) {
-        engine::CalcResult scalar = engine::calc(registries, *products[i], measures, *model, market, pricing, execution);
+        engine::PriceResult scalar = engine::price(registries, *products[i], measures, *model, market, pricing, execution);
         ASSERT_EQ(batch[i].measures[0].result.primary.size(), scalar[0].result.primary.size());
         for (std::size_t p = 0; p < scalar[0].result.primary.size(); ++p) {
             EXPECT_NEAR(batch[i].measures[0].result.primary[p], scalar[0].result.primary[p], 1e-6);
@@ -639,10 +639,10 @@ TEST(CalcBatch, BucketedDv01MatchesALoopOfScalarCalls) {
     }
 }
 
-// PLAN.md §7.19: calc_batch (lote homogéneo) debe coincidir, trade a trade, con llamar a
-// calc() una vez por trade -- mismo espíritu que los tests "matches a loop of scalar calls" de
+// PLAN.md §7.19: price_batch (lote homogéneo) debe coincidir, trade a trade, con llamar a
+// price() una vez por trade -- mismo espíritu que los tests "matches a loop of scalar calls" de
 // Rust, aquí a nivel de la orquestación C++.
-TEST(CalcBatch, MatchesALoopOfScalarCallsPerTrade) {
+TEST(PriceBatch, MatchesALoopOfScalarCallsPerTrade) {
     Registries registries;
     register_builtins(registries);
 
@@ -657,12 +657,12 @@ TEST(CalcBatch, MatchesALoopOfScalarCallsPerTrade) {
     std::vector<const engine::IProduct*> products{product_a.get(), product_b.get(), product_c.get()};
     std::vector<std::string> measures{"PV", "DV01", "ExpectedExposure", "PFE95", "UnilateralCVA"};
 
-    engine::CalcBatchResult batch = engine::calc_batch(registries, products, measures, *model, market, pricing, execution);
+    engine::PriceBatchResult batch = engine::price_batch(registries, products, measures, *model, market, pricing, execution);
     ASSERT_EQ(batch.size(), products.size());
 
     for (std::size_t i = 0; i < products.size(); ++i) {
         EXPECT_EQ(batch[i].trade_index, i);
-        engine::CalcResult scalar = engine::calc(registries, *products[i], measures, *model, market, pricing, execution);
+        engine::PriceResult scalar = engine::price(registries, *products[i], measures, *model, market, pricing, execution);
         ASSERT_EQ(batch[i].measures.size(), scalar.size());
         for (std::size_t m = 0; m < measures.size(); ++m) {
             EXPECT_EQ(batch[i].measures[m].measure_name, scalar[m].measure_name);
@@ -681,7 +681,7 @@ TEST(CalcBatch, MatchesALoopOfScalarCallsPerTrade) {
     }
 }
 
-TEST(CalcBatch, MatchesALoopOfScalarCallsPerTradeUnderHullWhite2F) {
+TEST(PriceBatch, MatchesALoopOfScalarCallsPerTradeUnderHullWhite2F) {
     Registries registries;
     register_builtins(registries);
 
@@ -695,11 +695,11 @@ TEST(CalcBatch, MatchesALoopOfScalarCallsPerTradeUnderHullWhite2F) {
     std::vector<const engine::IProduct*> products{product_a.get(), product_b.get()};
     std::vector<std::string> measures{"PV", "DV01", "ExpectedExposure", "PFE95", "UnilateralCVA"};
 
-    engine::CalcBatchResult batch = engine::calc_batch(registries, products, measures, *model, market, pricing, execution);
+    engine::PriceBatchResult batch = engine::price_batch(registries, products, measures, *model, market, pricing, execution);
     ASSERT_EQ(batch.size(), products.size());
 
     for (std::size_t i = 0; i < products.size(); ++i) {
-        engine::CalcResult scalar = engine::calc(registries, *products[i], measures, *model, market, pricing, execution);
+        engine::PriceResult scalar = engine::price(registries, *products[i], measures, *model, market, pricing, execution);
         for (std::size_t m = 0; m < measures.size(); ++m) {
             if (scalar[m].result.has_scalar) {
                 EXPECT_NEAR(batch[i].measures[m].result.scalar, scalar[m].result.scalar, 1e-6);
@@ -712,7 +712,7 @@ TEST(CalcBatch, MatchesALoopOfScalarCallsPerTradeUnderHullWhite2F) {
     }
 }
 
-TEST(CalcBatch, RejectsMismatchedCalendars) {
+TEST(PriceBatch, RejectsMismatchedCalendars) {
     Registries registries;
     register_builtins(registries);
 
@@ -725,12 +725,12 @@ TEST(CalcBatch, RejectsMismatchedCalendars) {
 
     std::vector<const engine::IProduct*> products{product_5y.get(), product_3y.get()};
     EXPECT_THROW(
-        engine::calc_batch(registries, products, {"PV"}, *model, market, pricing, execution),
+        engine::price_batch(registries, products, {"PV"}, *model, market, pricing, execution),
         std::invalid_argument
     );
 }
 
-TEST(CalcBatch, RejectsUseParRate) {
+TEST(PriceBatch, RejectsUseParRate) {
     Registries registries;
     register_builtins(registries);
 
@@ -742,12 +742,12 @@ TEST(CalcBatch, RejectsUseParRate) {
 
     std::vector<const engine::IProduct*> products{par_product.get()};
     EXPECT_THROW(
-        engine::calc_batch(registries, products, {"PV"}, *model, market, pricing, execution),
+        engine::price_batch(registries, products, {"PV"}, *model, market, pricing, execution),
         std::invalid_argument
     );
 }
 
-TEST(CalcBatch, RejectsEmptyBatch) {
+TEST(PriceBatch, RejectsEmptyBatch) {
     Registries registries;
     register_builtins(registries);
     auto model = registries.models.create("HullWhite1F", hull_white_params());
@@ -757,14 +757,14 @@ TEST(CalcBatch, RejectsEmptyBatch) {
 
     std::vector<const engine::IProduct*> products;
     EXPECT_THROW(
-        engine::calc_batch(registries, products, {"PV"}, *model, market, pricing, execution),
+        engine::price_batch(registries, products, {"PV"}, *model, market, pricing, execution),
         std::invalid_argument
     );
 }
 
-// PLAN.md §7.19, Nivel 2: calc_many acepta calendarios distintos (agrupa internamente) y
+// PLAN.md §7.19, Nivel 2: price_many acepta calendarios distintos (agrupa internamente) y
 // devuelve el resultado en el orden de entrada, sin importar el orden de los grupos.
-TEST(CalcMany, GroupsByCalendarAndPreservesInputOrder) {
+TEST(PriceMany, GroupsByCalendarAndPreservesInputOrder) {
     Registries registries;
     register_builtins(registries);
 
@@ -780,12 +780,12 @@ TEST(CalcMany, GroupsByCalendarAndPreservesInputOrder) {
     std::vector<const engine::IProduct*> products{product_5y_a.get(), product_3y.get(), product_5y_b.get()};
     std::vector<std::string> measures{"PV", "UnilateralCVA"};
 
-    engine::CalcBatchResult many = engine::calc_many(registries, products, measures, *model, market, pricing, execution);
+    engine::PriceBatchResult many = engine::price_many(registries, products, measures, *model, market, pricing, execution);
     ASSERT_EQ(many.size(), products.size());
 
     for (std::size_t i = 0; i < products.size(); ++i) {
         EXPECT_EQ(many[i].trade_index, i);
-        engine::CalcResult scalar = engine::calc(registries, *products[i], measures, *model, market, pricing, execution);
+        engine::PriceResult scalar = engine::price(registries, *products[i], measures, *model, market, pricing, execution);
         for (std::size_t m = 0; m < measures.size(); ++m) {
             EXPECT_NEAR(many[i].measures[m].result.scalar, scalar[m].result.scalar, 1e-6)
                 << "trade " << i << " medida " << measures[m];
@@ -793,7 +793,7 @@ TEST(CalcMany, GroupsByCalendarAndPreservesInputOrder) {
     }
 }
 
-TEST(CalcMany, RejectsEmptyList) {
+TEST(PriceMany, RejectsEmptyList) {
     Registries registries;
     register_builtins(registries);
     auto model = registries.models.create("HullWhite1F", hull_white_params());
@@ -803,14 +803,14 @@ TEST(CalcMany, RejectsEmptyList) {
 
     std::vector<const engine::IProduct*> products;
     EXPECT_THROW(
-        engine::calc_many(registries, products, {"PV"}, *model, market, pricing, execution),
+        engine::price_many(registries, products, {"PV"}, *model, market, pricing, execution),
         std::invalid_argument
     );
 }
 
-// PLAN.md §7.19: calc_grid explota Trades x Models x Markets -- PricingContext/
+// PLAN.md §7.19: price_grid explota Trades x Models x Markets -- PricingContext/
 // ExecutionContext son compartidos, no forman parte de la rejilla.
-TEST(CalcGrid, ComputesTradesTimesModelsTimesMarkets) {
+TEST(PriceGrid, ComputesTradesTimesModelsTimesMarkets) {
     Registries registries;
     register_builtins(registries);
 
@@ -828,12 +828,12 @@ TEST(CalcGrid, ComputesTradesTimesModelsTimesMarkets) {
     std::vector<MarketSnapshot> markets{market_a, market_b};
     std::vector<std::string> measures{"PV", "UnilateralCVA"};
 
-    engine::CalcGridResult grid = engine::calc_grid(registries, products, measures, models, markets, pricing, execution);
+    engine::PriceGridResult grid = engine::price_grid(registries, products, measures, models, markets, pricing, execution);
     ASSERT_EQ(grid.size(), products.size() * models.size() * markets.size());
 
     // Cada celda de la rejilla debe coincidir con la llamada escalar equivalente.
     for (const auto& cell : grid) {
-        engine::CalcResult scalar = engine::calc(
+        engine::PriceResult scalar = engine::price(
             registries, *products[cell.trade_index], measures, *models[cell.model_index], markets[cell.market_index],
             pricing, execution
         );
@@ -844,7 +844,7 @@ TEST(CalcGrid, ComputesTradesTimesModelsTimesMarkets) {
     }
 }
 
-TEST(CalcGrid, RejectsEmptyModelsOrMarkets) {
+TEST(PriceGrid, RejectsEmptyModelsOrMarkets) {
     Registries registries;
     register_builtins(registries);
     auto product = registries.products.create("IRSwap", irs_5y_params(1'000'000.0, 0.02));
@@ -860,11 +860,11 @@ TEST(CalcGrid, RejectsEmptyModelsOrMarkets) {
     std::vector<MarketSnapshot> some_markets{market};
 
     EXPECT_THROW(
-        engine::calc_grid(registries, products, {"PV"}, no_models, some_markets, pricing, execution),
+        engine::price_grid(registries, products, {"PV"}, no_models, some_markets, pricing, execution),
         std::invalid_argument
     );
     EXPECT_THROW(
-        engine::calc_grid(registries, products, {"PV"}, some_models, no_markets, pricing, execution),
+        engine::price_grid(registries, products, {"PV"}, some_models, no_markets, pricing, execution),
         std::invalid_argument
     );
 }
