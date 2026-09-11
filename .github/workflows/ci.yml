@@ -164,3 +164,8 @@ jobs:
 
       - name: Python engine_typed test (Measure tipadas -- PV/DV01/ExposureProfile/UnilateralCVA)
         run: python clients/python/tests/test_engine_typed_measure.py build/clients/python
+
+      # PLAN_REAPI.md §6 Fase 4: PV/DV01 descuentan por la curva de MarketSnapshot (ya no por
+      # el modelo) -- sanity check sobre una curva multi-pillar NO plana.
+      - name: Python calc test (PV/DV01 por curva de mercado, curva no plana)
+        run: python clients/python/tests/test_calc_market_discounting.py build/clients/python

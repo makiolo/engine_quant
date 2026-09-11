@@ -46,7 +46,8 @@ def test_dv01_bump_has_a_real_effect_through_the_engine():
         product, [q.DV01(bump=0.0002).to_spec()], eng_model, eng_market, eng_pricing, eng_execution
     )["DV01"].scalar
 
-    assert math.isclose(doubled_dv01, default_dv01 * 2.0, abs_tol=1e-6)
+    # Bump-and-reval (PLAN_REAPI.md §6 Fase 4): aproximadamente proporcional, no exacto (rel_tol).
+    assert math.isclose(doubled_dv01, default_dv01 * 2.0, rel_tol=0.01)
 
 
 def test_calc_mixes_typed_measures_and_plain_strings():

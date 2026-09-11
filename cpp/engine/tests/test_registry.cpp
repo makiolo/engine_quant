@@ -80,11 +80,19 @@ Params irs_3y_params(double notional, double fixed_rate) {
     };
 }
 
-// Mercado mínimo (1 pillar): ninguna medida del caso base usa la curva en sí para descontar
-// (PLAN.md §7.15: PV/DV01/EE/PFE95 siguen usando solo el modelo, límite de alcance
-// documentado) -- solo hazard_rate/recovery_rate importan aquí, para UnilateralCVA.
+// Mercado mínimo (1 pillar, curva plana al 2% por extrapolación -- PLAN_REAPI.md §6 Fase 4:
+// PV/DV01 SÍ descuentan por esta curva ahora, EE/PFE95 siguen usando solo el modelo). Curva
+// deliberadamente simple para no acoplar estos tests a una forma de curva concreta; ver
+// ParSwapWithExplicitParRateFromAMultiPillarCurveIsZero para un caso con curva no plana.
 MarketSnapshot market_with_credit(double hazard_rate, double recovery_rate) {
     return MarketSnapshot({1.0}, {0.02}, hazard_rate, recovery_rate);
+}
+
+// Curva no plana (creciente) que cubre el vencimiento del swap 5y -- a diferencia de
+// market_with_credit(), aquí "1 pillar extrapolado" no es representativo (PLAN_REAPI.md §6
+// Fase 4, "coste de migración de fixtures").
+MarketSnapshot upward_sloping_market() {
+    return MarketSnapshot({1.0, 2.0, 3.0, 4.0, 5.0}, {0.018, 0.019, 0.020, 0.0205, 0.021});
 }
 
 PricingContext golden_pricing(std::uint64_t n_paths, std::uint64_t seed) {
@@ -481,7 +489,11 @@ TEST(Calc, ResolvesMeasureNameDirectlyFromTheRegistry) {
 // PLAN_REAPI.md §6 Fase 3: primera medida con Params real -- DV01(bump=...) escala la misma
 // derivada dNPV/dr0 de Rust (irs_hull_white_npv_delta_r0) por un multiplicador configurable en
 // vez del 0.0001 (1 punto básico) hardcodeado. Dos bumps distintos deben dar escalares
-// proporcionales, nunca el mismo número.
+// distintos y aproximadamente proporcionales -- "aproximadamente" porque desde
+// PLAN_REAPI.md §6 Fase 4 DV01 es bump-and-reval sobre la curva de descuento (no ya
+// `d(NPV)/d(r0)` exacto vía autodiff): hay una convexidad de segundo orden real en
+// `exp(-zero_rate(t)*t)` que hace que duplicar el bump no duplique el DV01 al bit exacto
+// (tolerancia relativa, no absoluta -- ver el propio valor para la magnitud del efecto).
 TEST(Calc, Dv01BumpIsConfigurableViaMeasureSpec) {
     Registries registries;
     register_builtins(registries);
@@ -502,7 +514,69 @@ TEST(Calc, Dv01BumpIsConfigurableViaMeasureSpec) {
     ASSERT_TRUE(result[0].result.has_scalar);
     ASSERT_TRUE(result[1].result.has_scalar);
     EXPECT_NE(result[0].result.scalar, result[1].result.scalar);
-    EXPECT_NEAR(result[1].result.scalar, result[0].result.scalar * 2.0, 1e-6); // bump doble -> DV01 doble
+    EXPECT_NEAR(result[1].result.scalar, result[0].result.scalar * 2.0, 0.01 * result[0].result.scalar); // ~1% de convexidad
+}
+
+// Sanity check recomendado explícitamente por PLAN_REAPI.md §6 Fase 4: un swap con
+// fixed_rate EXPLÍCITO (no el sentinel PAR/use_par_rate) igual al par rate calculado a mano
+// con la MISMA fórmula que usa el motor (P(start)-P(end)) / Σ accrual_i·P(Ti)) sobre una
+// curva NO plana debe dar PV ≈ 0 -- a diferencia de market_with_credit() (1 pillar, plana por
+// extrapolación), aquí la curva tiene forma real, así que esto no es una tautología del caso
+// "1 pillar" -- es la regresión barata que exige el punto de control de la Fase 4.
+TEST(Calc, ParSwapWithExplicitParRateFromAMultiPillarCurveIsZero) {
+    Registries registries;
+    register_builtins(registries);
+
+    MarketSnapshot market = upward_sloping_market();
+    std::vector<double> payment_times{1.0, 2.0, 3.0, 4.0, 5.0};
+    std::vector<double> accruals{1.0, 1.0, 1.0, 1.0, 1.0};
+
+    double numerator = market.discount_factor(0.0) - market.discount_factor(payment_times.back());
+    double denominator = 0.0;
+    for (std::size_t i = 0; i < payment_times.size(); ++i) {
+        denominator += accruals[i] * market.discount_factor(payment_times[i]);
+    }
+    double par_rate = numerator / denominator;
+
+    auto model = registries.models.create("HullWhite1F", hull_white_params());
+    auto product = registries.products.create(
+        "IRSwap", Params{
+                      {"notional", 1'000'000.0},
+                      {"fixed_rate", par_rate}, // explícito -- NO se omite la clave
+                      {"payment_times", payment_times},
+                      {"accruals", accruals},
+                  }
+    );
+    PricingContext pricing = golden_pricing(1, 1); // PV es determinista
+    ExecutionContext execution = cpu_execution();
+
+    engine::CalcResult result = engine::calc(registries, *product, {"PV"}, *model, market, pricing, execution);
+
+    ASSERT_TRUE(result[0].result.has_scalar);
+    EXPECT_NEAR(result[0].result.scalar, 0.0, 1e-6);
+}
+
+// Mismo caso que arriba pero via el sentinel use_par_rate() (fixed_rate omitido) -- confirma
+// que ambos caminos (par rate calculado a mano vs. delegado al motor) coinciden, sobre la
+// MISMA curva no plana.
+TEST(Calc, ParSwapViaUseParRateMatchesExplicitParRateOnANonFlatCurve) {
+    Registries registries;
+    register_builtins(registries);
+
+    MarketSnapshot market = upward_sloping_market();
+    auto model = registries.models.create("HullWhite1F", hull_white_params());
+    auto par_product = registries.products.create("IRSwap", par_irs_5y_params()); // fixed_rate omitido
+    PricingContext pricing = golden_pricing(1, 1);
+    ExecutionContext execution = cpu_execution();
+
+    engine::CalcResult result = engine::calc(
+        registries, *par_product, std::vector<std::string>{"PV", "DV01"}, *model, market, pricing, execution
+    );
+
+    ASSERT_TRUE(result[0].result.has_scalar);
+    EXPECT_NEAR(result[0].result.scalar, 0.0, 1e-6); // PV
+    ASSERT_TRUE(result[1].result.has_scalar);
+    EXPECT_GT(result[1].result.scalar, 0.0); // DV01 de un swap pagador: > 0 pase lo que pase con la curva
 }
 
 // PLAN.md §7.19: calc_batch (lote homogéneo) debe coincidir, trade a trade, con llamar a

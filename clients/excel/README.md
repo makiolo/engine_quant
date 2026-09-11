@@ -243,13 +243,14 @@ exportadas. Pasos:
 6. `=ENGINE.CALC(<handle trade>, {"PV";"DV01";"ExpectedExposure";"PFE95";"UnilateralCVA"}, <handle modelo>, <handle mercado>, <handle contexto>, <handle ejecucion>)`
    — con esta semilla (`seed=7`) debe "derramar" (mismos valores que
    `Registry.UnilateralCvaMatchesGoldenValue`/`Registry.ExposureProfileMatchesGoldenValue` en
-   `cpp/engine/tests/test_registry.cpp` y `test_calc.py`, calculados el 2026-09-10 con este
-   mismo build):
+   `cpp/engine/tests/test_registry.cpp` y `test_calc.py` para `ExpectedExposure`/`PFE95`/
+   `UnilateralCVA`; `PV`/`DV01` recalculados el 2026-09-11 tras PLAN_REAPI.md §6 Fase 4 --
+   descuento por la curva de `Market` en vez del modelo, ver más abajo):
 
    | MeasureName | Time | Value |
    | --- | --- | --- |
    | PV | | `0` (swap a la par) |
-   | DV01 | | `378.467434451206` |
+   | DV01 | | `480.4686940754473` |
    | ExpectedExposure | 0 | `0` |
    | ExpectedExposure | 1 | `12862.617942080262` |
    | ExpectedExposure | 2 | `13673.529752568928` |
@@ -279,11 +280,14 @@ Excel, mismo motor C++/Rust por debajo). Actualizar esta sección si cambia el c
   tal cual llega (p. ej. el serial de `DATE(2026,9,10)`), pero ninguna medida lo usa todavía
   para convertir fechas a fracciones de año o aplicar day-count — sigue siendo trabajo
   pendiente, igual que antes de esta fase.
-- **`PV`/`DV01` no usan la curva de `Market` para descontar**: ambas se calculan únicamente a
-  partir del modelo (Hull-White 1F), igual que `ExpectedExposure`/`PFE95`/`UnilateralCVA` ya
-  hacían — `Market.pillars()`/`zero_rates()` solo alimentan calibración y (via
-  `hazard_rate`/`recovery_rate`) `UnilateralCVA`. Descuento híbrido con la curva de mercado
-  queda fuera de alcance de esta fase.
+- **`PV`/`DV01` descuentan por la curva de `Market`, no por el modelo** (PLAN_REAPI.md §6 Fase
+  4): `PresentValueMeasure`/`Dv01Measure` replican el swap en bonos cero-cupón vía
+  `Market.discount_factor(t)` -- el modelo (Hull-White 1F/2F) ya no interviene en absoluto
+  para estas dos medidas. `ExpectedExposure`/`PFE95`/`UnilateralCVA` SÍ siguen dependiendo del
+  modelo (Monte Carlo, revaloran en fechas futuras donde no hay curva de mercado observable) --
+  esta asimetría es intencional. `DV01` dejó de ser `d(NPV)/d(r0)` vía autodiff: es
+  bump-and-reval de un movimiento paralelo de `bump` (`Params` opcional de la medida, default
+  0.0001) en todos los `zero_rates` de la curva.
 - **Errores siempre como `#VALUE!`**: cualquier excepción de C++ (parámetro faltante, tipo
   no registrado, medida desconocida en `ENGINE.CALC`, medida incompatible con el
   modelo/producto) se traduce al mismo código de error de Excel, sin distinguir el motivo en

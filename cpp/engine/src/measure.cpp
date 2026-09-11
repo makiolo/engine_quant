@@ -82,40 +82,70 @@ double compute_cva_from_exposure(
     throw std::invalid_argument("UnilateralCvaMeasure: modelo no soportado: " + model.type_name());
 }
 
-double compute_npv(const IModel& model, const IrSwapProduct& irs_product) {
-    if (const auto* hw1 = dynamic_cast<const HullWhite1FModel*>(&model)) {
-        return irs_hull_white_npv(
-            hw1->a(), hw1->b(), hw1->sigma(), hw1->r0(),
-            irs_product.notional(), irs_product.fixed_rate(), irs_product.use_par_rate(),
-            irs_product.start(), irs_product.payment_times(), irs_product.accruals()
-        );
+// --- PV/DV01 por curva de mercado (PLAN_REAPI.md §6 Fase 4) --------------------------------
+// Réplica en bonos cero-cupón EXACTAMENTE igual a `IrSwap::npv` en Rust
+// (`rust/crates/engine-core/src/products/irs.rs`) pero descontando por
+// `MarketSnapshot::discount_factor(t)` en vez de `model.zero_coupon_bond(...)`: PV/DV01 de un
+// swap vainilla son función únicamente de la curva de descuento observada, no del tipo corto.
+// Asume t=0 (mismo límite documentado en `IrSwap::npv`: la pata flotante aún no ha fijado su
+// primer cupón) -- PresentValueMeasure/Dv01Measure ya ignoraban `PricingContext::pricing_date`
+// antes de esta fase, sin cambio de comportamiento ahí.
+
+double par_rate_from_market(
+    const MarketSnapshot& market, double start,
+    const std::vector<double>& payment_times, const std::vector<double>& accruals
+) {
+    double numerator = market.discount_factor(start) - market.discount_factor(payment_times.back());
+    double denominator = 0.0;
+    for (std::size_t i = 0; i < payment_times.size(); ++i) {
+        denominator += accruals[i] * market.discount_factor(payment_times[i]);
     }
-    if (const auto* hw2 = dynamic_cast<const HullWhite2FModel*>(&model)) {
-        return irs_hull_white_2f_npv(
-            hw2->a(), hw2->b(), hw2->sigma(), hw2->eta(), hw2->rho(), hw2->r0(),
-            irs_product.notional(), irs_product.fixed_rate(), irs_product.use_par_rate(),
-            irs_product.start(), irs_product.payment_times(), irs_product.accruals()
-        );
-    }
-    throw std::invalid_argument("PresentValueMeasure: modelo no soportado: " + model.type_name());
+    return numerator / denominator;
 }
 
-double compute_npv_delta_r0(const IModel& model, const IrSwapProduct& irs_product) {
-    if (const auto* hw1 = dynamic_cast<const HullWhite1FModel*>(&model)) {
-        return irs_hull_white_npv_delta_r0(
-            hw1->a(), hw1->b(), hw1->sigma(), hw1->r0(),
-            irs_product.notional(), irs_product.fixed_rate(), irs_product.use_par_rate(),
-            irs_product.start(), irs_product.payment_times(), irs_product.accruals()
-        );
+// Tipo fijo efectivo del contrato: el propio `fixed_rate()` si es explícito, o el par rate
+// calculado bajo `market` si el swap se pidió "a la par" (`use_par_rate() == true`) --
+// `calc_batch`/`calc_many`/`calc_grid` nunca llegan aquí con `use_par_rate() == true`
+// (`require_homogeneous_irs_batch` ya lo rechaza), solo `calc()` (trade único) lo necesita.
+double effective_fixed_rate(const MarketSnapshot& market, const IrSwapProduct& irs_product) {
+    if (!irs_product.use_par_rate()) return irs_product.fixed_rate();
+    return par_rate_from_market(market, irs_product.start(), irs_product.payment_times(), irs_product.accruals());
+}
+
+double npv_from_market(const MarketSnapshot& market, const IrSwapProduct& irs_product, double fixed_rate) {
+    double p_start = market.discount_factor(irs_product.start());
+    double p_end = market.discount_factor(irs_product.payment_times().back());
+    double floating_leg = irs_product.notional() * (p_start - p_end);
+
+    double fixed_leg = 0.0;
+    const std::vector<double>& payment_times = irs_product.payment_times();
+    const std::vector<double>& accruals = irs_product.accruals();
+    for (std::size_t i = 0; i < payment_times.size(); ++i) {
+        fixed_leg += irs_product.notional() * fixed_rate * accruals[i] * market.discount_factor(payment_times[i]);
     }
-    if (const auto* hw2 = dynamic_cast<const HullWhite2FModel*>(&model)) {
-        return irs_hull_white_2f_npv_delta_r0(
-            hw2->a(), hw2->b(), hw2->sigma(), hw2->eta(), hw2->rho(), hw2->r0(),
-            irs_product.notional(), irs_product.fixed_rate(), irs_product.use_par_rate(),
-            irs_product.start(), irs_product.payment_times(), irs_product.accruals()
-        );
-    }
-    throw std::invalid_argument("Dv01Measure: modelo no soportado: " + model.type_name());
+    return floating_leg - fixed_leg;
+}
+
+double compute_npv(const MarketSnapshot& market, const IrSwapProduct& irs_product) {
+    return npv_from_market(market, irs_product, effective_fixed_rate(market, irs_product));
+}
+
+// Curva paralela-bumpeada en `bump` (PLAN_REAPI.md §6 Fase 4): mismos pillars/hazard_rate/
+// recovery_rate, cada zero_rate desplazado en `bump`.
+MarketSnapshot bump_curve(const MarketSnapshot& market, double bump) {
+    std::vector<double> bumped_rates = market.zero_rates();
+    for (double& z : bumped_rates) z += bump;
+    return MarketSnapshot(market.pillars(), std::move(bumped_rates), market.hazard_rate(), market.recovery_rate());
+}
+
+// DV01 = NPV(curva bumpeada en `bump`) - NPV(curva base), MISMO tipo fijo efectivo (fijado UNA
+// vez bajo la curva base: el contrato no se re-estructura al mover el mercado) en ambas
+// revaloraciones -- bump-and-reval, no AAD.
+double compute_dv01(const MarketSnapshot& market, const IrSwapProduct& irs_product, double bump) {
+    double fixed_rate = effective_fixed_rate(market, irs_product);
+    double base = npv_from_market(market, irs_product, fixed_rate);
+    double bumped = npv_from_market(bump_curve(market, bump), irs_product, fixed_rate);
+    return bumped - base;
 }
 
 // Columnas notional/fixed_rate del lote (PLAN.md §7.19) -- el resto del calendario
@@ -184,44 +214,28 @@ std::vector<double> compute_cva_from_exposure_batch(
     throw std::invalid_argument("UnilateralCvaMeasure: modelo no soportado (lote): " + model.type_name());
 }
 
-std::vector<double> compute_npv_batch(const IModel& model, const std::vector<const IrSwapProduct*>& irs_products) {
-    const IrSwapProduct& first = *irs_products.front();
-    std::vector<double> notionals, fixed_rates;
-    columnarize(irs_products, notionals, fixed_rates);
-
-    if (const auto* hw1 = dynamic_cast<const HullWhite1FModel*>(&model)) {
-        return irs_hull_white_npv_batch(
-            hw1->a(), hw1->b(), hw1->sigma(), hw1->r0(),
-            notionals, fixed_rates, first.start(), first.payment_times(), first.accruals()
-        );
+std::vector<double> compute_npv_batch(const MarketSnapshot& market, const std::vector<const IrSwapProduct*>& irs_products) {
+    std::vector<double> results;
+    results.reserve(irs_products.size());
+    for (const IrSwapProduct* irs : irs_products) {
+        // require_homogeneous_irs_batch (calc.cpp) ya garantiza use_par_rate() == false aquí.
+        results.push_back(npv_from_market(market, *irs, irs->fixed_rate()));
     }
-    if (const auto* hw2 = dynamic_cast<const HullWhite2FModel*>(&model)) {
-        return irs_hull_white_2f_npv_batch(
-            hw2->a(), hw2->b(), hw2->sigma(), hw2->eta(), hw2->rho(), hw2->r0(),
-            notionals, fixed_rates, first.start(), first.payment_times(), first.accruals()
-        );
-    }
-    throw std::invalid_argument("PresentValueMeasure: modelo no soportado (lote): " + model.type_name());
+    return results;
 }
 
-std::vector<double> compute_npv_delta_r0_batch(const IModel& model, const std::vector<const IrSwapProduct*>& irs_products) {
-    const IrSwapProduct& first = *irs_products.front();
-    std::vector<double> notionals, fixed_rates;
-    columnarize(irs_products, notionals, fixed_rates);
-
-    if (const auto* hw1 = dynamic_cast<const HullWhite1FModel*>(&model)) {
-        return irs_hull_white_npv_delta_r0_batch(
-            hw1->a(), hw1->b(), hw1->sigma(), hw1->r0(),
-            notionals, fixed_rates, first.start(), first.payment_times(), first.accruals()
-        );
+std::vector<double> compute_dv01_batch(
+    const MarketSnapshot& market, const std::vector<const IrSwapProduct*>& irs_products, double bump
+) {
+    MarketSnapshot bumped_market = bump_curve(market, bump);
+    std::vector<double> results;
+    results.reserve(irs_products.size());
+    for (const IrSwapProduct* irs : irs_products) {
+        double base = npv_from_market(market, *irs, irs->fixed_rate());
+        double bumped = npv_from_market(bumped_market, *irs, irs->fixed_rate());
+        results.push_back(bumped - base);
     }
-    if (const auto* hw2 = dynamic_cast<const HullWhite2FModel*>(&model)) {
-        return irs_hull_white_2f_npv_delta_r0_batch(
-            hw2->a(), hw2->b(), hw2->sigma(), hw2->eta(), hw2->rho(), hw2->r0(),
-            notionals, fixed_rates, first.start(), first.payment_times(), first.accruals()
-        );
-    }
-    throw std::invalid_argument("Dv01Measure: modelo no soportado (lote): " + model.type_name());
+    return results;
 }
 
 MeasureResult ExposureProfileMeasure::evaluate(
@@ -265,7 +279,7 @@ MeasureResult UnilateralCvaMeasure::evaluate(
 }
 
 MeasureResult PresentValueMeasure::evaluate(
-    const IModel& model, const IProduct& product, const MarketSnapshot&,
+    const IModel&, const IProduct& product, const MarketSnapshot& market,
     const PricingContext&, const ExecutionContext&
 ) const {
     const auto* irs_product = dynamic_cast<const IrSwapProduct*>(&product);
@@ -275,12 +289,12 @@ MeasureResult PresentValueMeasure::evaluate(
 
     MeasureResult result;
     result.has_scalar = true;
-    result.scalar = compute_npv(model, *irs_product);
+    result.scalar = compute_npv(market, *irs_product);
     return result;
 }
 
 MeasureResult Dv01Measure::evaluate(
-    const IModel& model, const IProduct& product, const MarketSnapshot&,
+    const IModel&, const IProduct& product, const MarketSnapshot& market,
     const PricingContext&, const ExecutionContext&
 ) const {
     const auto* irs_product = dynamic_cast<const IrSwapProduct*>(&product);
@@ -290,7 +304,7 @@ MeasureResult Dv01Measure::evaluate(
 
     MeasureResult result;
     result.has_scalar = true;
-    result.scalar = compute_npv_delta_r0(model, *irs_product) * bump_;
+    result.scalar = compute_dv01(market, *irs_product, bump_);
     return result;
 }
 

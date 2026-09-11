@@ -53,6 +53,9 @@ def test_calc_accepts_tuples_and_plain_strings_in_the_same_call():
 
 
 def test_dv01_bump_changes_the_scalar_proportionally():
+    # PLAN_REAPI.md §6 Fase 4: DV01 es bump-and-reval sobre la curva (no ya d(NPV)/d(r0) exacto
+    # vía autodiff) -- duplicar el bump duplica el DV01 solo APROXIMADAMENTE (hay una
+    # convexidad de segundo orden real en exp(-zero_rate(t)*t)), por eso rel_tol y no abs_tol.
     eng = engine.Engine()
     model = eng.create_model("HullWhite1F", _hull_white_params())
     product = eng.create_product("IRSwap", _irs_5y_params(1_000_000.0, 0.02))
@@ -69,7 +72,7 @@ def test_dv01_bump_changes_the_scalar_proportionally():
     doubled = eng.calc(product, [("DV01", {"bump": 0.0002})], model, market, pricing, execution)["DV01"].scalar
 
     assert default_only != doubled
-    assert math.isclose(doubled, default_only * 2.0, abs_tol=1e-6)
+    assert math.isclose(doubled, default_only * 2.0, rel_tol=0.01)
     assert math.isclose(default_dv01, doubled, abs_tol=1e-6)  # confirma que no se cacheo por nombre
 
 

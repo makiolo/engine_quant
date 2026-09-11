@@ -76,9 +76,16 @@ public:
     ) const override;
 };
 
-// NPV determinista del IRS a t=0 bajo Hull-White 1F (PLAN.md §7.15, medida "PV" de
-// ENGINE.CALC) -- nueva desde la Fase 8, no existía como medida registrable antes (solo como
-// fórmula cerrada interna de IrSwap::npv).
+// NPV determinista del IRS a t=0, replicado en bonos cero-cupón sobre la curva de descuento
+// OBSERVADA (`MarketSnapshot::discount_factor`, PLAN_REAPI.md §6 Fase 4) -- ya NO usa el
+// modelo (`model` es un parámetro sin nombre en `evaluate()`, PLAN.md §7.15 fija la firma con
+// los cinco argumentos aunque no todos se usen): la PV de un swap vainilla es, en efecto, solo
+// función de la curva de mercado, no del tipo corto simulado. Antes (hasta PLAN.md §7.15)
+// llamaba a `irs_hull_white_npv` (Rust, dependiente de HullWhite1F/2F) -- esa ruta sigue
+// existiendo en Rust para las rutas Monte Carlo (`ExposureProfileMeasure`/
+// `UnilateralCvaMeasure`, que revaloran en fechas FUTURAS donde no hay curva observable), pero
+// PV ya no la llama. Swaps "a la par" (`use_par_rate() == true`) calculan su tipo fijo a
+// mercado con esta misma curva -- `PV ≈ 0` se conserva algebraicamente sea cual sea la curva.
 class PresentValueMeasure : public IMeasure {
 public:
     explicit PresentValueMeasure(const Params&) {}
@@ -91,16 +98,16 @@ public:
     ) const override;
 };
 
-// Sensibilidad del NPV a un movimiento de `bump` en r0 (PLAN.md §7.15, medida "DV01" de
-// ENGINE.CALC): `d(NPV)/d(r0) * bump` vía autodiff (`engine::irs_hull_white_npv_delta_r0`) --
-// la derivada la sigue calculando Rust tal cual, `bump` es solo el multiplicador que antes
-// vivía hardcodeado en C++ (0.0001, un punto básico). `bump` es un `Params` opcional
+// Sensibilidad del NPV (misma réplica que PresentValueMeasure, PLAN_REAPI.md §6 Fase 4) a un
+// bump PARALELO de `bump` en todos los `zero_rates` de la curva -- bump-and-reval, no AAD: se
+// calcula el tipo fijo efectivo UNA vez bajo la curva base (el contrato del swap no cambia al
+// mover el mercado) y se repriva con `MarketSnapshot` base y bumpeada. Reemplaza la
+// sensibilidad anterior (`d(NPV)/d(r0)` vía autodiff en Rust, PLAN.md §7.15): DV01 dejó de ser
+// una sensibilidad al parámetro del modelo -- ya no depende del modelo en absoluto (`model` sin
+// usar en `evaluate()`, misma razón que PresentValueMeasure). `bump` es un `Params` opcional
 // (PLAN_REAPI.md §6 Fase 3, propuesta 3 -- primera medida con configuración real: `Registry<
 // IMeasure>::create("DV01", {{"bump", 0.0002}})` da una sensibilidad distinta de la de
-// `create("DV01")`), leído en el constructor porque `evaluate()` no recibe un `Params` propio
-// (PLAN.md §7.15 ya fijó esa firma). Es una sensibilidad al parámetro del modelo, no una
-// sensibilidad "por bucket" a la curva de mercado -- limitación conocida de un modelo de un
-// solo factor.
+// `create("DV01")`), leído en el constructor porque `evaluate()` no recibe un `Params` propio.
 class Dv01Measure : public IMeasure {
 public:
     explicit Dv01Measure(const Params& params) : bump_(get_double(params, "bump", 0.0001)) {}
@@ -117,16 +124,19 @@ private:
 };
 
 // --- Lote homogéneo (PLAN.md §7.17/§7.19) ---------------------------------------------------
-// Equivalentes de lote de los cuatro `compute_*` internos de measure.cpp (mismo despacho por
-// `dynamic_cast` a HullWhite1FModel/HullWhite2FModel, "único sitio que conoce ambos modelos a
-// la vez"). Declarados aquí (no en el `namespace {}` anónimo de measure.cpp) porque
-// `engine::calc_batch` (calc.hpp) necesita llamarlos directamente -- el despacho de lote no
-// pasa por `IMeasure`/`Registry<IMeasure>`: con un único producto real (`IrSwapProduct`) no
-// hay genericidad real que ganar con un método virtual `evaluate_batch` todavía (mismo
-// argumento que ya justificó no generalizar la C ABI de calibración hasta el segundo
-// calibrador, PLAN.md §7.18). `irs_products` debe ser un lote ya validado por el llamante:
-// mismo calendario (`start`/`payment_times`/`accruals`) y `use_par_rate() == false` en todos
-// -- estas cuatro funciones no repiten esa validación.
+// Equivalentes de lote de los `compute_*` internos de measure.cpp. Declarados aquí (no en el
+// `namespace {}` anónimo de measure.cpp) porque `engine::calc_batch` (calc.hpp) necesita
+// llamarlos directamente -- el despacho de lote no pasa por `IMeasure`/`Registry<IMeasure>`:
+// con un único producto real (`IrSwapProduct`) no hay genericidad real que ganar con un método
+// virtual `evaluate_batch` todavía (mismo argumento que ya justificó no generalizar la C ABI
+// de calibración hasta el segundo calibrador, PLAN.md §7.18). `irs_products` debe ser un lote
+// ya validado por el llamante: mismo calendario (`start`/`payment_times`/`accruals`) y
+// `use_par_rate() == false` en todos -- estas funciones no repiten esa validación.
+//
+// `compute_exposure_profile_batch`/`compute_cva_from_exposure_batch` siguen despachando por
+// `dynamic_cast` a HullWhite1FModel/HullWhite2FModel ("único sitio que conoce ambos modelos a
+// la vez") porque siguen dependiendo del modelo (Monte Carlo). `compute_npv_batch`/
+// `compute_dv01_batch` ya NO (PLAN_REAPI.md §6 Fase 4, ver PresentValueMeasure/Dv01Measure).
 std::vector<ExposureProfile> compute_exposure_profile_batch(
     const IModel& model, const std::vector<const IrSwapProduct*>& irs_products,
     const PricingContext& pricing, const ExecutionContext& execution
@@ -136,7 +146,18 @@ std::vector<double> compute_cva_from_exposure_batch(
     const std::vector<ExposureProfile>& profiles,
     double hazard_rate, double recovery_rate
 );
-std::vector<double> compute_npv_batch(const IModel& model, const std::vector<const IrSwapProduct*>& irs_products);
-std::vector<double> compute_npv_delta_r0_batch(const IModel& model, const std::vector<const IrSwapProduct*>& irs_products);
+// PLAN_REAPI.md §6 Fase 4: a diferencia de las tres de arriba, estas dos YA NO dependen del
+// modelo -- PV/DV01 de un swap vainilla son función únicamente de la curva de descuento
+// observada (`MarketSnapshot`), no del tipo corto simulado. `irs_products` sigue siendo un
+// lote ya validado por `require_homogeneous_irs_batch` (`use_par_rate() == false` en todos,
+// así que a diferencia de `calc()` estas dos no necesitan calcular un par rate).
+std::vector<double> compute_npv_batch(const MarketSnapshot& market, const std::vector<const IrSwapProduct*>& irs_products);
+
+// DV01 por lote (PLAN_REAPI.md §6 Fase 4): ya no es `d(NPV)/d(r0)` (el modelo ni interviene) --
+// es bump-and-reval de la curva de descuento: bump paralelo de todos los `zero_rates` en
+// `bump`, reprecio con la `MarketSnapshot` bumpeada, diferencia contra el precio base.
+std::vector<double> compute_dv01_batch(
+    const MarketSnapshot& market, const std::vector<const IrSwapProduct*>& irs_products, double bump
+);
 
 } // namespace engine

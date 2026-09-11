@@ -211,7 +211,7 @@ std::vector<MeasureResult> evaluate_batch_registered_measure(
         return results;
     }
     if (registered_type == "PV") {
-        std::vector<double> pvs = compute_npv_batch(model, irs_products);
+        std::vector<double> pvs = compute_npv_batch(market, irs_products);
         std::vector<MeasureResult> results;
         results.reserve(pvs.size());
         for (double pv : pvs) {
@@ -224,13 +224,13 @@ std::vector<MeasureResult> evaluate_batch_registered_measure(
     }
     if (registered_type == "DV01") {
         double bump = get_double(params, "bump", 0.0001);
-        std::vector<double> deltas = compute_npv_delta_r0_batch(model, irs_products);
+        std::vector<double> deltas = compute_dv01_batch(market, irs_products, bump);
         std::vector<MeasureResult> results;
         results.reserve(deltas.size());
         for (double delta : deltas) {
             MeasureResult r;
             r.has_scalar = true;
-            r.scalar = delta * bump;
+            r.scalar = delta;
             results.push_back(r);
         }
         return results;

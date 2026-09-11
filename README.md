@@ -195,10 +195,12 @@ for row in eng.calc_batch(trades, ["PV", "UnilateralCVA"], model, market, pricin
     print(row.trade_index, row.measures["PV"].scalar, row.measures["UnilateralCVA"].scalar)
 ```
 
-`DV01` is the one exception to "batching is free": with a shared `r0`, reverse-mode AD gives
-the *sum* of per-trade sensitivities in one backward pass, not each one separately, so the
-batch `DV01` still runs one backward pass per trade internally — it saves the FFI/client
-round-trips, not the differentiation cost itself.
+`PV`/`DV01` discount from the observed `MarketSnapshot` curve, not the model (PLAN_REAPI.md
+§6 Phase 4) — the swap is replicated in zero-coupon bonds via `discount_factor(t)`, so batching
+these two is genuinely cheap: no model dispatch, no Monte Carlo, no autodiff, just one
+`discount_factor` call per cash-flow date per trade. `DV01` is bump-and-reval, not AAD: a
+configurable parallel bump (`Params["bump"]`, default 0.0001) shifts every `zero_rates` point,
+and the batch reprices with the bumped curve once for the whole batch, same cost model as `PV`.
 
 ## Build and test from source
 
@@ -288,8 +290,11 @@ PLAN.md                    Architectural decisions and implementation history
   remain roadmap items.
 - `pricing_date` is currently metadata. Calendar generation and day-count arithmetic are
   not implemented.
-- `PV` and `DV01` are model-based and do not yet discount from the `MarketSnapshot` curve.
-  The curve is used by calibration; hazard and recovery data feed unilateral CVA.
+- `PV` and `DV01` discount from the observed `MarketSnapshot` curve and no longer depend on
+  the model at all (PLAN_REAPI.md §6 Phase 4); `ExpectedExposure`/`PFE95`/`UnilateralCVA`
+  still do (Monte Carlo, revaluing at future dates where no market curve is observable) — this
+  asymmetry is intentional. The curve also feeds calibration; hazard and recovery data feed
+  unilateral CVA.
 - Calibration currently targets a discount curve. Production calibration to instruments
   such as swaptions or caps is outside the present scope.
 - The Excel client and packaged release artifacts target 64-bit Windows. The Rust core and
