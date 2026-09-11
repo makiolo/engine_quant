@@ -23,7 +23,21 @@
 > cinco capas + Fase 7.19: niveles 2 y 3 completos de la API de cálculo por lotes —
 > `calc_batch` (homogéneo), `calc_many` (heterogéneo, agrupa y llama a `calc_batch`) y
 > `calc_grid` (explosión Trades × Models × Markets, llama a `calc_many` por celda) — con las 5
-> medidas de `ENGINE.CALC` soportadas en lote, en las cinco capas**
+> medidas de `ENGINE.CALC` soportadas en lote, en las cinco capas + Fase 7.20: `Curve` extraída
+> de `MarketSnapshot` por composición (renombrado puro en Rust, composición real en C++) +
+> Fase 7.21: fachada Python tipada `engine_typed` (`pydantic`) sobre `TradeSpec`/`Model`/
+> `Market`/`PricingContext`/`ExecutionContext`/`Measure`, `MeasureSpec` genérico en `calc.hpp`
+> (abre `calc()` a cualquier nombre del registry, `DV01(bump=...)` configurable), y cambio de
+> contrato numérico: `PV`/`DV01` pasan a descontar por la curva de `Market` observada en vez
+> del modelo (`ExpectedExposure`/`PFE95`/`UnilateralCVA` siguen por Monte Carlo), más DV01
+> "bucketed" por pillar + Fase 7.22: renombrado puro `calc`/`calc_batch`/`calc_many`/
+> `calc_grid` → `price`/`price_batch`/`price_many`/`price_grid` en las cuatro capas
+> C++/C ABI/Python/Excel (`ENGINE.CALC*` → `ENGINE.PRICE*`, `engine_abi_calc*` →
+> `engine_abi_price*`), sin cambio de comportamiento + Fase 7.23: consistencia de
+> documentación (`README.md`/`PLAN.md` al día con §7.20-§7.22, notebook
+> `demo_registry.ipynb` reescrito -- usaba la API `calc` retirada) y los ejemplos Python
+> (`price_flow.py`/`price_flow_typed.py`/`price_batch_flow.py`) siempre sobre
+> `engine_typed`/`pydantic`, nunca dict crudo**
 
 ## 1. Visión
 
@@ -283,6 +297,26 @@ añade en cuanto exista más de un cliente.
     `calc_many` (heterogéneo, agrupa por tipo+calendario y llama a `calc_batch`) y `calc_grid`
     (explosión Trades × Models × Markets, llama a `calc_many` por combinación
     modelo×mercado), en las cinco capas (ver §7.19).
+14. **Fase 7.20** ✅ — `Curve` (pillars/zero_rates/interpolación) extraída de `MarketSnapshot`
+    por composición: renombrado puro en Rust (`MarketSnapshot`→`Curve`, mismo tipo), `Curve`
+    nuevo en C++ compuesto dentro de `MarketSnapshot` (hazard_rate/recovery_rate no forman
+    parte de la curva) sin romper ningún constructor/accessor existente (ver §7.20).
+15. **Fase 7.21** ✅ — Fachada Python tipada `engine_typed` (`pydantic>=2`, dependencia
+    obligatoria nueva) sobre `TradeSpec`/`IRSwap` (sentinel `PAR` explícito, `fixed_rate`
+    requerido), `Model`/`Market`/`PricingContext`/`ExecutionContext`, y `Measure`
+    (`PV`/`DV01(bump=...)`/`ExposureProfile`/`UnilateralCVA` vía `.to_spec()`); `MeasureSpec`
+    genérico en `calc.hpp` (C++/C ABI/Python/Excel, retrocompatible) que abre `calc()` a
+    cualquier nombre del registry; y cambio de contrato numérico — `PV`/`DV01` pasan a
+    descontar por la curva de `Market` observada en vez del modelo (`ExpectedExposure`/
+    `PFE95`/`UnilateralCVA` siguen dependiendo del modelo vía Monte Carlo, asimetría
+    intencional), con DV01 "bucketed" por pillar como nivel final (ver §7.21).
+16. **Fase 7.22** ✅ — Renombrado puro `calc`/`calc_batch`/`calc_many`/`calc_grid` →
+    `price`/`price_batch`/`price_many`/`price_grid` en C++/C ABI/Python/Excel
+    (`ENGINE.CALC*`→`ENGINE.PRICE*`), sin cambio de comportamiento ni de firma (ver §7.22).
+17. **Fase 7.23** ✅ — Consistencia de `README.md`/`PLAN.md` con §7.20-§7.22 (bloque "Estado"
+    y roadmap al día, notebook `demo_registry.ipynb` reescrito -- usaba la API `calc`
+    retirada) y los tres ejemplos Python siempre sobre `engine_typed`/`pydantic`, nunca dict
+    crudo (`price_flow_typed_trade.py` eliminado por redundante, ver §7.23).
 
 ## 7. Estructura de repos/carpetas (Fase 0)
 
@@ -2145,6 +2179,73 @@ en verde tras renombrar `price_batch.rs`. Verificación exhaustiva de que no que
 identificador `calc`/`Calc`/`CALC`/`ENGINE.CALC` fuera de `PLAN.md`/`PLAN_REAPI.md` (`grep`
 dirigido sobre `clients/`, `cpp/`, `examples/`, `rust/`, `README.md`, `.github/`) y de que
 ninguna palabra española con raíz `calcul-` quedó corrompida.
+
+## 7.23 Consistencia de documentación + ejemplos Python siempre sobre `engine_typed`
+
+### Motivación
+
+Petición directa del usuario tras cerrar §7.22: revisar que `README.md`/`PLAN.md` quedaran
+consistentes con el renombrado, y que los ejemplos Python usaran siempre `engine_typed`
+(`pydantic`) en vez de dict crudo -- hasta ahora solo `price_flow_typed.py` lo hacía;
+`price_flow.py`/`price_batch_flow.py` seguían con el dict dinámico, y `README.md`/
+`README_PYPI.md` mostraban ese mismo dict como ejemplo principal.
+
+### Diseño
+
+- **`price_flow.py`/`price_batch_flow.py` convertidos a `engine_typed`**: mismo flujo de
+  siempre, pero `Trade`/`Model`/`Market`/`PricingContext`/`ExecutionContext` construidos como
+  objetos `pydantic` (`q.IRSwap`/`q.HullWhite1F`/`q.HullWhite2F`/`q.Market`/
+  `q.PricingContext`/`q.ExecutionContext`), `.to_params()` alimentando el `Engine` real sin
+  tocar el core. `price_flow.py` incorpora también el demo de `IRSwap.par(...)` (swap "a la
+  par") que antes vivía en `price_flow_typed_trade.py` -- **`price_flow_typed_trade.py` se
+  elimina** (`git rm`): con `price_flow.py` ya tipado, ese fichero pasó a ser un subconjunto
+  redundante línea por línea, mantener dos ejemplos casi idénticos no aporta nada. Tres
+  ejemplos quedan, cada uno con un rol distinto y documentado en
+  `clients/python/examples/README.md` (antes desactualizado: no listaba ni `price_flow_typed.py`
+  ni el fichero eliminado): `price_flow.py` (flujo básico + PAR), `price_flow_typed.py`
+  (showcase de medidas con `Params` real -- `DV01(bump=...)`/`DV01(bucketed=True)` sobre una
+  curva multi-pillar real), `price_batch_flow.py` (los tres niveles de lote).
+- **`README.md`/`README_PYPI.md` reestructurados pydantic-primero**: el bloque de código
+  principal de "Quick start with Python" pasa a usar `engine_typed`; el dict crudo baja a una
+  sección "Dynamic dict facade"/"Fachada dinámica (dict crudo)" explícita, presentada como la
+  fachada de bajo nivel que sigue existiendo (la que usan Excel/C ABI) y sigue siendo válida
+  desde Python, no como lo primero que ve quien lee el README. Las secciones de Calibración y
+  de "Batch and grid calculation" de `README.md` también pasan a construir `Model`/`Trade` con
+  `engine_typed` en vez de dicts. **Los cuatro bloques de código de `README.md` y los dos de
+  `README_PYPI.md` se ejecutaron literalmente (copiados a un script y corridos contra el
+  `Engine` real) antes de darlos por buenos** -- documentación con código que no corre es peor
+  que no tener documentación.
+- **`clients/python/notebooks/demo_registry.ipynb` -- roto, no solo desactualizado**: usaba
+  `eng.calc`/`calc_batch`/`calc_many`/`calc_grid` (inexistentes desde §7.22) y mencionaba
+  `cpp/engine/src/calc.cpp` (renombrado a `price.cpp` en la misma fase) -- ejecutarlo tal cual
+  lanzaba `AttributeError`. Encontrado al revisar exhaustivamente qué más, fuera de
+  `clients/`/`cpp/`/`examples/`/`rust/`/`README.md`/`.github/` (el barrido de §7.22), seguía
+  usando el vocabulario viejo. Reescrito celda a celda (script Python que edita el JSON del
+  notebook, no a mano) para usar `engine_typed` de punta a punta y `price`/`price_batch`/
+  `price_many`/`price_grid`; **las 21 celdas de código se ejecutaron secuencialmente de punta
+  a punta** (fuera de Jupyter, con `exec` sobre cada `cell.source` en un único namespace
+  compartido, saltando solo la celda de `matplotlib`) contra el `.pyd` real antes de darlo por
+  bueno -- el notebook no se ejecuta en CI (no hay verificación automática de que siga vivo),
+  así que esta comprobación manual es la única red de seguridad real.
+- **`PLAN.md` -- bloque "Estado" (cabecera) y lista de §6 (Roadmap) desactualizados desde
+  antes de esta sesión**: no mencionaban §7.20 (ya cerrada en un commit anterior a este trabajo)
+  ni, por construcción, §7.21/§7.22 (cerradas en esta sesión). Completados ambos sin reescribir
+  ninguna entrada existente (mismo criterio append-only ya fijado). El resto de `PLAN.md`
+  (§1-§4, arquitectura/visión original de Fase 0) se dejó **sin tocar**: describe la visión de
+  diseño original, no un estado operativo que deba coincidir con el código actual -- alcance
+  distinto al de esta revisión, que se centró en lo afectado por §7.21/§7.22.
+
+### Verificación
+
+Los tres ejemplos Python (`price_flow.py`/`price_flow_typed.py`/`price_batch_flow.py`)
+ejecutados de punta a punta contra el `.pyd` real. Las 21 celdas de código del notebook
+ejecutadas secuencialmente (script ad-hoc, fuera de Jupyter) sin errores, mismos valores que
+ya verifica `test_price.py`/`test_calibration.py` (EE/PFE/CVA/calibración). Los seis bloques
+de código de `README.md`/`README_PYPI.md` (quick start, fachada dinámica, calibración, lote)
+ejecutados literalmente contra el `Engine` real. Suite Python completa
+(`test_smoke`/`test_registry`/`test_price`/`test_calibration`/`test_price_measure_spec`/
+`test_price_market_discounting`/`test_engine_typed_*`) en verde -- sin cambios de código C++/
+C ABI/Excel en esta fase, no hizo falta rebuild.
 
 ---
 *Próxima iteración: confirmar en la práctica (no se pudo ejecutar GitHub Actions desde este

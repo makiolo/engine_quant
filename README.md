@@ -83,46 +83,50 @@ cd engine_quant
 python -m pip install .
 ```
 
-Then create a model, trade, market, and explicit calculation contexts:
+`engine-quant` installs two packages: the compiled `engine` extension, and `engine_typed` —
+a pure-Python, `pydantic`-backed facade for building `Trade`/`Model`/`Market`/
+`PricingContext`/`ExecutionContext` with real validation instead of raw dicts. It is the
+recommended way to use the engine from Python; see [Dynamic dict facade](#dynamic-dict-facade)
+below for the lower-level alternative that Excel and the C ABI use.
 
 ```python
 import engine
+import engine_typed as q
 
 eng = engine.Engine()
 
-model = eng.create_model(
-    "HullWhite1F",
-    {"a": 0.10, "b": 0.03, "sigma": 0.01, "r0": 0.02},
+model = q.HullWhite1F(a=0.10, b=0.03, sigma=0.01, r0=0.02)
+
+# Omitting fixed_rate is a validation error, not a par swap — use IRSwap.par(...) for that.
+trade = q.IRSwap(
+    notional=1_000_000.0,
+    fixed_rate=0.02,
+    payment_times=[1.0, 2.0, 3.0, 4.0, 5.0],
+    accruals=[1.0, 1.0, 1.0, 1.0, 1.0],
 )
 
-# Omitting fixed_rate creates a par swap under the selected model.
-trade = eng.create_product(
-    "IRSwap",
-    {
-        "notional": 1_000_000.0,
-        "payment_times": [1.0, 2.0, 3.0, 4.0, 5.0],
-        "accruals": [1.0, 1.0, 1.0, 1.0, 1.0],
-    },
-)
-
-market = engine.MarketSnapshot(
+market = q.Market(
     pillars=[1.0, 2.0],
     zero_rates=[0.02, 0.02],
     hazard_rate=0.02,
     recovery_rate=0.40,
 )
-pricing = engine.PricingContext(
-    {"pricing_date": 0.0, "n_paths": 5_000, "n_steps": 208, "seed": 7}
-)
-execution = engine.ExecutionContext({"backend": "auto", "precision": "FP64"})
+pricing = q.PricingContext(n_paths=5_000, n_steps=208, seed=7)
+execution = q.ExecutionContext(backend="auto")
+
+eng_model = eng.create_model(model.model_type, model.to_params())
+eng_trade = eng.create_product(trade.product_type, trade.to_params())
+eng_market = engine.MarketSnapshot(**market.to_params())
+eng_pricing = engine.PricingContext(pricing.to_params())
+eng_execution = engine.ExecutionContext(execution.to_params())
 
 results = eng.price(
-    trade,
+    eng_trade,
     ["PV", "DV01", "ExpectedExposure", "PFE95", "UnilateralCVA"],
-    model,
-    market,
-    pricing,
-    execution,
+    eng_model,
+    eng_market,
+    eng_pricing,
+    eng_execution,
 )
 
 print(results["PV"].scalar)
@@ -134,6 +138,34 @@ print(results["UnilateralCVA"].scalar)
 Discover the registered surface at runtime with `list_models()`, `list_products()`,
 `list_measures()`, and `list_calibrators()`.
 
+### Dynamic dict facade
+
+`engine_typed` translates to the same `Params`/dict that `engine.Engine` already accepts
+directly — the facade Excel and the C ABI use, and still valid from Python for quick scripts
+or raw JSON:
+
+```python
+import engine
+
+eng = engine.Engine()
+model = eng.create_model("HullWhite1F", {"a": 0.10, "b": 0.03, "sigma": 0.01, "r0": 0.02})
+# Omitting fixed_rate here means "par swap" — the one ambiguity engine_typed.IRSwap removes.
+trade = eng.create_product(
+    "IRSwap",
+    {
+        "notional": 1_000_000.0,
+        "payment_times": [1.0, 2.0, 3.0, 4.0, 5.0],
+        "accruals": [1.0, 1.0, 1.0, 1.0, 1.0],
+    },
+)
+market = engine.MarketSnapshot(pillars=[1.0, 2.0], zero_rates=[0.02, 0.02], hazard_rate=0.02, recovery_rate=0.40)
+pricing = engine.PricingContext({"pricing_date": 0.0, "n_paths": 5_000, "n_steps": 208, "seed": 7})
+execution = engine.ExecutionContext({"backend": "auto", "precision": "FP64"})
+
+results = eng.price(trade, ["PV", "DV01"], model, market, pricing, execution)
+print(results["PV"].scalar)
+```
+
 ## Calibration
 
 Calibrators use the same registry pattern as models and products. Their output can be
@@ -142,19 +174,13 @@ passed directly to `create_model`:
 ```python
 pillars = [0.5, 1.0, 2.0, 3.0, 5.0, 7.0, 10.0]
 market = engine.MarketSnapshot.synthetic_from_hull_white(
-    a=0.15,
-    b=0.025,
-    sigma=0.008,
-    r0=0.02,
-    pillars=pillars,
+    a=0.15, b=0.025, sigma=0.008, r0=0.02, pillars=pillars,
 )
 
+initial_guess = q.HullWhite1F(a=0.30, b=0.01, sigma=0.008, r0=0.02)
 calibrator = eng.create_calibrator("HullWhite1F")
-fit = calibrator.calibrate(
-    market,
-    {"a": 0.30, "b": 0.01, "sigma": 0.008, "r0": 0.02},
-)
-calibrated_model = eng.create_model("HullWhite1F", fit.optimal_params)
+fit = calibrator.calibrate(market, initial_guess.to_params())
+calibrated_model = eng.create_model("HullWhite1F", q.HullWhite1F(**fit.optimal_params).to_params())
 
 print(fit.rmse, fit.iterations, fit.converged)
 ```
@@ -184,14 +210,13 @@ All three return one row per trade (and, for `price_grid`, per model/market too)
 index attached explicitly — never a nested list:
 
 ```python
+schedule = {"payment_times": [1.0, 2.0, 3.0, 4.0, 5.0], "accruals": [1.0] * 5}
 trades = [
-    eng.create_product("IRSwap", {"notional": 1_000_000.0, "fixed_rate": 0.02,
-                                   "payment_times": [1, 2, 3, 4, 5], "accruals": [1] * 5}),
-    eng.create_product("IRSwap", {"notional": 2_500_000.0, "fixed_rate": 0.015,
-                                   "payment_times": [1, 2, 3, 4, 5], "accruals": [1] * 5}),
+    eng.create_product("IRSwap", q.IRSwap(notional=1_000_000.0, fixed_rate=0.02, **schedule).to_params()),
+    eng.create_product("IRSwap", q.IRSwap(notional=2_500_000.0, fixed_rate=0.015, **schedule).to_params()),
 ]
 
-for row in eng.price_batch(trades, ["PV", "UnilateralCVA"], model, market, pricing, execution):
+for row in eng.price_batch(trades, ["PV", "UnilateralCVA"], eng_model, eng_market, eng_pricing, eng_execution):
     print(row.trade_index, row.measures["PV"].scalar, row.measures["UnilateralCVA"].scalar)
 ```
 
@@ -301,6 +326,9 @@ PLAN.md                    Architectural decisions and implementation history
   non-Excel CMake targets are designed to remain portable.
 - GPU support is experimental and must be enabled explicitly. `backend="auto"` resolves to
   GPU only in a GPU-enabled build; otherwise it resolves to CPU.
+- Per-measure configuration (`DV01(bump=...)`/`DV01(bucketed=True)`) is only reachable from
+  Python (`engine_typed`, or a `(name, params)` tuple against `Engine.price`) — Excel and the
+  C ABI still take plain measure names.
 
 See [PLAN.md](PLAN.md) for the detailed architecture record, numerical-validation strategy,
 completed phases, and future work.

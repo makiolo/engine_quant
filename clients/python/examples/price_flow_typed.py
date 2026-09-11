@@ -1,6 +1,10 @@
-"""Equivalente completo de `price_flow.py` usando solo `engine_typed` (PLAN_REAPI.md §6 Fase 2):
-cero dicts crudos -- Trade/Model/Market/PricingContext/ExecutionContext tipados, `.to_params()`
-alimenta el mismo `Engine.price(...)` de siempre.
+"""Showcase de medidas tipadas con configuración real sobre `engine_typed`
+(PLAN_REAPI.md §6 Fases 3-5) -- construida sobre el mismo patrón que `price_flow.py` (Trade/
+Model/Market/PricingContext/ExecutionContext tipados, `.to_params()` alimenta el `Engine.price`
+de siempre), pero centrada en lo que `price_flow.py` no cubre: `q.DV01(bump=...)`/
+`q.DV01(bucketed=True)` -- medidas con `Params` real, ver `.to_spec()` -- y una curva de
+mercado multi-pillar real (no de un solo punto) para que la forma de la curva importe de
+verdad en PV/DV01.
 """
 
 import sys
