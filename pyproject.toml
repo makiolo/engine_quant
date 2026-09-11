@@ -10,6 +10,11 @@ version = "0.0.0"
 description = "Motor de calculo XVA (CVA/DVA/FVA/MVA/KVA): cliente Python (import engine) sobre el registry C++/Rust del motor."
 readme = "clients/python/README_PYPI.md"
 requires-python = ">=3.9"
+# `pydantic` es dependencia obligatoria desde PLAN_REAPI.md §6 Fase 1 (engine_typed): renuncia
+# deliberada a la promesa anterior "sin dependencias Python en tiempo de ejecución"
+# (README_PYPI.md) a cambio de la fachada tipada q.IRSwap/q.HullWhite1F/... -- la extensión
+# nativa `engine` en sí sigue sin dependencias.
+dependencies = ["pydantic>=2"]
 
 [tool.scikit-build]
 # El CMakeLists.txt raiz orquesta Rust (Corrosion) + C++ (registry) + Python (nanobind) +
@@ -20,8 +25,9 @@ build.targets = ["engine_py_ext"]
 build.verbose = true
 cmake.build-type = "Release"
 cmake.define = { ENGINE_QUANT_BUILD_TESTS = "OFF", ENGINE_QUANT_BUILD_EXCEL = "OFF" }
-# El unico artefacto instalado es engine.pyd (nanobind, OUTPUT_NAME "engine") vía el
-# install(TARGETS engine_py_ext ...) de clients/python/CMakeLists.txt: no hay paquete Python
-# (src/<paquete>) que auto-copiar.
-wheel.packages = []
+# El unico artefacto instalado por CMake es engine.pyd (nanobind, OUTPUT_NAME "engine") vía el
+# install(TARGETS engine_py_ext ...) de clients/python/CMakeLists.txt. `engine_typed`
+# (PLAN_REAPI.md §6 Fase 1) es un paquete Python puro aditivo -- no pasa por CMake, se
+# autocopia desde clients/python/src/engine_typed al layout de la wheel.
+wheel.packages = ["clients/python/src/engine_typed"]
 wheel.install-dir = "."

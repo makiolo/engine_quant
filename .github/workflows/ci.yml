@@ -144,3 +144,11 @@ jobs:
       # incluido el round-trip MarketSnapshot -> calibrate -> Engine.create_model.
       - name: Python calibration test (MarketSnapshot/Calibrator)
         run: python clients/python/tests/test_calibration.py build/clients/python
+
+      # PLAN_REAPI.md §6 Fase 1: engine_typed es un paquete Python puro (no pasa por CMake),
+      # así que solo necesita su dependencia (pydantic) instalada -- no un rebuild.
+      - name: Install engine_typed runtime dependency (pydantic)
+        run: pip install "pydantic>=2"
+
+      - name: Python engine_typed test (TradeSpec/IRSwap tipados)
+        run: python clients/python/tests/test_engine_typed_trade.py build/clients/python

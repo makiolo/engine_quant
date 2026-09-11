@@ -26,9 +26,30 @@ result = eng.calc(product, ["PV", "DV01", "ExpectedExposure", "PFE95", "Unilater
 print(result["UnilateralCVA"].scalar)  # CVA unilateral
 ```
 
-El paquete se llama `engine-quant` pero el módulo importable es `engine` (extensión nativa
-compilada, sin dependencias Python en tiempo de ejecución: Rust y el runtime de C++ quedan
-embebidos en la propia rueda).
+El paquete se llama `engine-quant`; el módulo importable de la extensión nativa es `engine`
+(compilada, sin dependencias Python propias: Rust y el runtime de C++ quedan embebidos en la
+propia rueda). Desde `engine_typed` (fachada tipada, ver más abajo) el paquete `engine-quant`
+sí depende de `pydantic>=2` en tiempo de ejecución.
 
 Solo hay ruedas para Windows (`win_amd64`): es la única plataforma que compila y testea este
 proyecto hoy (ver `PLAN.md`, §7.4).
+
+## `engine_typed`: fachada tipada (opcional)
+
+`engine_typed` (paquete Python puro, aditivo) traduce objetos `pydantic` al mismo
+`Params`/dict que ya consume `engine.Engine` -- no sustituye la fachada dinámica de arriba, es
+una fachada más sobre el mismo registry (ver `PLAN_REAPI.md`).
+
+```python
+import engine, engine_typed as q
+
+trade = q.IRSwap(
+    notional=1_000_000.0, fixed_rate=0.02,
+    payment_times=[1.0, 2.0, 3.0, 4.0, 5.0], accruals=[1.0, 1.0, 1.0, 1.0, 1.0],
+)
+# swap "a la par": q.IRSwap.par(notional=..., payment_times=..., accruals=...)
+# -- omitir fixed_rate directamente es un ValidationError, no PAR (propuesta 2).
+
+eng = engine.Engine()
+product = eng.create_product(trade.product_type, trade.to_params())
+```
