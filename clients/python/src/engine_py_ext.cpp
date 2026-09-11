@@ -42,6 +42,36 @@ engine::Params dict_to_params(const nb::dict& params) {
     return result;
 }
 
+// Traduce un elemento de la lista `measures` de Engine.calc/calc_batch/calc_many/calc_grid a
+// un engine::MeasureSpec (PLAN_REAPI.md §6 Fase 3): un string "pelado" (measure_names de
+// siempre, PLAN.md §7.15/§7.19) es MeasureSpec{name, {}}; una tupla (nombre, dict) es
+// MeasureSpec{name, dict_to_params(dict)} -- así engine_typed.DV01(bump=...).to_spec() (una
+// tupla (str, dict)) y el ["PV", "DV01"] de siempre conviven en la misma llamada.
+engine::MeasureSpec to_measure_spec(nb::handle item) {
+    if (nb::isinstance<nb::str>(item)) {
+        return engine::MeasureSpec{nb::cast<std::string>(item), engine::Params{}};
+    }
+    if (nb::isinstance<nb::tuple>(item)) {
+        nb::tuple spec = nb::borrow<nb::tuple>(item);
+        if (spec.size() != 2) {
+            throw std::invalid_argument("Engine.calc: una medida-tupla debe ser (nombre, params)");
+        }
+        std::string name = nb::cast<std::string>(spec[0]);
+        nb::dict params = nb::cast<nb::dict>(spec[1]);
+        return engine::MeasureSpec{std::move(name), dict_to_params(params)};
+    }
+    throw std::invalid_argument("Engine.calc: cada medida debe ser un string o una tupla (nombre, params)");
+}
+
+std::vector<engine::MeasureSpec> to_measure_specs(const nb::list& measures) {
+    std::vector<engine::MeasureSpec> result;
+    result.reserve(measures.size());
+    for (nb::handle item : measures) {
+        result.push_back(to_measure_spec(item));
+    }
+    return result;
+}
+
 // Inversa de dict_to_params (PLAN.md §7.14): CalibrationResult.optimal_params ya viene como
 // un engine::Params del lado C++ (mismo tipo que consumen las factories del registry) -- para
 // que se sienta "de Python" a la salida igual que a la entrada, se expone como dict nativo en
@@ -68,7 +98,7 @@ public:
     // "UnilateralCVA"), no los nombres registrados en Registry<IMeasure> -- ese registro
     // sigue siendo el mecanismo de extensión (PLAN.md §5.4), pero ya no se expone
     // directamente: se consume a través de calc().
-    std::vector<std::string> list_measures() const { return engine::calc_measure_names(); }
+    std::vector<std::string> list_measures() const { return engine::calc_measure_names(registries_); }
     std::vector<std::string> list_calibrators() const { return registries_.calibrators.list(); }
 
     std::unique_ptr<engine::IModel> create_model(const std::string& name, const nb::dict& params) const {
@@ -84,17 +114,19 @@ public:
     }
 
     // Sustituye por completo create_measure/Measure.evaluate (PLAN.md §7.15): calcula un lote
-    // de medidas nombradas de una vez, devolviendo un dict {nombre: MeasureResult} en vez de
-    // una medida a la vez con un dict de parámetros genérico.
+    // de medidas de una vez, devolviendo un dict {nombre: MeasureResult} en vez de una medida
+    // a la vez con un dict de parámetros genérico. Cada elemento de `measures` es un string
+    // "pelado" o una tupla (nombre, params) -- PLAN_REAPI.md §6 Fase 3, ver to_measure_spec.
     nb::dict calc(
         const engine::IProduct& product,
-        const std::vector<std::string>& measure_names,
+        const nb::list& measures,
         const engine::IModel& model,
         const engine::MarketSnapshot& market,
         const engine::PricingContext& pricing,
         const engine::ExecutionContext& execution
     ) const {
-        engine::CalcResult result = engine::calc(registries_, product, measure_names, model, market, pricing, execution);
+        engine::CalcResult result =
+            engine::calc(registries_, product, to_measure_specs(measures), model, market, pricing, execution);
         nb::dict out;
         for (const auto& entry : result) {
             out[entry.measure_name.c_str()] = entry.result;
@@ -108,13 +140,13 @@ public:
     // anidada: cada fila lleva su trade_index explícito, misma filosofía en las cinco capas.
     std::vector<engine::CalcBatchResultEntry> calc_batch(
         const std::vector<const engine::IProduct*>& products,
-        const std::vector<std::string>& measure_names,
+        const nb::list& measures,
         const engine::IModel& model,
         const engine::MarketSnapshot& market,
         const engine::PricingContext& pricing,
         const engine::ExecutionContext& execution
     ) const {
-        return engine::calc_batch(registries_, products, measure_names, model, market, pricing, execution);
+        return engine::calc_batch(registries_, products, to_measure_specs(measures), model, market, pricing, execution);
     }
 
     // Nivel 2, lista heterogénea (PLAN.md §7.17/§7.19): misma forma de resultado que
@@ -122,26 +154,26 @@ public:
     // internamente y nunca falla por heterogeneidad (ver engine::calc_many).
     std::vector<engine::CalcBatchResultEntry> calc_many(
         const std::vector<const engine::IProduct*>& products,
-        const std::vector<std::string>& measure_names,
+        const nb::list& measures,
         const engine::IModel& model,
         const engine::MarketSnapshot& market,
         const engine::PricingContext& pricing,
         const engine::ExecutionContext& execution
     ) const {
-        return engine::calc_many(registries_, products, measure_names, model, market, pricing, execution);
+        return engine::calc_many(registries_, products, to_measure_specs(measures), model, market, pricing, execution);
     }
 
     // Explosión de combinaciones Trades x Models x Markets (PLAN.md §7.19): pricing/execution
     // son compartidos, no forman parte de la rejilla -- ver engine::calc_grid.
     std::vector<engine::CalcGridResultEntry> calc_grid(
         const std::vector<const engine::IProduct*>& products,
-        const std::vector<std::string>& measure_names,
+        const nb::list& measures,
         const std::vector<const engine::IModel*>& models,
         const std::vector<engine::MarketSnapshot>& markets,
         const engine::PricingContext& pricing,
         const engine::ExecutionContext& execution
     ) const {
-        return engine::calc_grid(registries_, products, measure_names, models, markets, pricing, execution);
+        return engine::calc_grid(registries_, products, to_measure_specs(measures), models, markets, pricing, execution);
     }
 
 private:

@@ -55,5 +55,8 @@ product = eng.create_product(trade.product_type, trade.to_params())
 ```
 
 `engine_typed` también cubre `Model` (`q.HullWhite1F`/`q.HullWhite2F`), `Market`,
-`PricingContext` y `ExecutionContext` -- ver `clients/python/examples/calc_flow_typed.py` para
-el flujo completo sin dicts crudos.
+`PricingContext`, `ExecutionContext` y `Measure` (`q.PV()`, `q.DV01(bump=0.0002)`,
+`q.ExposureProfile()`, `q.UnilateralCVA()`, vía `.to_spec()`) -- ver
+`clients/python/examples/calc_flow_typed.py` para el flujo completo sin dicts crudos.
+`Engine.calc`/`calc_batch`/`calc_many`/`calc_grid` aceptan tanto strings "pelados" como tuplas
+`(nombre, params)` en la misma llamada.

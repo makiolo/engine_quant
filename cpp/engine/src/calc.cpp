@@ -1,7 +1,9 @@
 #include "engine/calc.hpp"
 
+#include <algorithm>
 #include <stdexcept>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace engine {
 
@@ -9,29 +11,32 @@ namespace {
 
 enum class Field { Scalar, Primary, Secondary };
 
-struct MeasureNameMapping {
+struct ResolvedMeasure {
     std::string registered_type;
     Field field;
 };
 
-// Único lugar que traduce el vocabulario de ENGINE.CALC al `Registry<IMeasure>` subyacente
-// (PLAN.md §7.15). Añadir una medida nueva a CALC es una fila más aquí -- no hace falta
-// tocar Python/Excel/la C ABI, que solo llaman a `engine::calc`.
-const std::unordered_map<std::string, MeasureNameMapping>& calc_measure_name_mappings() {
-    static const std::unordered_map<std::string, MeasureNameMapping> mappings = {
-        {"PV", {"PV", Field::Scalar}},
-        {"DV01", {"DV01", Field::Scalar}},
+// Los únicos dos nombres de ENGINE.CALC que no coinciden con un tipo registrado en
+// `Registry<IMeasure>` (PLAN_REAPI.md §6 Fase 3): "ExpectedExposure"/"PFE95" heredados de
+// PLAN.md §7.15, que exponen `.primary`/`.secondary` de la misma `ExposureProfileMeasure`
+// bajo dos nombres de cara al usuario. Cualquier otro nombre se resuelve directamente contra
+// el registry (ver resolve_measure_name) -- p.ej. pedir "ExposureProfile" a secas ya funciona
+// hoy y devuelve el `MeasureResult` completo (times + primary=EE + secondary=PFE95), sin
+// recortar campos.
+const std::unordered_map<std::string, ResolvedMeasure>& legacy_field_aliases() {
+    static const std::unordered_map<std::string, ResolvedMeasure> aliases = {
         {"ExpectedExposure", {"ExposureProfile", Field::Primary}},
         {"PFE95", {"ExposureProfile", Field::Secondary}},
-        {"UnilateralCVA", {"UnilateralCVA", Field::Scalar}},
     };
-    return mappings;
+    return aliases;
 }
 
 // Recorta el MeasureResult de la medida registrada subyacente al campo que le corresponde a
 // un nombre concreto de CALC -- PFE95 expone su serie en `.primary` de su propio resultado
 // (no en `.secondary`), para que cada entrada nombrada del lote tenga la misma forma sin que
-// el consumidor tenga que saber de qué campo interno viene.
+// el consumidor tenga que saber de qué campo interno viene. Field::Scalar es identidad: los
+// nombres resueltos directamente contra el registry (el caso general) devuelven el
+// MeasureResult completo tal cual lo calculó la medida.
 MeasureResult extract_field(const MeasureResult& source, Field field) {
     switch (field) {
         case Field::Scalar:
@@ -50,6 +55,56 @@ MeasureResult extract_field(const MeasureResult& source, Field field) {
         }
     }
     throw std::logic_error("engine::calc: Field desconocido"); // inalcanzable
+}
+
+// Resuelve un nombre de MeasureSpec a (tipo registrado, campo a extraer) para `calc()`
+// (PLAN_REAPI.md §6 Fase 3): los dos alias heredados primero, cualquier otro nombre se pasa
+// tal cual al registry -- `calc()` ya no está limitado a una tabla curada cerrada.
+ResolvedMeasure resolve_measure_name(const std::string& name) {
+    const auto& aliases = legacy_field_aliases();
+    auto it = aliases.find(name);
+    if (it != aliases.end()) return it->second;
+    return ResolvedMeasure{name, Field::Scalar};
+}
+
+// Serialización determinista de un Params para usarlo como parte de una clave de caché
+// (PLAN_REAPI.md §6 Fase 3): dos MeasureSpec con el mismo nombre pero distinta configuración
+// (p.ej. DV01(bump=0.0001) y DV01(bump=0.0002) en el mismo calc()) deben evaluarse por
+// separado -- antes de MeasureSpec, "computed" solo se indexaba por nombre porque los
+// measure_names no llevaban configuración.
+std::string params_cache_key(const Params& params) {
+    std::vector<std::string> parts;
+    parts.reserve(params.size());
+    for (const auto& [key, value] : params) {
+        std::string part = key;
+        part += '=';
+        std::visit(
+            [&](const auto& v) {
+                using T = std::decay_t<decltype(v)>;
+                if constexpr (std::is_same_v<T, double>) {
+                    part += std::to_string(v);
+                } else if constexpr (std::is_same_v<T, bool>) {
+                    part += v ? "true" : "false";
+                } else if constexpr (std::is_same_v<T, std::string>) {
+                    part += v;
+                } else {
+                    for (double d : v) {
+                        part += std::to_string(d);
+                        part += ',';
+                    }
+                }
+            },
+            value
+        );
+        parts.push_back(std::move(part));
+    }
+    std::sort(parts.begin(), parts.end());
+    std::string key;
+    for (const std::string& part : parts) {
+        key += part;
+        key += '|';
+    }
+    return key;
 }
 
 // Valida que `products` sea un lote homogéneo válido para `calc_batch` (PLAN.md §7.19): mismo
@@ -95,14 +150,33 @@ std::vector<const IrSwapProduct*> require_homogeneous_irs_batch(const std::vecto
     return irs_products;
 }
 
+// A diferencia de `calc()`, el lote sigue limitado a las medidas que sabe evaluar
+// `evaluate_batch_registered_measure` (ver comentario de `calc_batch` en calc.hpp) -- valida
+// contra este conjunto cerrado en vez de contra `registries.measures` (que sí acepta medidas
+// sin equivalente de lote todavía).
+const std::unordered_set<std::string>& known_batch_registered_types() {
+    static const std::unordered_set<std::string> known = {"PV", "DV01", "UnilateralCVA", "ExposureProfile"};
+    return known;
+}
+
+ResolvedMeasure resolve_batch_measure_name(const std::string& name) {
+    ResolvedMeasure resolved = resolve_measure_name(name);
+    if (known_batch_registered_types().find(resolved.registered_type) == known_batch_registered_types().end()) {
+        throw std::invalid_argument("engine::calc_batch: medida desconocida o no soportada en lote: '" + name + "'");
+    }
+    return resolved;
+}
+
 // Evalúa una medida registrada subyacente (PV/DV01/ExposureProfile/UnilateralCVA) sobre el
 // lote entero de una vez -- equivalente de lote de `IMeasure::evaluate`, pero llamando
 // directamente a los `compute_*_batch` de measure.hpp en vez de pasar por
 // `Registry<IMeasure>`: con un único producto real no hay genericidad que ganar todavía con un
 // método virtual `evaluate_batch` (mismo argumento que ya justificó no generalizar la C ABI de
-// calibración hasta el segundo calibrador, PLAN.md §7.18).
+// calibración hasta el segundo calibrador, PLAN.md §7.18). `params` (PLAN_REAPI.md §6 Fase 3):
+// solo "DV01" lo consume ("bump", default 0.0001, igual que Dv01Measure::evaluate).
 std::vector<MeasureResult> evaluate_batch_registered_measure(
     const std::string& registered_type,
+    const Params& params,
     const IModel& model,
     const std::vector<const IrSwapProduct*>& irs_products,
     const MarketSnapshot& market,
@@ -149,13 +223,14 @@ std::vector<MeasureResult> evaluate_batch_registered_measure(
         return results;
     }
     if (registered_type == "DV01") {
+        double bump = get_double(params, "bump", 0.0001);
         std::vector<double> deltas = compute_npv_delta_r0_batch(model, irs_products);
         std::vector<MeasureResult> results;
         results.reserve(deltas.size());
         for (double delta : deltas) {
             MeasureResult r;
             r.has_scalar = true;
-            r.scalar = delta * 0.0001; // 1 punto básico, igual que Dv01Measure::evaluate
+            r.scalar = delta * bump;
             results.push_back(r);
         }
         return results;
@@ -181,15 +256,65 @@ std::string calendar_group_key(const IrSwapProduct& irs) {
     return key;
 }
 
+std::vector<MeasureSpec> to_measure_specs(const std::vector<std::string>& measure_names) {
+    std::vector<MeasureSpec> measures;
+    measures.reserve(measure_names.size());
+    for (const std::string& name : measure_names) {
+        measures.push_back(MeasureSpec{name, Params{}});
+    }
+    return measures;
+}
+
 } // namespace
 
-std::vector<std::string> calc_measure_names() {
-    std::vector<std::string> names;
-    names.reserve(calc_measure_name_mappings().size());
-    for (const auto& [name, mapping] : calc_measure_name_mappings()) {
-        names.push_back(name);
+std::vector<std::string> calc_measure_names(const Registries& registries) {
+    std::vector<std::string> names = registries.measures.list();
+    for (const auto& [alias, mapping] : legacy_field_aliases()) {
+        names.push_back(alias);
     }
     return names;
+}
+
+CalcResult calc(
+    const Registries& registries,
+    const IProduct& product,
+    const std::vector<MeasureSpec>& measures,
+    const IModel& model,
+    const MarketSnapshot& market,
+    const PricingContext& pricing,
+    const ExecutionContext& execution
+) {
+    // Falla rápido: resuelve y valida todas las specs antes de calcular nada.
+    std::vector<ResolvedMeasure> resolved;
+    resolved.reserve(measures.size());
+    for (const MeasureSpec& spec : measures) {
+        ResolvedMeasure r = resolve_measure_name(spec.name);
+        if (!registries.measures.contains(r.registered_type)) {
+            throw std::invalid_argument("engine::calc: medida desconocida: '" + spec.name + "'");
+        }
+        resolved.push_back(std::move(r));
+    }
+
+    // Evalúa cada (medida registrada, configuración) subyacente como mucho una vez, aunque
+    // varios nombres de CALC la pidan con la misma configuración (p.ej. "ExpectedExposure"+
+    // "PFE95" comparten "ExposureProfile" -- una sola simulación Monte Carlo para ambas, no
+    // dos; dos DV01 con distinto "bump" sí se evalúan por separado).
+    std::unordered_map<std::string, MeasureResult> computed;
+    for (std::size_t i = 0; i < measures.size(); ++i) {
+        const std::string cache_key = resolved[i].registered_type + "#" + params_cache_key(measures[i].params);
+        if (computed.find(cache_key) == computed.end()) {
+            auto measure = registries.measures.create(resolved[i].registered_type, measures[i].params);
+            computed.emplace(cache_key, measure->evaluate(model, product, market, pricing, execution));
+        }
+    }
+
+    CalcResult result;
+    result.reserve(measures.size());
+    for (std::size_t i = 0; i < measures.size(); ++i) {
+        const std::string cache_key = resolved[i].registered_type + "#" + params_cache_key(measures[i].params);
+        result.push_back(CalcResultEntry{measures[i].name, extract_field(computed.at(cache_key), resolved[i].field)});
+    }
+    return result;
 }
 
 CalcResult calc(
@@ -201,63 +326,37 @@ CalcResult calc(
     const PricingContext& pricing,
     const ExecutionContext& execution
 ) {
-    const auto& mappings = calc_measure_name_mappings();
-
-    // Falla rápido: valida todos los nombres antes de calcular nada.
-    for (const std::string& name : measure_names) {
-        if (mappings.find(name) == mappings.end()) {
-            throw std::invalid_argument("engine::calc: medida desconocida: '" + name + "'");
-        }
-    }
-
-    // Evalúa cada medida registrada subyacente como mucho una vez, aunque varios nombres de
-    // CALC la pidan (p.ej. "ExpectedExposure"+"PFE95" comparten "ExposureProfile" -- una sola
-    // simulación Monte Carlo para ambas, no dos).
-    std::unordered_map<std::string, MeasureResult> computed;
-    for (const std::string& name : measure_names) {
-        const std::string& registered_type = mappings.at(name).registered_type;
-        if (computed.find(registered_type) == computed.end()) {
-            auto measure = registries.measures.create(registered_type);
-            computed.emplace(registered_type, measure->evaluate(model, product, market, pricing, execution));
-        }
-    }
-
-    CalcResult result;
-    result.reserve(measure_names.size());
-    for (const std::string& name : measure_names) {
-        const MeasureNameMapping& mapping = mappings.at(name);
-        result.push_back(CalcResultEntry{name, extract_field(computed.at(mapping.registered_type), mapping.field)});
-    }
-    return result;
+    return calc(registries, product, to_measure_specs(measure_names), model, market, pricing, execution);
 }
 
 CalcBatchResult calc_batch(
     const Registries&,
     const std::vector<const IProduct*>& products,
-    const std::vector<std::string>& measure_names,
+    const std::vector<MeasureSpec>& measures,
     const IModel& model,
     const MarketSnapshot& market,
     const PricingContext& pricing,
     const ExecutionContext& execution
 ) {
-    const auto& mappings = calc_measure_name_mappings();
-    for (const std::string& name : measure_names) {
-        if (mappings.find(name) == mappings.end()) {
-            throw std::invalid_argument("engine::calc_batch: medida desconocida: '" + name + "'");
-        }
+    std::vector<ResolvedMeasure> resolved;
+    resolved.reserve(measures.size());
+    for (const MeasureSpec& spec : measures) {
+        resolved.push_back(resolve_batch_measure_name(spec.name));
     }
 
     std::vector<const IrSwapProduct*> irs_products = require_homogeneous_irs_batch(products);
 
-    // Evalúa cada medida registrada subyacente una única vez para TODO el lote, igual que
-    // `calc()` la evalúa una única vez por trade -- "ExpectedExposure"+"PFE95" comparten una
-    // sola simulación Monte Carlo del lote entero, no una por trade ni una por nombre.
+    // Evalúa cada (medida registrada, configuración) subyacente una única vez para TODO el
+    // lote, igual que `calc()` la evalúa una única vez por trade.
     std::unordered_map<std::string, std::vector<MeasureResult>> computed;
-    for (const std::string& name : measure_names) {
-        const std::string& registered_type = mappings.at(name).registered_type;
-        if (computed.find(registered_type) == computed.end()) {
+    for (std::size_t i = 0; i < measures.size(); ++i) {
+        const std::string cache_key = resolved[i].registered_type + "#" + params_cache_key(measures[i].params);
+        if (computed.find(cache_key) == computed.end()) {
             computed.emplace(
-                registered_type, evaluate_batch_registered_measure(registered_type, model, irs_products, market, pricing, execution)
+                cache_key,
+                evaluate_batch_registered_measure(
+                    resolved[i].registered_type, measures[i].params, model, irs_products, market, pricing, execution
+                )
             );
         }
     }
@@ -265,21 +364,33 @@ CalcBatchResult calc_batch(
     CalcBatchResult result;
     result.reserve(irs_products.size());
     for (std::size_t i = 0; i < irs_products.size(); ++i) {
-        CalcResult measures;
-        measures.reserve(measure_names.size());
-        for (const std::string& name : measure_names) {
-            const MeasureNameMapping& mapping = mappings.at(name);
-            measures.push_back(CalcResultEntry{name, extract_field(computed.at(mapping.registered_type)[i], mapping.field)});
+        CalcResult row;
+        row.reserve(measures.size());
+        for (std::size_t j = 0; j < measures.size(); ++j) {
+            const std::string cache_key = resolved[j].registered_type + "#" + params_cache_key(measures[j].params);
+            row.push_back(CalcResultEntry{measures[j].name, extract_field(computed.at(cache_key)[i], resolved[j].field)});
         }
-        result.push_back(CalcBatchResultEntry{i, std::move(measures)});
+        result.push_back(CalcBatchResultEntry{i, std::move(row)});
     }
     return result;
+}
+
+CalcBatchResult calc_batch(
+    const Registries& registries,
+    const std::vector<const IProduct*>& products,
+    const std::vector<std::string>& measure_names,
+    const IModel& model,
+    const MarketSnapshot& market,
+    const PricingContext& pricing,
+    const ExecutionContext& execution
+) {
+    return calc_batch(registries, products, to_measure_specs(measure_names), model, market, pricing, execution);
 }
 
 CalcBatchResult calc_many(
     const Registries& registries,
     const std::vector<const IProduct*>& products,
-    const std::vector<std::string>& measure_names,
+    const std::vector<MeasureSpec>& measures,
     const IModel& model,
     const MarketSnapshot& market,
     const PricingContext& pricing,
@@ -314,9 +425,47 @@ CalcBatchResult calc_many(
         group_products.reserve(indices.size());
         for (std::size_t idx : indices) group_products.push_back(products[idx]);
 
-        CalcBatchResult group_result = calc_batch(registries, group_products, measure_names, model, market, pricing, execution);
+        CalcBatchResult group_result = calc_batch(registries, group_products, measures, model, market, pricing, execution);
         for (std::size_t j = 0; j < indices.size(); ++j) {
             result[indices[j]] = CalcBatchResultEntry{indices[j], std::move(group_result[j].measures)};
+        }
+    }
+    return result;
+}
+
+CalcBatchResult calc_many(
+    const Registries& registries,
+    const std::vector<const IProduct*>& products,
+    const std::vector<std::string>& measure_names,
+    const IModel& model,
+    const MarketSnapshot& market,
+    const PricingContext& pricing,
+    const ExecutionContext& execution
+) {
+    return calc_many(registries, products, to_measure_specs(measure_names), model, market, pricing, execution);
+}
+
+CalcGridResult calc_grid(
+    const Registries& registries,
+    const std::vector<const IProduct*>& products,
+    const std::vector<MeasureSpec>& measures,
+    const std::vector<const IModel*>& models,
+    const std::vector<MarketSnapshot>& markets,
+    const PricingContext& pricing,
+    const ExecutionContext& execution
+) {
+    if (models.empty() || markets.empty()) {
+        throw std::invalid_argument("engine::calc_grid: models y markets no pueden estar vacíos");
+    }
+
+    CalcGridResult result;
+    result.reserve(products.size() * models.size() * markets.size());
+    for (std::size_t m = 0; m < models.size(); ++m) {
+        for (std::size_t k = 0; k < markets.size(); ++k) {
+            CalcBatchResult many_result = calc_many(registries, products, measures, *models[m], markets[k], pricing, execution);
+            for (auto& entry : many_result) {
+                result.push_back(CalcGridResultEntry{entry.trade_index, m, k, std::move(entry.measures)});
+            }
         }
     }
     return result;
@@ -331,21 +480,7 @@ CalcGridResult calc_grid(
     const PricingContext& pricing,
     const ExecutionContext& execution
 ) {
-    if (models.empty() || markets.empty()) {
-        throw std::invalid_argument("engine::calc_grid: models y markets no pueden estar vacíos");
-    }
-
-    CalcGridResult result;
-    result.reserve(products.size() * models.size() * markets.size());
-    for (std::size_t m = 0; m < models.size(); ++m) {
-        for (std::size_t k = 0; k < markets.size(); ++k) {
-            CalcBatchResult many_result = calc_many(registries, products, measure_names, *models[m], markets[k], pricing, execution);
-            for (auto& entry : many_result) {
-                result.push_back(CalcGridResultEntry{entry.trade_index, m, k, std::move(entry.measures)});
-            }
-        }
-    }
-    return result;
+    return calc_grid(registries, products, to_measure_specs(measure_names), models, markets, pricing, execution);
 }
 
 } // namespace engine

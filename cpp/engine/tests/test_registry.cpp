@@ -453,6 +453,58 @@ TEST(Calc, RejectsUnknownMeasureName) {
     );
 }
 
+// PLAN_REAPI.md §6 Fase 3 (propuesta 3): calc() ya no está limitado a la tabla curada de 5
+// nombres -- "ExposureProfile" (el type_name() real de la medida detrás de "ExpectedExposure"/
+// "PFE95") resuelve directamente contra el registry y devuelve el MeasureResult completo (times
+// + primary=EE + secondary=PFE95), sin recortar campos.
+TEST(Calc, ResolvesMeasureNameDirectlyFromTheRegistry) {
+    Registries registries;
+    register_builtins(registries);
+
+    auto model = registries.models.create("HullWhite1F", hull_white_params());
+    auto product = registries.products.create("IRSwap", par_irs_5y_params());
+    MarketSnapshot market = market_with_credit(0.0, 0.0);
+    PricingContext pricing = golden_pricing(5000, 7);
+    ExecutionContext execution = cpu_execution();
+
+    engine::CalcResult result = engine::calc(registries, *product, {"ExposureProfile"}, *model, market, pricing, execution);
+
+    ASSERT_EQ(result.size(), 1u);
+    EXPECT_EQ(result[0].measure_name, "ExposureProfile");
+    ASSERT_EQ(result[0].result.primary.size(), 5u);   // EE
+    ASSERT_EQ(result[0].result.secondary.size(), 5u);  // PFE95, no recortado (a diferencia de "ExpectedExposure")
+    for (std::size_t i = 0; i < 5; ++i) {
+        EXPECT_GE(result[0].result.secondary[i], result[0].result.primary[i]); // PFE95 >= EE
+    }
+}
+
+// PLAN_REAPI.md §6 Fase 3: primera medida con Params real -- DV01(bump=...) escala la misma
+// derivada dNPV/dr0 de Rust (irs_hull_white_npv_delta_r0) por un multiplicador configurable en
+// vez del 0.0001 (1 punto básico) hardcodeado. Dos bumps distintos deben dar escalares
+// proporcionales, nunca el mismo número.
+TEST(Calc, Dv01BumpIsConfigurableViaMeasureSpec) {
+    Registries registries;
+    register_builtins(registries);
+
+    auto model = registries.models.create("HullWhite1F", hull_white_params());
+    auto product = registries.products.create("IRSwap", irs_5y_params(1'000'000.0, 0.02));
+    MarketSnapshot market = market_with_credit(0.0, 0.0);
+    PricingContext pricing = golden_pricing(1, 1); // DV01 es determinista
+    ExecutionContext execution = cpu_execution();
+
+    std::vector<engine::MeasureSpec> measures = {
+        {"DV01", {}},                                  // default: bump=0.0001
+        {"DV01", {{"bump", 0.0002}}},
+    };
+    engine::CalcResult result = engine::calc(registries, *product, measures, *model, market, pricing, execution);
+
+    ASSERT_EQ(result.size(), 2u);
+    ASSERT_TRUE(result[0].result.has_scalar);
+    ASSERT_TRUE(result[1].result.has_scalar);
+    EXPECT_NE(result[0].result.scalar, result[1].result.scalar);
+    EXPECT_NEAR(result[1].result.scalar, result[0].result.scalar * 2.0, 1e-6); // bump doble -> DV01 doble
+}
+
 // PLAN.md §7.19: calc_batch (lote homogéneo) debe coincidir, trade a trade, con llamar a
 // calc() una vez por trade -- mismo espíritu que los tests "matches a loop of scalar calls" de
 // Rust, aquí a nivel de la orquestación C++.

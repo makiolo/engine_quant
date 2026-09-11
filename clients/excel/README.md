@@ -74,9 +74,17 @@ Compute  =ENGINE.CREATE_EXECUTION(<rango contexto de ejecucion>)
 
 Medidas disponibles hoy (`ENGINE.LIST_MEASURES()`): `PV`, `DV01` (ambas deterministas, no usan
 Monte Carlo), `ExpectedExposure`, `PFE95` (comparten una sola simulación Monte Carlo por
-detrás, `ENGINE.CALC` la calcula una vez aunque se pidan las dos) y `UnilateralCVA`. Las
-fechas de monitorización de `ExpectedExposure`/`PFE95` se derivan automáticamente de las
-propias fechas de reseteo del trade — ya no es un parámetro que haya que pasar a mano.
+detrás, `ENGINE.CALC` la calcula una vez aunque se pidan las dos), `ExposureProfile` (el mismo
+cálculo que `ExpectedExposure`/`PFE95`, pero devuelto en un único `MeasureResult` con ambos
+campos a la vez) y `UnilateralCVA`. Las fechas de monitorización de `ExpectedExposure`/
+`PFE95`/`ExposureProfile` se derivan automáticamente de las propias fechas de reseteo del
+trade — ya no es un parámetro que haya que pasar a mano.
+
+`ENGINE.CALC` ya no está limitado a esta lista curada: acepta cualquier nombre presente en el
+registry de medidas del motor (PLAN_REAPI.md §6 Fase 3) — `ENGINE.LIST_MEASURES()` sigue
+siendo la forma de descubrirlos. Configurar una medida (p.ej. el `bump` de `DV01`) no está
+expuesto todavía desde Excel/C ABI -- solo desde Python (`engine_typed`, ver
+`clients/python/README_PYPI.md`); `ENGINE.CALC` con solo nombres sigue funcionando igual.
 
 `ENGINE.CALC` devuelve una tabla en **formato largo**: columnas `[MeasureName, Time, Value]`
 — las medidas escalares (`PV`, `DV01`, `UnilateralCVA`) dan 1 fila (`Time` en blanco), las de

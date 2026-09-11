@@ -91,13 +91,19 @@ public:
     ) const override;
 };
 
-// Sensibilidad del NPV a un movimiento de 1 punto básico en r0 (PLAN.md §7.15, medida "DV01"
-// de ENGINE.CALC): `d(NPV)/d(r0) * 0.0001` vía autodiff (`engine::irs_hull_white_npv_delta_
-// r0`). Es una sensibilidad al parámetro del modelo, no una sensibilidad "por bucket" a la
-// curva de mercado -- limitación conocida de un modelo de un solo factor.
+// Sensibilidad del NPV a un movimiento de `bump` en r0 (PLAN.md §7.15, medida "DV01" de
+// ENGINE.CALC): `d(NPV)/d(r0) * bump` vía autodiff (`engine::irs_hull_white_npv_delta_r0`) --
+// la derivada la sigue calculando Rust tal cual, `bump` es solo el multiplicador que antes
+// vivía hardcodeado en C++ (0.0001, un punto básico). `bump` es un `Params` opcional
+// (PLAN_REAPI.md §6 Fase 3, propuesta 3 -- primera medida con configuración real: `Registry<
+// IMeasure>::create("DV01", {{"bump", 0.0002}})` da una sensibilidad distinta de la de
+// `create("DV01")`), leído en el constructor porque `evaluate()` no recibe un `Params` propio
+// (PLAN.md §7.15 ya fijó esa firma). Es una sensibilidad al parámetro del modelo, no una
+// sensibilidad "por bucket" a la curva de mercado -- limitación conocida de un modelo de un
+// solo factor.
 class Dv01Measure : public IMeasure {
 public:
-    explicit Dv01Measure(const Params&) {}
+    explicit Dv01Measure(const Params& params) : bump_(get_double(params, "bump", 0.0001)) {}
 
     std::string type_name() const override { return "DV01"; }
 
@@ -105,6 +111,9 @@ public:
         const IModel& model, const IProduct& product, const MarketSnapshot& market,
         const PricingContext& pricing, const ExecutionContext& execution
     ) const override;
+
+private:
+    double bump_;
 };
 
 // --- Lote homogéneo (PLAN.md §7.17/§7.19) ---------------------------------------------------

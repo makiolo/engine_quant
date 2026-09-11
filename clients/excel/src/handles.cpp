@@ -10,7 +10,7 @@ HandleRegistry::HandleRegistry() { engine::register_builtins(registries_); }
 
 std::vector<std::string> HandleRegistry::list_models() const { return registries_.models.list(); }
 std::vector<std::string> HandleRegistry::list_products() const { return registries_.products.list(); }
-std::vector<std::string> HandleRegistry::list_measures() const { return engine::calc_measure_names(); }
+std::vector<std::string> HandleRegistry::list_measures() const { return engine::calc_measure_names(registries_); }
 std::vector<std::string> HandleRegistry::list_calibrators() const { return registries_.calibrators.list(); }
 
 std::string HandleRegistry::create_model(const std::string& name, const XLOPER12& params_arg) {

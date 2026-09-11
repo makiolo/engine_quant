@@ -7,6 +7,7 @@
 #include "engine/execution_context.hpp"
 #include "engine/market.hpp"
 #include "engine/measure.hpp"
+#include "engine/params.hpp"
 #include "engine/pricing_context.hpp"
 
 namespace engine {
@@ -18,22 +19,46 @@ struct CalcResultEntry {
 };
 using CalcResult = std::vector<CalcResultEntry>;
 
-// Nombres de medida que acepta ENGINE.CALC ("PV", "DV01", "ExpectedExposure", "PFE95",
-// "UnilateralCVA") -- el vocabulario de cara al usuario, no los nombres registrados en
-// `Registry<IMeasure>` (que siguen siendo el mecanismo de extensión de PLAN.md §5.4: añadir
-// una medida nueva a `ENGINE.CALC` es una `IMeasure` + una línea en `bootstrap.cpp` + una
-// entrada en la tabla de `calc.cpp`, nada más). Sustituye a `Registry<IMeasure>::list()`,
-// que antes exponía `ENGINE.LIST_MEASURES` directamente (PLAN.md §7.15).
-std::vector<std::string> calc_measure_names();
+// Una medida con su configuración opcional (PLAN_REAPI.md §6 Fase 3, propuesta 3 --
+// "measures tipadas"): generaliza el antiguo `measure_names: vector<string>` a
+// `vector<MeasureSpec>`. `params` vacío es exactamente equivalente al nombre "pelado" de
+// antes -- por eso las sobrecargas `vector<string>` de `calc`/`calc_batch`/`calc_many`/
+// `calc_grid` siguen existiendo (construyen `MeasureSpec{name, {}}` internamente) y no
+// rompen a ningún consumidor existente (`test_calc.py`/`abi_c_smoke.c`/Excel/ejemplos).
+struct MeasureSpec {
+    std::string name;
+    Params params;
+};
 
-// Orquesta el cálculo de un lote de medidas nombradas: agrupa los nombres que comparten el
-// mismo cálculo subyacente (p.ej. "ExpectedExposure"/"PFE95" -> una sola llamada a
-// ExposureProfileMeasure::evaluate, ver calc.cpp) y devuelve los resultados en el mismo
-// orden en que se pidieron. Único punto que conoce el mapeo nombre-de-CALC -> medida
-// registrada; Python/Excel/la C ABI lo consumen, no lo reimplementan.
+// Nombres de medida "de fábrica" (PLAN_REAPI.md §6 Fase 3): el `Registry<IMeasure>` completo
+// (`register_builtins`) más los dos alias heredados de PLAN.md §7.15 que no viven en el
+// registry como tipo propio ("ExpectedExposure"/"PFE95", que envuelven "ExposureProfile" --
+// ver `calc.cpp`). Solo para *descubrir* nombres (`ENGINE.LIST_MEASURES`) -- `calc()`/
+// `calc_batch()`/`calc_many()`/`calc_grid()` ya NO están limitados a esta lista: resuelven
+// cualquier nombre presente en `registries.measures` directamente (decisión de
+// PLAN_REAPI.md §5: se retira `calc_measure_name_mappings()` como tabla curada cerrada).
+std::vector<std::string> calc_measure_names(const Registries& registries);
+
+// Orquesta el cálculo de un lote de medidas nombradas sobre un único trade: agrupa las specs
+// que comparten el mismo cálculo subyacente y la misma configuración (p.ej. "ExpectedExposure"
+// + "PFE95" comparten "ExposureProfile" -- una sola simulación Monte Carlo para ambas, no dos)
+// y devuelve los resultados en el mismo orden en que se pidieron.
 //
-// Lanza std::invalid_argument si algún nombre de `measure_names` no está en
-// `calc_measure_names()`.
+// Lanza std::invalid_argument si algún `MeasureSpec::name` no resuelve a una medida conocida
+// (ni está en `registries.measures` ni es uno de los alias heredados).
+CalcResult calc(
+    const Registries& registries,
+    const IProduct& product,
+    const std::vector<MeasureSpec>& measures,
+    const IModel& model,
+    const MarketSnapshot& market,
+    const PricingContext& pricing,
+    const ExecutionContext& execution
+);
+
+// Sobrecarga retrocompatible (PLAN.md §7.15, PLAN_REAPI.md §6 Fase 3): nombres "pelados",
+// equivalente a pasar `MeasureSpec{name, {}}` por cada uno -- ningún consumidor que solo pase
+// nombres (sin configuración por medida) necesita cambiar una línea.
 CalcResult calc(
     const Registries& registries,
     const IProduct& product,
@@ -53,11 +78,28 @@ CalcResult calc(
 // `use_par_rate() == false` en todos -- lanza `std::invalid_argument` si no se cumple. Con un
 // único tipo de producto real (`IrSwapProduct`) hoy, "agrupar por tipo" es un único grupo por
 // construcción; el resto de la validación (calendario) sí es necesaria ya.
+//
+// A diferencia de `calc()`, el lote sigue limitado a las medidas que conoce
+// `evaluate_batch_registered_measure` en `calc.cpp` ("PV"/"DV01"/"UnilateralCVA"/
+// "ExposureProfile", más los alias "ExpectedExposure"/"PFE95") -- con un único producto real
+// no hay genericidad real que ganar todavía generalizando el despacho de lote al registry
+// (mismo argumento que ya justificó no generalizar la C ABI de calibración hasta el segundo
+// calibrador, PLAN.md §7.18).
 struct CalcBatchResultEntry {
     std::size_t trade_index;
     CalcResult measures;
 };
 using CalcBatchResult = std::vector<CalcBatchResultEntry>;
+
+CalcBatchResult calc_batch(
+    const Registries& registries,
+    const std::vector<const IProduct*>& products,
+    const std::vector<MeasureSpec>& measures,
+    const IModel& model,
+    const MarketSnapshot& market,
+    const PricingContext& pricing,
+    const ExecutionContext& execution
+);
 
 CalcBatchResult calc_batch(
     const Registries& registries,
@@ -75,6 +117,16 @@ CalcBatchResult calc_batch(
 // con `calc_batch` (grupos de tamaño 1 incluidos, sin caso especial), recomponiendo el
 // resultado en el orden de entrada original. Nunca lanza por heterogeneidad -- esa es
 // precisamente la diferencia con `calc_batch`.
+CalcBatchResult calc_many(
+    const Registries& registries,
+    const std::vector<const IProduct*>& products,
+    const std::vector<MeasureSpec>& measures,
+    const IModel& model,
+    const MarketSnapshot& market,
+    const PricingContext& pricing,
+    const ExecutionContext& execution
+);
+
 CalcBatchResult calc_many(
     const Registries& registries,
     const std::vector<const IProduct*>& products,
@@ -97,6 +149,16 @@ struct CalcGridResultEntry {
     CalcResult measures;
 };
 using CalcGridResult = std::vector<CalcGridResultEntry>;
+
+CalcGridResult calc_grid(
+    const Registries& registries,
+    const std::vector<const IProduct*>& products,
+    const std::vector<MeasureSpec>& measures,
+    const std::vector<const IModel*>& models,
+    const std::vector<MarketSnapshot>& markets,
+    const PricingContext& pricing,
+    const ExecutionContext& execution
+);
 
 CalcGridResult calc_grid(
     const Registries& registries,

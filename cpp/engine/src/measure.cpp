@@ -290,7 +290,7 @@ MeasureResult Dv01Measure::evaluate(
 
     MeasureResult result;
     result.has_scalar = true;
-    result.scalar = compute_npv_delta_r0(model, *irs_product) * 0.0001; // 1 punto básico
+    result.scalar = compute_npv_delta_r0(model, *irs_product) * bump_;
     return result;
 }
 

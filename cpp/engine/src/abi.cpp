@@ -268,7 +268,7 @@ std::size_t engine_abi_list_products(const char*** out_names) {
 }
 
 std::size_t engine_abi_list_measures(const char*** out_names) {
-    return export_string_list(engine::calc_measure_names(), out_names);
+    return export_string_list(engine::calc_measure_names(registries()), out_names);
 }
 
 std::size_t engine_abi_list_calibrators(const char*** out_names) {

@@ -53,7 +53,10 @@ def test_register_builtins_populates_all_registries():
     assert "HullWhite1F" in eng.list_models()
     assert "HullWhite2F" in eng.list_models()
     assert "IRSwap" in eng.list_products()
-    assert set(eng.list_measures()) == {"PV", "DV01", "ExpectedExposure", "PFE95", "UnilateralCVA"}
+    # PLAN_REAPI.md §6 Fase 3: calc_measure_names() ya no es una tabla curada cerrada de 5
+    # nombres -- es Registry<IMeasure>.list() ("ExposureProfile" incluido, antes inalcanzable
+    # como nombre de CALC) más los dos alias heredados que no son un tipo registrado propio.
+    assert set(eng.list_measures()) == {"PV", "DV01", "ExposureProfile", "ExpectedExposure", "PFE95", "UnilateralCVA"}
 
 
 def test_create_unknown_model_raises_index_error():

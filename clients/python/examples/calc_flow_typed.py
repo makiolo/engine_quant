@@ -36,13 +36,21 @@ def main():
 
     print(f"Backend resuelto: {eng_execution.backend}")
 
-    result = eng.calc(
-        product, ["PV", "DV01", "ExpectedExposure", "PFE95", "UnilateralCVA"],
-        eng_model, eng_market, eng_pricing, eng_execution,
-    )
+    # Medidas tipadas (PLAN_REAPI.md §6 Fase 3, propuesta 3): q.DV01(bump=...).to_spec() es una
+    # tupla (nombre, params) -- conviven con strings "pelados" en la misma llamada.
+    measures = [
+        q.PV().to_spec(),
+        q.DV01().to_spec(),
+        "ExpectedExposure",
+        "PFE95",
+        q.UnilateralCVA().to_spec(),
+    ]
+    result = eng.calc(product, measures, eng_model, eng_market, eng_pricing, eng_execution)
 
     print(f"PV             = {result['PV'].scalar:,.2f}")
-    print(f"DV01           = {result['DV01'].scalar:,.2f}")
+    print(f"DV01 (1bp)     = {result['DV01'].scalar:,.2f}")
+    dv01_2bp = eng.calc(product, [q.DV01(bump=0.0002).to_spec()], eng_model, eng_market, eng_pricing, eng_execution)
+    print(f"DV01 (2bp)     = {dv01_2bp['DV01'].scalar:,.2f}")
     print(f"UnilateralCVA  = {result['UnilateralCVA'].scalar:,.2f}")
     print("ExpectedExposure / PFE95 por fecha de reseteo:")
     ee, pfe = result["ExpectedExposure"], result["PFE95"]

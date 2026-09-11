@@ -27,6 +27,7 @@ fachada dinámica (dict/Excel/C ABI), es una fachada más sobre el mismo registr
 
 from engine_typed.context import ExecutionContext, PricingContext
 from engine_typed.market import Market
+from engine_typed.measure import PV, DV01, ExposureProfile, Measure, UnilateralCVA
 from engine_typed.model import HullWhite1F, HullWhite2F, ModelSpec
 from engine_typed.trade import PAR, IRSwap, TradeSpec
 
@@ -40,4 +41,9 @@ __all__ = [
     "Market",
     "PricingContext",
     "ExecutionContext",
+    "Measure",
+    "PV",
+    "DV01",
+    "ExposureProfile",
+    "UnilateralCVA",
 ]

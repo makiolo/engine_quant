@@ -155,3 +155,12 @@ jobs:
 
       - name: Python engine_typed test (Model/Market/PricingContext/ExecutionContext tipados)
         run: python clients/python/tests/test_engine_typed_context.py build/clients/python
+
+      # PLAN_REAPI.md §6 Fase 3: MeasureSpec en calc.hpp -- tuplas (nombre, params) desde
+      # Python, DV01(bump=...) con efecto real, calc() resolviendo nombres directos del
+      # registry (p.ej. "ExposureProfile").
+      - name: Python calc test (MeasureSpec -- DV01 bump configurable, tuplas (nombre, params))
+        run: python clients/python/tests/test_calc_measure_spec.py build/clients/python
+
+      - name: Python engine_typed test (Measure tipadas -- PV/DV01/ExposureProfile/UnilateralCVA)
+        run: python clients/python/tests/test_engine_typed_measure.py build/clients/python
