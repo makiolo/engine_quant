@@ -859,6 +859,120 @@ Después, Fases 3–5 conectan el producto al registry actual y a Rust bajo Q. M
 implementar exercise antes de tener esa ruta de referencia mezclaría demasiadas fuentes de
 riesgo en un único cambio.
 
+## 19. ADRs (Fase 0)
+
+Decisiones de diseño de las Fases 0–2, congeladas antes de escribir el AST C++. Cada ADR fija
+una ambigüedad que §§2–6 dejaban implícita o abierta.
+
+**ADR-P0-01 — Tolerancia temporal centralizada.** `TimePoint::year_fraction` se compara con
+tolerancia absoluta `kTimeToleranceYearFraction = 1e-9` (años). La malla de monitorización más
+fina razonable (diaria, ACT/365) tiene separación ≈2.7e-3 años, seis órdenes de magnitud por
+encima de la tolerancia, evitando colapsar fechas distintas; y es tres órdenes de magnitud
+mayor que el error de redondeo acumulado típico en cadenas de aritmética de docenas de
+operaciones sobre magnitudes O(1–50) (~1e-12), evitando falsos "no-iguales" por arrastre de
+floating point. Toda comparación de `TimePoint` pasa por `time_equal`/`time_less` (`ids.hpp`);
+prohibido `==`/`<` directo sobre tiempo en el resto del código del motor de payoff.
+
+**ADR-P0-02 — Signo de Cashflow/Give/Scale.** `Cashflow(currency, amount).amount` positivo
+= entrada de caja para el titular del AST raíz. `Give(child)` invierte el signo de **todos**
+los cashflows generados por `child` (representa "vender"/"deber" lo que `child` representa).
+`Scale(factor, child)` multiplica el importe; un `factor` negativo logra el mismo efecto que
+`Give` a nivel de ledger agregado — conceptualmente distintos (dirección de titularidad vs.
+cantidad/apalancamiento) pero algebraicamente equivalentes, cubierto por el test de propiedad
+`Scale(-1, x) == Give(x)`. Consistencia con el IRS existente (`measure.cpp:115-127`,
+`notional > 0` ⇒ posición pagadora, `NPV = flotante − fijo`): la pata fija replicada en AST es
+`Both(Cashflow(ccy, flotante), Give(Cashflow(ccy, fijo)))` — la pata fija entra como `Give`
+porque el titular la paga.
+
+**ADR-P0-03 — Primer hit y desempate de triggers simultáneos.** En una misma fecha de
+monitorización, los triggers activos (`EventState` no `occurred` con `latch=true`) se evalúan
+en orden ascendente de `priority` (menor valor = se comprueba antes) y, a igualdad de
+`priority`, en orden lexicográfico ascendente de `EventId::value`. La actualización de
+`EventState` de un trigger que dispara en una fecha es visible **inmediatamente** para la
+evaluación del siguiente trigger de esa misma fecha (evaluación secuencial intra-fecha, no en
+paralelo) — esto permite implementar grupos tipo TP/SL por composición (ver ADR-P0-08 y
+`tp_sl.hpp`) sin campos nuevos en `TriggerSpec`/`EventState`.
+
+**ADR-P0-04 — `Exercise` en el AST de Fases 0-2.** Se declara la clase `Exercise : public
+Contract` ya en Fase 1 (constructor deliberadamente mínimo, sin `ExerciseSpec` real — eso es
+Fase 9), y `ContractVisitor::visit(const Exercise&)` es un método virtual puro más. Razón:
+`ContractVisitor` es una interfaz cerrada de doble dispatch — añadir `Exercise` en Fase 9
+obligaría a recompilar y tocar todas las implementaciones existentes igual que si se declara
+ahora, así que no declararlo hoy no ahorra ese coste futuro, solo lo pospone; declararlo ya
+permite a `ValidationVisitor`/`DependencyVisitor` recorrer árboles que lo contengan sin morir
+en Fase 3+. `ScenarioEvaluator::visit(const Exercise&)` lanza `std::logic_error("Exercise no
+soportado hasta Fase 9 (PLAN_PRODUCTS.md §10)")`.
+
+**ADR-P0-05 — Momento de validación: construcción vs. `validate()`.** Los constructores de
+nodo son no lanzantes salvo invariantes triviales de forma (p. ej. `Both({})` vacío). Todas las
+reglas de negocio de §3.1 (moneda vacía, fechas no finitas, schedules desordenados, ids
+duplicados) se comprueban exclusivamente en `ValidationVisitor::validate(root)`, que agrega
+**todos** los errores encontrados con su `NodePath`, no solo el primero — requisito explícito
+de §7.1 e incompatible con lanzar en el constructor (que solo puede reportar un fallo). La
+ausencia de un fixing/moneda en el `MarketPath` en tiempo de evaluación es un error de
+**evaluación** (`EvaluationError`), no de validación — la validación no tiene acceso a datos
+de mercado.
+
+**ADR-P0-06 — Mecanismo de visitor.** Virtual `accept(Visitor&)` con doble dispatch clásico
+(no `std::variant`+`std::visit`). El documento exige textualmente `accept(ScalarVisitor&)` en
+cada nodo (§3.2); un `variant` obligaría a enumerar todas las alternativas en un único tipo
+cerrado, dificultando que Fase 9 añada semántica a `Exercise` sin tocarlo, y no encaja con el
+estilo de interfaces virtuales ya usado en el repo (`IProduct`, `IModel`, `IMeasure`). Los
+nodos son inmutables y de vida larga (compartidos vía `shared_ptr`), así que el coste de la
+vtable es irrelevante frente al de recorrer el árbol.
+
+**ADR-P0-07 — Representación de hijos.** `std::shared_ptr<const T>` para todos los hijos
+(`ScalarExprPtr`, `PredicatePtr`, `ContractPtr`), confirmando literalmente §7.1 ("punteros
+inmutables compartidos"). Permite compartir subárboles (CSE futuro, Fase 11) sin copiar, y la
+inmutabilidad hace que los ciclos reales sean estructuralmente imposibles de construir vía la
+API pública de builders. `ValidationVisitor` añade además un límite de profundidad como defensa
+adicional, no como detector de ciclos genuinos inalcanzables por la API.
+
+**ADR-P0-08 — Modelo de evaluación: ruta completamente conocida.** `ScenarioEvaluator` opera
+sobre una `MarketPath` que representa la ruta completa y ya conocida (no un stream). Por tanto
+`Average`/`RunningMin`/`RunningMax` se calculan de forma pura y estática a partir de la ruta
+(sin estado mutable) en Fases 1-2 — el "acumulador actualizado en cada fecha" de §4.1 es un
+detalle de implementación pensado para ejecución incremental/Monte Carlo (Fase 5+ en Rust), no
+un requisito semántico: el resultado es idéntico. El bucle de fechas unificado de §4.1 se
+introduce en Fase 2, exclusivamente para resolver `Trigger`/`EventState` (genuinamente
+stateful y dependiente del orden), en dos pasadas: (1) resolver todos los `EventState`
+recorriendo la unión ordenada de `monitoring_times` de todos los `Trigger` del árbol, en orden
+de prioridad/`EventId` por fecha (ADR-P0-03); (2) recorrido recursivo normal del árbol para
+emitir el `CashflowLedger`, donde `Trigger`/`EventValue`/`EventTime` consultan el `EventState`
+ya resuelto en la pasada 1.
+Regla de "instante activo" (§3.4, `Cashflow`/`Current`, y §3.2 `RunningMin`/`RunningMax`):
+estos nodos leen un cursor de tiempo ambiente que solo `When(time, child)` fija explícitamente,
+o que `Trigger` fija implícitamente al entrar en `on_hit` cuando `settlement == AtHit` (cursor
+= `first_hit_time`). Un `Cashflow`/`Current`/`RunningMin`/`RunningMax` alcanzado sin cursor
+activo es error: `ValidationVisitor` lo rechaza estructuralmente cuando es detectable
+estáticamente (p. ej. `Cashflow` como hijo directo de `on_miss`, o de un `Trigger` con
+`settlement == AtScheduledPayment`, sin `When` envolvente) y `ScenarioEvaluator` lo rechaza en
+runtime en el resto de casos.
+`FixingStore` (histórico) tiene prioridad sobre `MarketPath` (simulada/futura) cuando ambas
+tienen valor para el mismo `(observable, time)` — regla de precedencia simple y determinista.
+Grupos TP/SL (§4.3): se modelan con un `EventId` **distinto por regla** (p. ej.
+`TAKE_PROFIT`/`STOP_LOSS`), cada uno con una guarda `Not(EventOccurred(el_otro))` en su
+condición para lograr la exclusión mutua de "primer hit gana" sin ampliar `TriggerSpec` ni
+`EventState` con un concepto nuevo de "sub-razón dentro de un evento compartido".
+
+**ADR-P0-09 — Alcance y ubicación del schema JSON v1.** El schema documenta la superficie
+completa de nodos v1 definida en §§3.1-3.4 (incluye `Trigger` y `Exercise`), no solo los nodos
+que el evaluador de Fases 0-2 sabe ejecutar. Razón: §7.2 trata "v1" como un contrato estable a
+través de múltiples fases de implementación ("migradores explícitos v1 -> v2"), no como una
+superficie que crece cada fase — versionar el schema en cada incremento de Fases 3-9 generaría
+el mismo tipo de churn que el documento explícitamente quiere evitar. El schema es solo forma
+sintáctica; que un nodo sea evaluable hoy es responsabilidad del motor C++, no del schema.
+Ubicación: `docs/schema/engine.payoff/v1.schema.json`, con ejemplos en
+`docs/schema/engine.payoff/examples/*.json`, validados con `jsonschema` de Python.
+
+**ADR-P0-10 — `Settlement` solo gobierna `Cashflow` "desnudo".** `TriggerSpec.settlement`
+decide la fecha de pago únicamente de un `Cashflow` que sea hijo **directo** (sin `When`
+intermedio) de `on_hit`/`on_miss`. Si `on_hit`/`on_miss` es un subárbol que ya trae su propio
+`When`/`Both` (p. ej. una barrera cuyo `on_hit` es el propio underlying, que paga en su
+`When(T, ...)` de siempre), `Settlement` no tiene efecto — el subárbol ya declara su propio
+calendario. Esto evita que "activar" una barrera implique reinterpretar la fecha de pago del
+contrato subyacente.
+
 ---
 
 *Decisión central: los nombres de producto sobreviven como ergonomía y compatibilidad, no como
