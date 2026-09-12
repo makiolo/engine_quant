@@ -28,6 +28,16 @@ double MarketPath::fixing(const ObservableId& observable, TimePoint time, const 
     throw EvaluationError("fixing ausente para observable '" + observable.value + "'", path);
 }
 
+std::vector<double> MarketPath::fixings_up_to(const ObservableId& observable, TimePoint cutoff) const {
+    std::vector<double> values;
+    auto it = fixings_.find(observable);
+    if (it == fixings_.end()) return values;
+    for (const auto& entry : it->second) {
+        if (!time_less(cutoff, entry.time)) values.push_back(entry.value);
+    }
+    return values;
+}
+
 void MarketPath::set_discount_factor(CurveId curve, TimePoint from, TimePoint to, double value) {
     discount_factors_[curve].push_back(DiscountEntry{from, to, value});
 }

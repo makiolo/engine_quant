@@ -19,6 +19,11 @@ public:
     bool has_fixing(const ObservableId& observable, TimePoint time) const;
     double fixing(const ObservableId& observable, TimePoint time, const NodePath& path) const;
 
+    // Todos los valores registrados para `observable` con tiempo <= `cutoff` (inclusive,
+    // ADR-P0-01), en el orden en que se registraron. Usado por `RunningMin`/`RunningMax`
+    // (ADR-P0-08: cálculo puro sobre la ruta completa conocida, sin acumulador incremental).
+    std::vector<double> fixings_up_to(const ObservableId& observable, TimePoint cutoff) const;
+
     void set_discount_factor(CurveId curve, TimePoint from, TimePoint to, double value);
     double discount_factor(const CurveId& curve, TimePoint from, TimePoint to, const NodePath& path) const;
 
