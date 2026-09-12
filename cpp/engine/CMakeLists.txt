@@ -10,6 +10,7 @@ add_library(engine STATIC
     src/price.cpp
     src/calibrator.cpp
     src/bootstrap.cpp
+    src/payoff/ids.cpp
 )
 
 target_include_directories(engine PUBLIC include)
