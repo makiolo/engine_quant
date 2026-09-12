@@ -1,0 +1,19 @@
+{
+  "schema": "engine.payoff/v1",
+  "id": "FIXED_LEG_2Y_3PCT",
+  "contract": {
+    "type": "both",
+    "children": [
+      {
+        "type": "when",
+        "time": 1.0,
+        "child": { "type": "cashflow", "currency": "USD", "amount": { "type": "constant", "value": 30000.0 } }
+      },
+      {
+        "type": "when",
+        "time": 2.0,
+        "child": { "type": "cashflow", "currency": "USD", "amount": { "type": "constant", "value": 30000.0 } }
+      }
+    ]
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "schema": "engine.payoff/v1",
+  "id": "AAPL_FORWARD_100",
+  "contract": {
+    "type": "when",
+    "time": 1.0,
+    "child": {
+      "type": "cashflow",
+      "currency": "USD",
+      "amount": {
+        "type": "mul",
+        "left": { "type": "constant", "value": 1000.0 },
+        "right": {
+          "type": "sub",
+          "left": { "type": "fixing", "observable": "EQ.SPOT.AAPL", "time": 1.0 },
+          "right": { "type": "constant", "value": 100.0 }
+        }
+      }
+    }
+  }
+}

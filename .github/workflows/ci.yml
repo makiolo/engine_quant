@@ -169,3 +169,10 @@ jobs:
       # el modelo) -- sanity check sobre una curva multi-pillar NO plana.
       - name: Python price test (PV/DV01 por curva de mercado, curva no plana)
         run: python clients/python/tests/test_price_market_discounting.py build/clients/python
+
+      # PLAN_PRODUCTS.md SS12 Fase 0 (ADR-P0-09): schema estatico + ejemplos, sin motor
+      # compilado -- por eso no recibe build/clients/python como los tests de arriba.
+      - name: Python payoff schema test (engine.payoff/v1 + ejemplos)
+        run: |
+          pip install jsonschema
+          python clients/python/tests/test_payoff_schema.py

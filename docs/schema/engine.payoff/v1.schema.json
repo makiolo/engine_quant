@@ -1,0 +1,402 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "engine.payoff/v1.schema.json",
+  "title": "engine.payoff/v1",
+  "description": "Superficie sintactica completa del AST de payoff v1 (PLAN_PRODUCTS.md SS3.1-3.4, SS7.2, ADR-P0-09). Documenta todos los nodos definidos en v1, incluidos Trigger/Exercise -- que un nodo sea evaluable por el motor C++ en una fase dada es responsabilidad del motor, no de este schema.",
+  "type": "object",
+  "required": ["schema", "id", "contract"],
+  "additionalProperties": false,
+  "properties": {
+    "schema": { "const": "engine.payoff/v1" },
+    "id": { "type": "string", "minLength": 1 },
+    "contract": { "$ref": "#/$defs/Contract" }
+  },
+  "$defs": {
+    "ObservableId": {
+      "type": "string",
+      "description": "Nombre canonico namespaced, p.ej. EQ.SPOT.AAPL, FX.SPOT.EURUSD, IR.DF.EUR.OIS (PLAN_PRODUCTS.md SS3.1).",
+      "pattern": "^[A-Z0-9_]+(\\.[A-Z0-9_]+)+$"
+    },
+    "EventId": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9_]+$"
+    },
+    "Currency": {
+      "type": "string",
+      "pattern": "^[A-Z]{3}$"
+    },
+
+    "ScalarExpr": {
+      "oneOf": [
+        { "$ref": "#/$defs/ScalarConstant" },
+        { "$ref": "#/$defs/ScalarParameter" },
+        { "$ref": "#/$defs/ScalarFixing" },
+        { "$ref": "#/$defs/ScalarCurrent" },
+        { "$ref": "#/$defs/ScalarAdd" },
+        { "$ref": "#/$defs/ScalarSub" },
+        { "$ref": "#/$defs/ScalarMul" },
+        { "$ref": "#/$defs/ScalarDiv" },
+        { "$ref": "#/$defs/ScalarNeg" },
+        { "$ref": "#/$defs/ScalarAbs" },
+        { "$ref": "#/$defs/ScalarExp" },
+        { "$ref": "#/$defs/ScalarLog" },
+        { "$ref": "#/$defs/ScalarPow" },
+        { "$ref": "#/$defs/ScalarMin" },
+        { "$ref": "#/$defs/ScalarMax" },
+        { "$ref": "#/$defs/ScalarClamp" },
+        { "$ref": "#/$defs/ScalarAverage" },
+        { "$ref": "#/$defs/ScalarRunningMin" },
+        { "$ref": "#/$defs/ScalarRunningMax" },
+        { "$ref": "#/$defs/ScalarEventTime" },
+        { "$ref": "#/$defs/ScalarEventValue" },
+        { "$ref": "#/$defs/ScalarDiscountFactor" },
+        { "$ref": "#/$defs/ScalarFxConversion" }
+      ]
+    },
+    "ScalarConstant": {
+      "type": "object", "required": ["type", "value"], "additionalProperties": false,
+      "properties": { "type": { "const": "constant" }, "value": { "type": "number" } }
+    },
+    "ScalarParameter": {
+      "type": "object", "required": ["type", "name"], "additionalProperties": false,
+      "properties": { "type": { "const": "parameter" }, "name": { "type": "string", "minLength": 1 } }
+    },
+    "ScalarFixing": {
+      "type": "object", "required": ["type", "observable", "time"], "additionalProperties": false,
+      "properties": {
+        "type": { "const": "fixing" },
+        "observable": { "$ref": "#/$defs/ObservableId" },
+        "time": { "type": "number" }
+      }
+    },
+    "ScalarCurrent": {
+      "type": "object", "required": ["type", "observable"], "additionalProperties": false,
+      "properties": { "type": { "const": "current" }, "observable": { "$ref": "#/$defs/ObservableId" } }
+    },
+    "ScalarAdd": {
+      "type": "object", "required": ["type", "left", "right"], "additionalProperties": false,
+      "properties": {
+        "type": { "const": "add" },
+        "left": { "$ref": "#/$defs/ScalarExpr" },
+        "right": { "$ref": "#/$defs/ScalarExpr" }
+      }
+    },
+    "ScalarSub": {
+      "type": "object", "required": ["type", "left", "right"], "additionalProperties": false,
+      "properties": {
+        "type": { "const": "sub" },
+        "left": { "$ref": "#/$defs/ScalarExpr" },
+        "right": { "$ref": "#/$defs/ScalarExpr" }
+      }
+    },
+    "ScalarMul": {
+      "type": "object", "required": ["type", "left", "right"], "additionalProperties": false,
+      "properties": {
+        "type": { "const": "mul" },
+        "left": { "$ref": "#/$defs/ScalarExpr" },
+        "right": { "$ref": "#/$defs/ScalarExpr" }
+      }
+    },
+    "ScalarDiv": {
+      "type": "object", "required": ["type", "left", "right"], "additionalProperties": false,
+      "properties": {
+        "type": { "const": "div" },
+        "left": { "$ref": "#/$defs/ScalarExpr" },
+        "right": { "$ref": "#/$defs/ScalarExpr" }
+      }
+    },
+    "ScalarNeg": {
+      "type": "object", "required": ["type", "operand"], "additionalProperties": false,
+      "properties": { "type": { "const": "neg" }, "operand": { "$ref": "#/$defs/ScalarExpr" } }
+    },
+    "ScalarAbs": {
+      "type": "object", "required": ["type", "operand"], "additionalProperties": false,
+      "properties": { "type": { "const": "abs" }, "operand": { "$ref": "#/$defs/ScalarExpr" } }
+    },
+    "ScalarExp": {
+      "type": "object", "required": ["type", "operand"], "additionalProperties": false,
+      "properties": { "type": { "const": "exp" }, "operand": { "$ref": "#/$defs/ScalarExpr" } }
+    },
+    "ScalarLog": {
+      "type": "object", "required": ["type", "operand"], "additionalProperties": false,
+      "properties": { "type": { "const": "log" }, "operand": { "$ref": "#/$defs/ScalarExpr" } }
+    },
+    "ScalarPow": {
+      "type": "object", "required": ["type", "base", "exponent"], "additionalProperties": false,
+      "properties": {
+        "type": { "const": "pow" },
+        "base": { "$ref": "#/$defs/ScalarExpr" },
+        "exponent": { "$ref": "#/$defs/ScalarExpr" }
+      }
+    },
+    "ScalarMin": {
+      "type": "object", "required": ["type", "left", "right"], "additionalProperties": false,
+      "properties": {
+        "type": { "const": "min" },
+        "left": { "$ref": "#/$defs/ScalarExpr" },
+        "right": { "$ref": "#/$defs/ScalarExpr" }
+      }
+    },
+    "ScalarMax": {
+      "type": "object", "required": ["type", "left", "right"], "additionalProperties": false,
+      "properties": {
+        "type": { "const": "max" },
+        "left": { "$ref": "#/$defs/ScalarExpr" },
+        "right": { "$ref": "#/$defs/ScalarExpr" }
+      }
+    },
+    "ScalarClamp": {
+      "type": "object", "required": ["type", "value", "low", "high"], "additionalProperties": false,
+      "properties": {
+        "type": { "const": "clamp" },
+        "value": { "$ref": "#/$defs/ScalarExpr" },
+        "low": { "$ref": "#/$defs/ScalarExpr" },
+        "high": { "$ref": "#/$defs/ScalarExpr" }
+      }
+    },
+    "ScalarAverage": {
+      "type": "object", "required": ["type", "observable", "schedule", "weights"], "additionalProperties": false,
+      "properties": {
+        "type": { "const": "average" },
+        "observable": { "$ref": "#/$defs/ObservableId" },
+        "schedule": { "type": "array", "items": { "type": "number" }, "minItems": 1 },
+        "weights": { "type": "array", "items": { "type": "number" }, "minItems": 1 }
+      }
+    },
+    "ScalarRunningMin": {
+      "type": "object", "required": ["type", "observable"], "additionalProperties": false,
+      "properties": { "type": { "const": "running_min" }, "observable": { "$ref": "#/$defs/ObservableId" } }
+    },
+    "ScalarRunningMax": {
+      "type": "object", "required": ["type", "observable"], "additionalProperties": false,
+      "properties": { "type": { "const": "running_max" }, "observable": { "$ref": "#/$defs/ObservableId" } }
+    },
+    "ScalarEventTime": {
+      "type": "object", "required": ["type", "event"], "additionalProperties": false,
+      "properties": { "type": { "const": "event_time" }, "event": { "$ref": "#/$defs/EventId" } }
+    },
+    "ScalarEventValue": {
+      "type": "object", "required": ["type", "event", "observable"], "additionalProperties": false,
+      "properties": {
+        "type": { "const": "event_value" },
+        "event": { "$ref": "#/$defs/EventId" },
+        "observable": { "$ref": "#/$defs/ObservableId" }
+      }
+    },
+    "ScalarDiscountFactor": {
+      "type": "object", "required": ["type", "curve", "from", "to"], "additionalProperties": false,
+      "properties": {
+        "type": { "const": "discount_factor" },
+        "curve": { "$ref": "#/$defs/ObservableId" },
+        "from": { "type": "number" },
+        "to": { "type": "number" }
+      }
+    },
+    "ScalarFxConversion": {
+      "type": "object", "required": ["type", "from_currency", "to_currency", "time"], "additionalProperties": false,
+      "properties": {
+        "type": { "const": "fx_conversion" },
+        "from_currency": { "$ref": "#/$defs/Currency" },
+        "to_currency": { "$ref": "#/$defs/Currency" },
+        "time": { "type": "number" }
+      }
+    },
+
+    "Predicate": {
+      "oneOf": [
+        { "$ref": "#/$defs/PredicateGreater" },
+        { "$ref": "#/$defs/PredicateLess" },
+        { "$ref": "#/$defs/PredicateGreaterEqual" },
+        { "$ref": "#/$defs/PredicateLessEqual" },
+        { "$ref": "#/$defs/PredicateEq" },
+        { "$ref": "#/$defs/PredicateAll" },
+        { "$ref": "#/$defs/PredicateAny" },
+        { "$ref": "#/$defs/PredicateNot" },
+        { "$ref": "#/$defs/PredicateBetween" },
+        { "$ref": "#/$defs/PredicateEventOccurred" },
+        { "$ref": "#/$defs/PredicateBefore" },
+        { "$ref": "#/$defs/PredicateAfter" }
+      ]
+    },
+    "PredicateGreater": {
+      "type": "object", "required": ["type", "left", "right"], "additionalProperties": false,
+      "properties": {
+        "type": { "const": "greater" },
+        "left": { "$ref": "#/$defs/ScalarExpr" },
+        "right": { "$ref": "#/$defs/ScalarExpr" }
+      }
+    },
+    "PredicateLess": {
+      "type": "object", "required": ["type", "left", "right"], "additionalProperties": false,
+      "properties": {
+        "type": { "const": "less" },
+        "left": { "$ref": "#/$defs/ScalarExpr" },
+        "right": { "$ref": "#/$defs/ScalarExpr" }
+      }
+    },
+    "PredicateGreaterEqual": {
+      "type": "object", "required": ["type", "left", "right"], "additionalProperties": false,
+      "properties": {
+        "type": { "const": "greater_equal" },
+        "left": { "$ref": "#/$defs/ScalarExpr" },
+        "right": { "$ref": "#/$defs/ScalarExpr" }
+      }
+    },
+    "PredicateLessEqual": {
+      "type": "object", "required": ["type", "left", "right"], "additionalProperties": false,
+      "properties": {
+        "type": { "const": "less_equal" },
+        "left": { "$ref": "#/$defs/ScalarExpr" },
+        "right": { "$ref": "#/$defs/ScalarExpr" }
+      }
+    },
+    "PredicateEq": {
+      "type": "object", "required": ["type", "left", "right", "tolerance"], "additionalProperties": false,
+      "properties": {
+        "type": { "const": "eq" },
+        "left": { "$ref": "#/$defs/ScalarExpr" },
+        "right": { "$ref": "#/$defs/ScalarExpr" },
+        "tolerance": { "type": "number", "minimum": 0 }
+      }
+    },
+    "PredicateAll": {
+      "type": "object", "required": ["type", "operands"], "additionalProperties": false,
+      "properties": {
+        "type": { "const": "all" },
+        "operands": { "type": "array", "items": { "$ref": "#/$defs/Predicate" }, "minItems": 1 }
+      }
+    },
+    "PredicateAny": {
+      "type": "object", "required": ["type", "operands"], "additionalProperties": false,
+      "properties": {
+        "type": { "const": "any" },
+        "operands": { "type": "array", "items": { "$ref": "#/$defs/Predicate" }, "minItems": 1 }
+      }
+    },
+    "PredicateNot": {
+      "type": "object", "required": ["type", "operand"], "additionalProperties": false,
+      "properties": { "type": { "const": "not" }, "operand": { "$ref": "#/$defs/Predicate" } }
+    },
+    "PredicateBetween": {
+      "type": "object",
+      "required": ["type", "value", "low", "high", "low_inclusive", "high_inclusive"],
+      "additionalProperties": false,
+      "properties": {
+        "type": { "const": "between" },
+        "value": { "$ref": "#/$defs/ScalarExpr" },
+        "low": { "$ref": "#/$defs/ScalarExpr" },
+        "high": { "$ref": "#/$defs/ScalarExpr" },
+        "low_inclusive": { "type": "boolean" },
+        "high_inclusive": { "type": "boolean" }
+      }
+    },
+    "PredicateEventOccurred": {
+      "type": "object", "required": ["type", "event"], "additionalProperties": false,
+      "properties": { "type": { "const": "event_occurred" }, "event": { "$ref": "#/$defs/EventId" } }
+    },
+    "PredicateBefore": {
+      "type": "object", "required": ["type", "time"], "additionalProperties": false,
+      "properties": { "type": { "const": "before" }, "time": { "type": "number" } }
+    },
+    "PredicateAfter": {
+      "type": "object", "required": ["type", "time"], "additionalProperties": false,
+      "properties": { "type": { "const": "after" }, "time": { "type": "number" } }
+    },
+
+    "Contract": {
+      "oneOf": [
+        { "$ref": "#/$defs/ContractZero" },
+        { "$ref": "#/$defs/ContractCashflow" },
+        { "$ref": "#/$defs/ContractGive" },
+        { "$ref": "#/$defs/ContractBoth" },
+        { "$ref": "#/$defs/ContractScale" },
+        { "$ref": "#/$defs/ContractIf" },
+        { "$ref": "#/$defs/ContractWhen" },
+        { "$ref": "#/$defs/ContractTrigger" },
+        { "$ref": "#/$defs/ContractExercise" }
+      ]
+    },
+    "ContractZero": {
+      "type": "object", "required": ["type"], "additionalProperties": false,
+      "properties": { "type": { "const": "zero" } }
+    },
+    "ContractCashflow": {
+      "type": "object", "required": ["type", "currency", "amount"], "additionalProperties": false,
+      "properties": {
+        "type": { "const": "cashflow" },
+        "currency": { "$ref": "#/$defs/Currency" },
+        "amount": { "$ref": "#/$defs/ScalarExpr" }
+      }
+    },
+    "ContractGive": {
+      "type": "object", "required": ["type", "child"], "additionalProperties": false,
+      "properties": { "type": { "const": "give" }, "child": { "$ref": "#/$defs/Contract" } }
+    },
+    "ContractBoth": {
+      "type": "object", "required": ["type", "children"], "additionalProperties": false,
+      "properties": {
+        "type": { "const": "both" },
+        "children": { "type": "array", "items": { "$ref": "#/$defs/Contract" }, "minItems": 1 }
+      }
+    },
+    "ContractScale": {
+      "type": "object", "required": ["type", "factor", "child"], "additionalProperties": false,
+      "properties": {
+        "type": { "const": "scale" },
+        "factor": { "$ref": "#/$defs/ScalarExpr" },
+        "child": { "$ref": "#/$defs/Contract" }
+      }
+    },
+    "ContractIf": {
+      "type": "object", "required": ["type", "condition", "if_true", "if_false"], "additionalProperties": false,
+      "properties": {
+        "type": { "const": "if" },
+        "condition": { "$ref": "#/$defs/Predicate" },
+        "if_true": { "$ref": "#/$defs/Contract" },
+        "if_false": { "$ref": "#/$defs/Contract" }
+      }
+    },
+    "ContractWhen": {
+      "type": "object", "required": ["type", "time", "child"], "additionalProperties": false,
+      "properties": {
+        "type": { "const": "when" },
+        "time": { "type": "number" },
+        "child": { "$ref": "#/$defs/Contract" }
+      }
+    },
+    "ContractTrigger": {
+      "type": "object",
+      "required": [
+        "type", "id", "monitoring_times", "condition", "monitoring", "settlement",
+        "priority", "latch", "on_hit", "on_miss"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "type": { "const": "trigger" },
+        "id": { "$ref": "#/$defs/EventId" },
+        "monitoring_times": { "type": "array", "items": { "type": "number" }, "minItems": 1 },
+        "condition": { "$ref": "#/$defs/Predicate" },
+        "monitoring": { "enum": ["discrete", "continuous_approximation"] },
+        "settlement": { "enum": ["at_hit", "at_scheduled_payment"] },
+        "priority": { "type": "integer" },
+        "latch": { "type": "boolean" },
+        "on_hit": { "$ref": "#/$defs/Contract" },
+        "on_miss": { "$ref": "#/$defs/Contract" }
+      }
+    },
+    "ContractExercise": {
+      "type": "object",
+      "description": "Nodo declarado en v1 (PLAN_PRODUCTS.md ADR-P0-04); la politica de decision y sus campos completos se definen en Fase 9 (PLAN_PRODUCTS.md SS10). Forma minima sujeta a extension retrocompatible.",
+      "required": ["type", "id", "dates", "exercise_value", "continuation"],
+      "additionalProperties": false,
+      "properties": {
+        "type": { "const": "exercise" },
+        "id": { "$ref": "#/$defs/EventId" },
+        "dates": { "type": "array", "items": { "type": "number" }, "minItems": 1 },
+        "exercise_value": { "$ref": "#/$defs/ScalarExpr" },
+        "continuation": { "$ref": "#/$defs/Contract" }
+      }
+    }
+  }
+}

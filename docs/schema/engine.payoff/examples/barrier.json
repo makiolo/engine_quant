@@ -1,0 +1,36 @@
+{
+  "schema": "engine.payoff/v1",
+  "id": "AAPL_UP_AND_IN_CALL_100_120",
+  "contract": {
+    "type": "trigger",
+    "id": "UI",
+    "monitoring_times": [0.25, 0.5, 0.75, 1.0],
+    "condition": {
+      "type": "greater_equal",
+      "left": { "type": "current", "observable": "EQ.SPOT.AAPL" },
+      "right": { "type": "constant", "value": 120.0 }
+    },
+    "monitoring": "discrete",
+    "settlement": "at_scheduled_payment",
+    "priority": 0,
+    "latch": true,
+    "on_hit": {
+      "type": "when",
+      "time": 1.0,
+      "child": {
+        "type": "cashflow",
+        "currency": "USD",
+        "amount": {
+          "type": "max",
+          "left": {
+            "type": "sub",
+            "left": { "type": "fixing", "observable": "EQ.SPOT.AAPL", "time": 1.0 },
+            "right": { "type": "constant", "value": 100.0 }
+          },
+          "right": { "type": "constant", "value": 0.0 }
+        }
+      }
+    },
+    "on_miss": { "type": "zero" }
+  }
+}

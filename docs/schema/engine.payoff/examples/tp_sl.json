@@ -1,0 +1,99 @@
+{
+  "schema": "engine.payoff/v1",
+  "id": "AAPL_TP20_SL10",
+  "contract": {
+    "type": "both",
+    "children": [
+      {
+        "type": "trigger",
+        "id": "TAKE_PROFIT",
+        "monitoring_times": [0.10, 0.20],
+        "condition": {
+          "type": "all",
+          "operands": [
+            {
+              "type": "greater_equal",
+              "left": {
+                "type": "sub",
+                "left": {
+                  "type": "div",
+                  "left": { "type": "current", "observable": "EQ.SPOT.AAPL" },
+                  "right": { "type": "parameter", "name": "entry_price" }
+                },
+                "right": { "type": "constant", "value": 1.0 }
+              },
+              "right": { "type": "constant", "value": 0.20 }
+            },
+            {
+              "type": "not",
+              "operand": { "type": "event_occurred", "event": "STOP_LOSS" }
+            }
+          ]
+        },
+        "monitoring": "discrete",
+        "settlement": "at_hit",
+        "priority": 10,
+        "latch": true,
+        "on_hit": {
+          "type": "cashflow",
+          "currency": "USD",
+          "amount": {
+            "type": "mul",
+            "left": { "type": "parameter", "name": "quantity" },
+            "right": {
+              "type": "sub",
+              "left": { "type": "event_value", "event": "TAKE_PROFIT", "observable": "EQ.SPOT.AAPL" },
+              "right": { "type": "parameter", "name": "entry_price" }
+            }
+          }
+        },
+        "on_miss": { "type": "zero" }
+      },
+      {
+        "type": "trigger",
+        "id": "STOP_LOSS",
+        "monitoring_times": [0.10, 0.20],
+        "condition": {
+          "type": "all",
+          "operands": [
+            {
+              "type": "less_equal",
+              "left": {
+                "type": "sub",
+                "left": {
+                  "type": "div",
+                  "left": { "type": "current", "observable": "EQ.SPOT.AAPL" },
+                  "right": { "type": "parameter", "name": "entry_price" }
+                },
+                "right": { "type": "constant", "value": 1.0 }
+              },
+              "right": { "type": "constant", "value": -0.10 }
+            },
+            {
+              "type": "not",
+              "operand": { "type": "event_occurred", "event": "TAKE_PROFIT" }
+            }
+          ]
+        },
+        "monitoring": "discrete",
+        "settlement": "at_hit",
+        "priority": 20,
+        "latch": true,
+        "on_hit": {
+          "type": "cashflow",
+          "currency": "USD",
+          "amount": {
+            "type": "mul",
+            "left": { "type": "parameter", "name": "quantity" },
+            "right": {
+              "type": "sub",
+              "left": { "type": "event_value", "event": "STOP_LOSS", "observable": "EQ.SPOT.AAPL" },
+              "right": { "type": "parameter", "name": "entry_price" }
+            }
+          }
+        },
+        "on_miss": { "type": "zero" }
+      }
+    ]
+  }
+}
