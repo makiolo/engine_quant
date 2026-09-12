@@ -20,6 +20,7 @@ add_library(engine STATIC
     src/payoff/scenario_evaluator.cpp
     src/payoff/explain_visitor.cpp
     src/payoff/barrier_templates.cpp
+    src/payoff/tp_sl.cpp
 )
 
 target_include_directories(engine PUBLIC include)
