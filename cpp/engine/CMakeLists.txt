@@ -12,6 +12,7 @@ add_library(engine STATIC
     src/bootstrap.cpp
     src/payoff/ids.cpp
     src/payoff/expression.cpp
+    src/payoff/predicate.cpp
 )
 
 target_include_directories(engine PUBLIC include)
