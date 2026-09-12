@@ -1,6 +1,7 @@
 #pragma once
 
 #include <set>
+#include <unordered_map>
 
 #include "engine/payoff/contract.hpp"
 #include "engine/payoff/expression.hpp"
@@ -22,6 +23,12 @@ struct DependencyReport {
     std::set<TimePoint, TimePointLess> fixing_dates;
     std::set<Currency> currencies;
     std::set<EventId> events;
+
+    // Observables que `EventValue(event, observable)` captura para cada evento, en cualquier
+    // punto del árbol (§4.1 "sus valores capturados"). Usado por `ScenarioEvaluator` para
+    // saber qué capturar en `EventState::captured_values` al resolver un `Trigger` (Fase 2),
+    // reutilizando este único recorrido en vez de un escáner ad-hoc por evento.
+    std::unordered_map<EventId, std::set<ObservableId>> event_value_observables;
 };
 
 class DependencyVisitor : private ScalarVisitor, private PredicateVisitor, private ContractVisitor {

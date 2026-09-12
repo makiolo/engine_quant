@@ -84,6 +84,7 @@ void DependencyVisitor::visit(const EventTime& node) { report_.events.insert(nod
 void DependencyVisitor::visit(const EventValue& node) {
     report_.events.insert(node.event());
     report_.observables.insert(node.observable());
+    report_.event_value_observables[node.event()].insert(node.observable());
 }
 
 void DependencyVisitor::visit(const DiscountFactor& node) {

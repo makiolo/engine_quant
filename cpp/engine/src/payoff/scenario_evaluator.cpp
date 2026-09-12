@@ -7,6 +7,7 @@
 #include <string>
 #include <utility>
 
+#include "engine/payoff/dependency_visitor.hpp"
 #include "engine/payoff/expression.hpp"
 #include "engine/payoff/predicate.hpp"
 
@@ -282,6 +283,124 @@ bool evaluate_predicate(
     return visitor.evaluate(pred, std::move(path));
 }
 
+// Recolecta todos los `Trigger` del árbol, incluidos los anidados dentro de `on_hit`/
+// `on_miss` de otros triggers (§4.1: la resolución de estado recorre el contrato completo, no
+// un subárbol). No desciende a `ScalarExpr`/`Predicate`: un `Trigger` nunca es descendiente de
+// esas jerarquías.
+class TriggerCollector : public ContractVisitor {
+public:
+    std::vector<const Trigger*> triggers;
+
+    void collect(const ContractPtr& root) {
+        if (root) root->accept(*this);
+    }
+
+private:
+    void descend(const ContractPtr& child) {
+        if (child) child->accept(*this);
+    }
+
+    void visit(const Zero&) override {}
+    void visit(const Cashflow&) override {}
+    void visit(const Give& node) override { descend(node.child()); }
+    void visit(const Both& node) override {
+        for (const auto& child : node.children()) descend(child);
+    }
+    void visit(const Scale& node) override { descend(node.child()); }
+    void visit(const If& node) override {
+        descend(node.if_true());
+        descend(node.if_false());
+    }
+    void visit(const When& node) override { descend(node.child()); }
+    void visit(const Trigger& node) override {
+        triggers.push_back(&node);
+        descend(node.on_hit());
+        descend(node.on_miss());
+    }
+    void visit(const Exercise& node) override { descend(node.continuation()); }
+};
+
+// Resuelve `EventState` para todos los triggers del árbol en una única pasada cronológica
+// (§4.1, ADR-P0-08): recorre la unión ordenada de fechas de monitorización y, en cada fecha,
+// evalúa los triggers ahí programados por `priority`/`EventId` (ADR-P0-03). La actualización de
+// un trigger es visible de inmediato para el siguiente de la misma fecha (evaluación
+// secuencial, no en paralelo). `latch=true`: una vez ocurrido, el evento deja de reevaluarse
+// (permanece disparado). `latch=false`: el estado refleja la condición en la fecha de
+// monitorización más reciente (puede "des-dispararse" si la condición deja de cumplirse).
+//
+// Simplificación de alcance (Fases 1-2): todas las fechas de todos los triggers del árbol se
+// resuelven en un único barrido global, incluso para triggers anidados dentro de `on_hit`/
+// `on_miss` de otro trigger -- ningún fixture de Fase 0-2 depende de que un trigger anidado
+// solo se resuelva tras el primer hit de su padre.
+void resolve_trigger_states(const ContractPtr& root, EvaluationContext& context) {
+    TriggerCollector collector;
+    collector.collect(root);
+    if (collector.triggers.empty()) return;
+
+    DependencyReport deps = DependencyVisitor().analyze(root);
+
+    std::vector<TimePoint> all_times;
+    for (const Trigger* trig : collector.triggers) {
+        for (TimePoint t : trig->spec().monitoring_times) {
+            bool already_present = false;
+            for (TimePoint existing : all_times) {
+                if (time_equal(existing, t)) {
+                    already_present = true;
+                    break;
+                }
+            }
+            if (!already_present) all_times.push_back(t);
+        }
+    }
+    std::sort(all_times.begin(), all_times.end(), [](TimePoint a, TimePoint b) { return time_less(a, b); });
+
+    for (TimePoint t : all_times) {
+        std::vector<const Trigger*> active;
+        for (const Trigger* trig : collector.triggers) {
+            const TriggerSpec& spec = trig->spec();
+            bool scheduled_here = false;
+            for (TimePoint mt : spec.monitoring_times) {
+                if (time_equal(mt, t)) {
+                    scheduled_here = true;
+                    break;
+                }
+            }
+            if (!scheduled_here) continue;
+            const EventState& state = context.state.event_state(spec.id);
+            if (spec.latch && state.occurred) continue;
+            active.push_back(trig);
+        }
+        std::sort(active.begin(), active.end(), [](const Trigger* a, const Trigger* b) {
+            if (a->spec().priority != b->spec().priority) return a->spec().priority < b->spec().priority;
+            return a->spec().id < b->spec().id;
+        });
+
+        for (const Trigger* trig : active) {
+            const TriggerSpec& spec = trig->spec();
+            NodePath diag_path = NodePath::root().child("Trigger[" + spec.id.value + "]").child("condition");
+            bool condition_true = evaluate_predicate(spec.condition, context, t, diag_path);
+            EventState& state = context.state.event_state(spec.id);
+            if (condition_true) {
+                state.occurred = true;
+                state.first_hit_time = t;
+                state.captured_values.clear();
+                auto it = deps.event_value_observables.find(spec.id);
+                if (it != deps.event_value_observables.end()) {
+                    for (const ObservableId& observable : it->second) {
+                        NodePath capture_path =
+                            NodePath::root().child("Trigger[" + spec.id.value + "]").child("captured:" + observable.value);
+                        state.captured_values[observable] = lookup_observable(context, observable, t, capture_path);
+                    }
+                }
+            } else if (!spec.latch) {
+                state.occurred = false;
+                state.first_hit_time.reset();
+                state.captured_values.clear();
+            }
+        }
+    }
+}
+
 // Recorre `Contract` acumulando `CashflowLedger`. `scale_` es un multiplicador acumulado
 // (ADR-P0-02): `Give` lo niega, `Scale` lo multiplica por su factor; `Cashflow` solo aplica el
 // multiplicador vigente a su propio importe -- evita reprocesar el ledger después de emitirlo.
@@ -359,8 +478,26 @@ private:
         cursor_ = saved_cursor;
     }
 
-    void visit(const Trigger&) override {
-        throw EvaluationError("Trigger requiere Fase 2 (evaluador determinista sin estado en este commit)", path_);
+    void visit(const Trigger& node) override {
+        const TriggerSpec& spec = node.spec();
+        const EventState* state = context_.state.find_event_state(spec.id);
+        bool occurred = state != nullptr && state->occurred;
+
+        std::optional<EventId> saved_event = current_event_;
+        std::optional<TimePoint> saved_cursor = cursor_;
+
+        if (occurred) {
+            current_event_ = spec.id;
+            if (spec.settlement == Settlement::AtHit) {
+                cursor_ = state->first_hit_time;
+            }
+            descend(node.on_hit(), "on_hit");
+        } else {
+            descend(node.on_miss(), "on_miss");
+        }
+
+        current_event_ = saved_event;
+        cursor_ = saved_cursor;
     }
 
     void visit(const Exercise&) override {
@@ -378,6 +515,7 @@ private:
 } // namespace
 
 CashflowLedger ScenarioEvaluator::evaluate(const ContractPtr& root, EvaluationContext& context) const {
+    resolve_trigger_states(root, context);
     ContractEvalVisitor visitor(context);
     return visitor.evaluate(root);
 }
