@@ -13,6 +13,7 @@ add_library(engine STATIC
     src/payoff/ids.cpp
     src/payoff/expression.cpp
     src/payoff/predicate.cpp
+    src/payoff/contract.cpp
 )
 
 target_include_directories(engine PUBLIC include)
