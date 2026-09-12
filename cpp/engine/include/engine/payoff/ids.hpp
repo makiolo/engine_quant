@@ -78,6 +78,13 @@ inline bool time_less(TimePoint a, TimePoint b, double tolerance = kTimeToleranc
     return b.year_fraction - a.year_fraction > tolerance;
 }
 
+// Comparador para contenedores ordenados de `TimePoint` (p.ej. `std::set<TimePoint,
+// TimePointLess>` en `DependencyReport`) que respeta la tolerancia centralizada en vez de
+// comparar `double` directamente (ADR-P0-01).
+struct TimePointLess {
+    bool operator()(TimePoint a, TimePoint b) const noexcept { return time_less(a, b); }
+};
+
 } // namespace payoff
 } // namespace engine
 

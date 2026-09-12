@@ -16,6 +16,7 @@ add_library(engine STATIC
     src/payoff/contract.cpp
     src/payoff/market_path.cpp
     src/payoff/validation_visitor.cpp
+    src/payoff/dependency_visitor.cpp
 )
 
 target_include_directories(engine PUBLIC include)
