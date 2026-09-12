@@ -11,6 +11,7 @@ add_library(engine STATIC
     src/calibrator.cpp
     src/bootstrap.cpp
     src/payoff/ids.cpp
+    src/payoff/expression.cpp
 )
 
 target_include_directories(engine PUBLIC include)

@@ -10,7 +10,7 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(googletest)
 
-add_executable(engine_tests test_registry.cpp test_abi.cpp test_calibration.cpp payoff/test_ids.cpp)
+add_executable(engine_tests test_registry.cpp test_abi.cpp test_calibration.cpp payoff/test_ids.cpp payoff/test_expression.cpp)
 target_link_libraries(engine_tests PRIVATE engine engine_abi GTest::gtest_main)
 
 # engine_abi es SHARED (PLAN.md §5.5, Fase 6): Windows no busca el .dll en el directorio del
