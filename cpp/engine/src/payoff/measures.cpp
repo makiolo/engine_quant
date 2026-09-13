@@ -26,17 +26,29 @@ rust::Vec<double> to_rust_vec(const std::vector<double>& v) {
     return out;
 }
 
-// Preflight comun a las tres medidas Q de GBM (PLAN_PRODUCTS.md §6, §12 Fase 5/6): capacidades
-// declaradas, medida RiskNeutralQ soportada, todo observable referenciado generado por el
-// modelo, y -- si el contrato usa `Monitoring::ContinuousApproximation` -- el modelo declara
-// `supports_continuous_barrier_bridge`. Nunca simula una sola ruta antes de pasar este chequeo.
-void preflight_gbm_capabilities(const PayoffProgram& program, const GbmModel& model) {
-    std::optional<ModelCapabilities> capabilities = model.capabilities();
+// Preflight comun a las medidas GBM de este archivo, tanto bajo Q (Fase 5/6) como bajo P
+// (Fase 7): capacidades declaradas, `required_measure` soportada, todo observable referenciado
+// generado por el modelo, y -- si el contrato usa `Monitoring::ContinuousApproximation` -- el
+// modelo declara `supports_continuous_barrier_bridge`. Nunca simula una sola ruta antes de pasar
+// este chequeo. Generalizado sobre `required_measure` (en vez de fijar `RiskNeutralQ`) para que
+// `GbmModel`/`GbmPModel` compartan el mismo chequeo: `GbmModel::capabilities()` solo declara
+// `RiskNeutralQ` y `GbmPModel::capabilities()` solo `PhysicalP`, asi que pedir la medida
+// equivocada a cualquiera de los dos falla aqui -- "el motor rechaza combinaciones Q/P
+// invalidas", criterio de aceptacion explicito de Fase 7.
+void preflight_gbm_capabilities(
+    const PayoffProgram& program, const std::optional<ModelCapabilities>& capabilities,
+    ProbabilityMeasure required_measure
+) {
     if (!capabilities.has_value()) {
-        throw ValidationError("GbmModel no declara ModelCapabilities", NodePath::root());
+        throw ValidationError("el modelo no declara ModelCapabilities", NodePath::root());
     }
-    if (capabilities->supported_measures.find(ProbabilityMeasure::RiskNeutralQ) == capabilities->supported_measures.end()) {
-        throw ValidationError("el modelo no soporta la medida RiskNeutralQ", NodePath::root());
+    if (capabilities->supported_measures.find(required_measure) == capabilities->supported_measures.end()) {
+        throw ValidationError(
+            "el modelo no soporta la medida requerida (" +
+                std::string(required_measure == ProbabilityMeasure::RiskNeutralQ ? "RiskNeutralQ" : "PhysicalP") +
+                ")",
+            NodePath::root()
+        );
     }
 
     DependencyReport dependencies = DependencyVisitor{}.analyze(program.contract);
@@ -156,7 +168,7 @@ double bump_and_reval_fixing(
 QValuationResult risk_neutral_price_gbm(
     const PayoffProgram& program, const GbmModel& model, std::uint64_t n_paths, std::uint64_t seed
 ) {
-    preflight_gbm_capabilities(program, model);
+    preflight_gbm_capabilities(program, model.capabilities(), ProbabilityMeasure::RiskNeutralQ);
 
     std::string spec_json = CanonicalVisitor::to_json(program.id, program.contract);
     try {
@@ -186,7 +198,7 @@ HitProbabilityResult hit_probability_gbm(
 ) {
     // Que 'event' no exista en el contrato es un error de EVALUACION (lo detecta la compilacion
     // del JSON en Rust, que conoce los EventId declarados), no de preflight de capacidades.
-    preflight_gbm_capabilities(program, model);
+    preflight_gbm_capabilities(program, model.capabilities(), ProbabilityMeasure::RiskNeutralQ);
 
     std::string spec_json = CanonicalVisitor::to_json(program.id, program.contract);
     try {
@@ -211,7 +223,7 @@ ExposureProfile payoff_exposure_profile_gbm(
     const PayoffProgram& program, const GbmModel& model, const std::vector<TimePoint>& exposure_times,
     std::uint64_t n_paths, std::uint64_t seed
 ) {
-    preflight_gbm_capabilities(program, model);
+    preflight_gbm_capabilities(program, model.capabilities(), ProbabilityMeasure::RiskNeutralQ);
 
     std::vector<double> exposure_times_raw;
     exposure_times_raw.reserve(exposure_times.size());
@@ -227,6 +239,76 @@ ExposureProfile payoff_exposure_profile_gbm(
         out.times = std::vector<double>(result.times.begin(), result.times.end());
         out.ee = std::vector<double>(result.ee.begin(), result.ee.end());
         out.pfe_95 = std::vector<double>(result.pfe_95.begin(), result.pfe_95.end());
+        return out;
+    } catch (const std::exception& e) {
+        throw EvaluationError(e.what(), NodePath::root());
+    }
+}
+
+ForecastResult forecast_gbm_p(
+    const PayoffProgram& program, const GbmPModel& model, std::uint64_t n_paths, std::uint64_t seed
+) {
+    preflight_gbm_capabilities(program, model.capabilities(), ProbabilityMeasure::PhysicalP);
+
+    std::string spec_json = CanonicalVisitor::to_json(program.id, program.contract);
+    try {
+        ffi::PayoffPForecastResult result =
+            ffi::forecast_gbm_p(spec_json, model.observable().value, model.s0(), model.mu(), model.sigma(), n_paths, seed);
+        ForecastResult out;
+        out.mean = result.mean;
+        out.std_error = result.std_error;
+        out.ci_low = result.ci_low;
+        out.ci_high = result.ci_high;
+        out.n_paths = result.n_paths;
+        out.measure = ProbabilityMeasure::PhysicalP;
+        return out;
+    } catch (const std::exception& e) {
+        throw EvaluationError(e.what(), NodePath::root());
+    }
+}
+
+HitProbabilityResult hit_probability_gbm(
+    const PayoffProgram& program, const GbmPModel& model, const EventId& event, std::uint64_t n_paths,
+    std::uint64_t seed
+) {
+    preflight_gbm_capabilities(program, model.capabilities(), ProbabilityMeasure::PhysicalP);
+
+    std::string spec_json = CanonicalVisitor::to_json(program.id, program.contract);
+    try {
+        ffi::PayoffPHitProbabilityResult result = ffi::hit_probability_gbm_p(
+            spec_json, event.value, model.observable().value, model.s0(), model.mu(), model.sigma(), n_paths, seed
+        );
+        HitProbabilityResult out;
+        out.probability = result.probability;
+        out.std_error = result.std_error;
+        out.ci_low = result.ci_low;
+        out.ci_high = result.ci_high;
+        out.n_paths = result.n_paths;
+        out.measure = ProbabilityMeasure::PhysicalP;
+        return out;
+    } catch (const std::exception& e) {
+        throw EvaluationError(e.what(), NodePath::root());
+    }
+}
+
+PnlDistributionResult pnl_distribution_gbm_p(
+    const PayoffProgram& program, const GbmPModel& model, std::uint64_t n_paths, std::uint64_t seed,
+    double confidence
+) {
+    preflight_gbm_capabilities(program, model.capabilities(), ProbabilityMeasure::PhysicalP);
+
+    std::string spec_json = CanonicalVisitor::to_json(program.id, program.contract);
+    try {
+        ffi::PnlDistributionResult result = ffi::pnl_distribution_gbm_p(
+            spec_json, model.observable().value, model.s0(), model.mu(), model.sigma(), n_paths, seed, confidence
+        );
+        PnlDistributionResult out;
+        out.mean = result.mean;
+        out.std_error = result.std_error;
+        out.var = result.var;
+        out.es = result.es;
+        out.n_paths = result.n_paths;
+        out.measure = ProbabilityMeasure::PhysicalP;
         return out;
     } catch (const std::exception& e) {
         throw EvaluationError(e.what(), NodePath::root());

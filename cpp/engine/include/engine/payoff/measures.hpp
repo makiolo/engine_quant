@@ -174,5 +174,63 @@ ExposureProfile payoff_exposure_profile_gbm(
     std::uint64_t n_paths, std::uint64_t seed
 );
 
+// Resultado de "Forecast" bajo P (PLAN_PRODUCTS.md §12 Fase 7). Misma forma que `QValuationResult`
+// (media/error estandar/intervalo de confianza del estimador Monte Carlo) pero `measure =
+// PhysicalP` y, a diferencia de esa medida, NUNCA descontado: bajo P no existe un numerario libre
+// de riesgo canonico (§6 "P se reserva para forecast ... con drift/calibracion fisicos
+// explicitos") -- `mean` es la suma esperada de cashflows tal cual el ledger la produce, en la
+// fecha de pago de cada uno. Struct separado de `QValuationResult` (aunque tenga la misma forma)
+// para que el nombre no sugiera un precio Q ni una cantidad descontada.
+struct ForecastResult {
+    double mean = 0.0;
+    double std_error = 0.0;
+    double ci_low = 0.0;
+    double ci_high = 0.0;
+    std::uint64_t n_paths = 0;
+    ProbabilityMeasure measure = ProbabilityMeasure::PhysicalP;
+};
+
+// "Forecast" bajo P (Monte Carlo, GBM fisico) de un `PayoffProgram` (PLAN_PRODUCTS.md §12
+// Fase 7). Preflight ANTES de simular: `model.capabilities()` debe declarar soporte de
+// `PhysicalP` (nunca `RiskNeutralQ` -- un `GbmModel` de Fase 5 se rechaza aqui, igual que un
+// `GbmPModel` se rechaza en `risk_neutral_price_gbm`, satisfaciendo "el motor rechaza
+// combinaciones Q/P invalidas", criterio de aceptacion de esta fase) y todo observable del
+// contrato debe estar en `generated_observables`. Delegado sobre `engine::ffi::forecast_gbm_p`.
+ForecastResult forecast_gbm_p(
+    const PayoffProgram& program, const GbmPModel& model, std::uint64_t n_paths, std::uint64_t seed
+);
+
+// Probabilidad bajo P (Monte Carlo, GBM fisico) de que `event` dispare en la ruta
+// (PLAN_PRODUCTS.md §12 Fase 7: "HitProbabilityP"). Misma forma de resultado que
+// `hit_probability_gbm` (Q) -- `HitProbabilityResult::measure` distingue cual de las dos se
+// obtuvo. Mismo preflight que `forecast_gbm_p`.
+HitProbabilityResult hit_probability_gbm(
+    const PayoffProgram& program, const GbmPModel& model, const EventId& event, std::uint64_t n_paths,
+    std::uint64_t seed
+);
+
+// Resultado de distribucion de P&L de una estrategia bajo P (PLAN_PRODUCTS.md §12 Fase 7:
+// "distribucion de P&L y expected shortfall de estrategia"). `var`/`es` son PERDIDAS POSITIVAS
+// (convencion de riesgo habitual, ver el doc-comment de `engine_core::payoff::PnlDistribution` en
+// Rust, que es quien realmente los calcula): `es >= var` siempre, porque el Expected Shortfall
+// promedia el propio VaR y todo lo peor que el.
+struct PnlDistributionResult {
+    double mean = 0.0;
+    double std_error = 0.0;
+    double var = 0.0;
+    double es = 0.0;
+    std::uint64_t n_paths = 0;
+    ProbabilityMeasure measure = ProbabilityMeasure::PhysicalP;
+};
+
+// Distribucion de P&L bajo P (Monte Carlo, GBM fisico) de una estrategia (PLAN_PRODUCTS.md §12
+// Fase 7), al nivel de confianza `confidence` (p.ej. `0.95`). Mismo preflight que
+// `forecast_gbm_p`; `confidence` fuera de `[0,1)` es un error de evaluacion (lo detecta Rust, ver
+// `engine_core::payoff::pnl_distribution_gbm_p`).
+PnlDistributionResult pnl_distribution_gbm_p(
+    const PayoffProgram& program, const GbmPModel& model, std::uint64_t n_paths, std::uint64_t seed,
+    double confidence
+);
+
 } // namespace payoff
 } // namespace engine
