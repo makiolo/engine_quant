@@ -33,6 +33,7 @@ enum EngineParamKind {
     Double = 0,
     Vector = 1,
     Bool = 2,
+    String = 3,
 }
 
 #[repr(C)]
@@ -42,6 +43,12 @@ struct EngineParam {
     scalar: f64,
     values: *const f64,
     count: usize,
+    // Anadido al FINAL de EngineParam en abi.h (PLAN_PRODUCTS.md Fase 3, ENGINE_PARAM_STRING):
+    // imprescindible para que el layout coincida byte a byte -- sin este campo, cualquier
+    // array de mas de un EngineParam queda con un stride distinto al de la struct C real y
+    // engine_abi_create_model/create_product leen memoria desalineada del segundo elemento
+    // en adelante.
+    string_value: *const c_char,
 }
 
 #[repr(C)]
@@ -130,7 +137,14 @@ fn last_error() -> String {
 }
 
 fn scalar_param(key: &CStr, value: f64) -> EngineParam {
-    EngineParam { key: key.as_ptr(), kind: EngineParamKind::Double, scalar: value, values: std::ptr::null(), count: 0 }
+    EngineParam {
+        key: key.as_ptr(),
+        kind: EngineParamKind::Double,
+        scalar: value,
+        values: std::ptr::null(),
+        count: 0,
+        string_value: std::ptr::null(),
+    }
 }
 
 fn vector_param(key: &CStr, values: &[f64]) -> EngineParam {
@@ -140,6 +154,7 @@ fn vector_param(key: &CStr, values: &[f64]) -> EngineParam {
         scalar: 0.0,
         values: values.as_ptr(),
         count: values.len(),
+        string_value: std::ptr::null(),
     }
 }
 

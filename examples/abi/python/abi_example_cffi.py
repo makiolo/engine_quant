@@ -39,7 +39,8 @@ _CDEF = """
     typedef enum EngineParamKind {
         ENGINE_PARAM_DOUBLE = 0,
         ENGINE_PARAM_VECTOR = 1,
-        ENGINE_PARAM_BOOL = 2
+        ENGINE_PARAM_BOOL = 2,
+        ENGINE_PARAM_STRING = 3
     } EngineParamKind;
 
     typedef struct EngineParam {
@@ -48,6 +49,7 @@ _CDEF = """
         double scalar;
         const double* values;
         size_t count;
+        const char* string_value;
     } EngineParam;
 
     size_t engine_abi_list_models(const char*** out_names);
@@ -158,14 +160,28 @@ ENGINE_PARAM_VECTOR = 1
 def scalar_param(ffi, keepalive, key: bytes, value: float) -> dict:
     key_buf = ffi.new("char[]", key)
     keepalive.append(key_buf)  # el struct solo guarda el puntero, no una copia -- ver abajo
-    return {"key": key_buf, "kind": ENGINE_PARAM_DOUBLE, "scalar": value, "values": ffi.NULL, "count": 0}
+    return {
+        "key": key_buf,
+        "kind": ENGINE_PARAM_DOUBLE,
+        "scalar": value,
+        "values": ffi.NULL,
+        "count": 0,
+        "string_value": ffi.NULL,
+    }
 
 
 def vector_param(ffi, keepalive, key: bytes, values) -> dict:
     key_buf = ffi.new("char[]", key)
     values_buf = ffi.new("double[]", values)
     keepalive += [key_buf, values_buf]
-    return {"key": key_buf, "kind": ENGINE_PARAM_VECTOR, "scalar": 0.0, "values": values_buf, "count": len(values)}
+    return {
+        "key": key_buf,
+        "kind": ENGINE_PARAM_VECTOR,
+        "scalar": 0.0,
+        "values": values_buf,
+        "count": len(values),
+        "string_value": ffi.NULL,
+    }
 
 
 def find_measure(ffi, entries, count: int, name: str):

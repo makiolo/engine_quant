@@ -25,6 +25,7 @@ class EngineParamKind:
     DOUBLE = 0
     VECTOR = 1
     BOOL = 2
+    STRING = 3
 
 
 class EngineParam(ctypes.Structure):
@@ -34,6 +35,11 @@ class EngineParam(ctypes.Structure):
         ("scalar", ctypes.c_double),
         ("values", ctypes.POINTER(ctypes.c_double)),
         ("count", ctypes.c_size_t),
+        # Anadido al FINAL de EngineParam en abi.h (PLAN_PRODUCTS.md Fase 3,
+        # ENGINE_PARAM_STRING): sin este campo el stride de (EngineParam * N) no coincide con
+        # el de la struct C real y create_model/create_product leen memoria desalineada a
+        # partir del segundo elemento del array.
+        ("string_value", ctypes.c_char_p),
     ]
 
 
@@ -149,14 +155,21 @@ def last_error(lib: ctypes.CDLL) -> str:
 
 
 def scalar_param(key: bytes, value: float) -> EngineParam:
-    return EngineParam(key=key, kind=EngineParamKind.DOUBLE, scalar=value, values=None, count=0)
+    return EngineParam(
+        key=key, kind=EngineParamKind.DOUBLE, scalar=value, values=None, count=0, string_value=None
+    )
 
 
 def vector_param(key: bytes, values):
     array = (ctypes.c_double * len(values))(*values)
     # `array` debe seguir viva mientras se use el EngineParam devuelto -- el llamador es
     # responsable de mantener una referencia (ver el uso mas abajo: se guarda en una lista).
-    return EngineParam(key=key, kind=EngineParamKind.VECTOR, scalar=0.0, values=array, count=len(values)), array
+    return (
+        EngineParam(
+            key=key, kind=EngineParamKind.VECTOR, scalar=0.0, values=array, count=len(values), string_value=None
+        ),
+        array,
+    )
 
 
 def find_measure(entries, count: int, name: str) -> EngineMeasureResult:
