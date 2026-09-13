@@ -89,6 +89,24 @@ extern "C" __declspec(dllexport) LPXLOPER12 WINAPI xlEngineCreateProduct(LPXLOPE
     });
 }
 
+// Autoría/validación sin registry (PLAN_PRODUCTS.md Fase 10, §7.1): misma superficie que
+// engine.validate_payoff_spec/Product.explain en nanobind y engine_abi_validate_payoff_spec/
+// engine_abi_explain_product en la C ABI. ENGINE.VALIDATE_PAYOFF_SPEC devuelve una columna de
+// mensajes de error (vacía = spec válido); ENGINE.EXPLAIN_PRODUCT opera sobre un handle ya
+// creado por ENGINE.CREATE_PRODUCT.
+
+extern "C" __declspec(dllexport) LPXLOPER12 WINAPI xlEngineValidatePayoffSpec(LPXLOPER12 spec_json) {
+    return xlbridge::guarded([&] {
+        return xlbridge::new_string_column(xlbridge::shared().validate_payoff_spec(xlbridge::read_string(*spec_json)));
+    });
+}
+
+extern "C" __declspec(dllexport) LPXLOPER12 WINAPI xlEngineExplainProduct(LPXLOPER12 product) {
+    return xlbridge::guarded([&] {
+        return xlbridge::new_str(xlbridge::shared().explain_product(xlbridge::read_string(*product)));
+    });
+}
+
 // Market/PricingContext/ExecutionContext (PLAN.md §7.15): igual patrón de handle memoizado
 // que create_model/create_product, pero sin nombre de tipo (una sola forma concreta cada
 // uno) -- ver xlbridge::HandleRegistry::create_market/create_context/create_execution.
@@ -215,6 +233,16 @@ constexpr FnSpec kFunctions[] = {
                       L"Crea un modelo (params: rango clave/valor) y devuelve su handle."),
     ENGINE_XLL_ENTRY(xlEngineCreateProduct, L"UQQ", L"ENGINE.CREATE_PRODUCT", L"nombre,params",
                       L"Crea un producto (params: rango clave/valor) y devuelve su handle."),
+    ENGINE_XLL_ENTRY(
+        xlEngineValidatePayoffSpec, L"UQ", L"ENGINE.VALIDATE_PAYOFF_SPEC", L"spec_json",
+        L"Valida un documento engine.payoff/v1 (JSON) sin crear ningun producto. Devuelve una "
+        L"columna de mensajes de error, vacia si el spec es valido."
+    ),
+    ENGINE_XLL_ENTRY(
+        xlEngineExplainProduct, L"UQ", L"ENGINE.EXPLAIN_PRODUCT", L"producto",
+        L"Arbol/cashflows legibles de un producto ya creado (ENGINE.CREATE_PRODUCT), o solo su "
+        L"nombre de tipo para productos sin AST de payoff propio."
+    ),
     ENGINE_XLL_ENTRY(xlEngineCreateMarket, L"UQ", L"ENGINE.CREATE_MARKET", L"params",
                       L"Crea un mercado (params: rango clave/valor -- pillars, zero_rates, "
                       L"hazard_rate opcional, recovery_rate opcional) y devuelve su handle."),

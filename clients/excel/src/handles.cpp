@@ -2,6 +2,7 @@
 
 #include <stdexcept>
 
+#include "engine/payoff/payoff_product.hpp"
 #include "xloper.hpp"
 
 namespace xlbridge {
@@ -64,6 +65,18 @@ std::string HandleRegistry::create_calibrator(const std::string& name) {
         calibrators_.emplace(handle, registries_.calibrators.create(name));
     }
     return handle;
+}
+
+std::string HandleRegistry::explain_product(const std::string& product_handle) const {
+    auto it = products_.find(product_handle);
+    if (it == products_.end()) {
+        throw std::out_of_range("xlbridge: handle de producto desconocido: " + product_handle);
+    }
+    return it->second->explain();
+}
+
+std::vector<std::string> HandleRegistry::validate_payoff_spec(const std::string& spec_json) const {
+    return engine::payoff::validate_payoff_spec(spec_json);
 }
 
 engine::PriceResult HandleRegistry::price(

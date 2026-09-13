@@ -814,3 +814,55 @@ TEST(NewPriceGridResult, EmptyResultBecomesNaError) {
     EXPECT_EQ(xl_base_type(*out), static_cast<DWORD>(xltypeErr));
     xlbridge::free_xloper(out);
 }
+
+// PLAN_PRODUCTS.md Fase 10 (§7.1): superficie de autoría sin registry, mismos casos que
+// clients/python/tests/test_engine_typed_payoff.py y cpp/engine/tests/payoff/
+// test_payoff_product.cpp -- confirma que HandleRegistry delega en el mismo
+// engine::payoff::validate_payoff_spec / IProduct::explain(), sin reimplementar nada.
+
+TEST(HandleRegistry, ValidatePayoffSpecReturnsEmptyForValidSpec) {
+    xlbridge::HandleRegistry registry = make_registry();
+    std::string spec = R"({"schema":"engine.payoff/v1","id":"X","contract":{)"
+                        R"("type":"when","time":1.0,"child":{)"
+                        R"("type":"cashflow","currency":"USD","amount":{"type":"constant","value":1.0})"
+                        R"(}}})";
+    EXPECT_TRUE(registry.validate_payoff_spec(spec).empty());
+}
+
+TEST(HandleRegistry, ValidatePayoffSpecReportsErrorsWithoutCreatingProduct) {
+    xlbridge::HandleRegistry registry = make_registry();
+    std::string spec = R"({"schema":"engine.payoff/v1","id":"BAD","contract":)"
+                        R"({"type":"cashflow","currency":"USD","amount":{"type":"constant","value":1.0}}})";
+    auto errors = registry.validate_payoff_spec(spec);
+    ASSERT_EQ(errors.size(), 1u);
+    EXPECT_NE(errors[0].find("instante activo"), std::string::npos);
+}
+
+TEST(HandleRegistry, ExplainProductReturnsTreeForPayoffProduct) {
+    xlbridge::HandleRegistry registry = make_registry();
+    std::string spec = R"({"schema":"engine.payoff/v1","id":"AAPL_CALL_100","contract":{)"
+                        R"("type":"when","time":1.0,"child":{)"
+                        R"("type":"cashflow","currency":"USD","amount":{"type":"constant","value":30000.0})"
+                        R"(}}})";
+    std::vector<std::vector<XCHAR>> bufs;
+    std::vector<XLOPER12> cells = {str_cell(bufs, "spec"), str_cell(bufs, spec)};
+    XLOPER12 table = make_table(cells, 1, 2);
+
+    std::string product = registry.create_product("Payoff", table);
+    std::string text = registry.explain_product(product);
+    EXPECT_NE(text.find("AAPL_CALL_100"), std::string::npos);
+    EXPECT_NE(text.find("When"), std::string::npos);
+}
+
+TEST(HandleRegistry, ExplainProductDefaultsToTypeNameForLegacyProduct) {
+    xlbridge::HandleRegistry registry = make_registry();
+    std::vector<std::vector<XCHAR>> bufs;
+    std::vector<XLOPER12> cells;
+    std::string product = registry.create_product("IRSwap", irs_5y_params_table(bufs, cells, 1'000'000.0, 0.03));
+    EXPECT_EQ(registry.explain_product(product), "IRSwap");
+}
+
+TEST(HandleRegistry, ExplainProductRejectsUnknownHandle) {
+    xlbridge::HandleRegistry registry = make_registry();
+    EXPECT_THROW(registry.explain_product("product:Payoff#no-existe"), std::out_of_range);
+}

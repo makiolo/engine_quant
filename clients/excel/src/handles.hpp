@@ -64,6 +64,14 @@ public:
     // memoiza solo por `name`.
     std::string create_calibrator(const std::string& name);
 
+    // Autoría/validación sin registry (PLAN_PRODUCTS.md Fase 10, §7.1), misma superficie que
+    // nanobind (engine.validate_payoff_spec/Product.explain) y la C ABI
+    // (engine_abi_validate_payoff_spec/engine_abi_explain_product). validate_payoff_spec no
+    // necesita ningún handle -- opera directamente sobre el JSON; explain_product sí, sobre un
+    // product_handle ya creado por create_product.
+    std::string explain_product(const std::string& product_handle) const;
+    std::vector<std::string> validate_payoff_spec(const std::string& spec_json) const;
+
     // Sustituye por completo create_measure/evaluate (PLAN.md §7.15): calcula un lote de
     // medidas nombradas de una vez sobre el mismo product/model/market/pricing/execution.
     engine::PriceResult price(
