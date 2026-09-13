@@ -40,6 +40,7 @@ add_library(engine STATIC
     src/payoff/tp_sl.cpp
     src/payoff/json_parser.cpp
     src/payoff/canonical_visitor.cpp
+    src/payoff/payoff_product.cpp
 )
 
 target_include_directories(engine PUBLIC include)

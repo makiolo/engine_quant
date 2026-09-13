@@ -7,11 +7,22 @@
 
 namespace engine {
 
+// Forward decl (PLAN_PRODUCTS.md §9.1, Fase 3): evita que este header, consumido por
+// medidas/precios existentes, arrastre toda la jerarquia de engine/payoff/*.
+namespace payoff {
+struct PayoffProgram;
+}
+
 // Interfaz base de todo producto registrable (PLAN.md §5.4).
 class IProduct {
 public:
     virtual ~IProduct() = default;
     virtual std::string type_name() const = 0;
+
+    // Evolución aditiva (PLAN_PRODUCTS.md §9.1): `PayoffProduct` devuelve su programa; los
+    // productos legacy (IrSwapProduct, FakeProduct de test) devuelven `nullptr` hasta ser
+    // migrados -- no rompe ningún consumidor existente.
+    virtual const payoff::PayoffProgram* payoff_program() const { return nullptr; }
 };
 
 // IRS vanilla (mismo caso base que `rust/crates/engine-core/src/products/irs.rs`, PLAN.md
