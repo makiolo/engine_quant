@@ -31,6 +31,15 @@ public:
 // largo que payment_times), "fixed_rate" (double, opcional): si está ausente, el swap es "a
 // la par" (use_par_rate() == true) y el tipo fijo se calcula en Rust, que necesita r0 del
 // modelo — no disponible en esta capa.
+//
+// DEPRECADO para trades nuevos (PLAN_PRODUCTS.md §9.3/§12 Fase 8, "deprecar, sin borrar aún,
+// constructores nominales públicos"): `templates::irs_swap` (payoff/irs_templates.hpp) genera
+// el mismo swap como `Contract` AST, verificado numéricamente equivalente para PV/DV01 contra
+// esta clase (`test_irs_templates.cpp`, `test_specialization_visitor.cpp`). Esta clase sigue
+// siendo la ruta activa para `ExposureProfile`/`UnilateralCVA` bajo Hull-White (sin puente
+// AST->Hull-White todavía, ver specialization_visitor.hpp) y para código existente -- no se
+// retira ningún constructor ni registro; no usar como base de trades nuevos que solo necesiten
+// PV/DV01/cashflows deterministas.
 class IrSwapProduct : public IProduct {
 public:
     explicit IrSwapProduct(const Params& params);
