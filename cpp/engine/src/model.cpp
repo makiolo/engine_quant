@@ -52,4 +52,25 @@ double GbmModel::q() const { return q_; }
 double GbmModel::sigma() const { return sigma_; }
 const payoff::ObservableId& GbmModel::observable() const { return observable_; }
 
+GbmPModel::GbmPModel(const Params& params)
+    : s0_(get_double(params, "s0")),
+      mu_(get_double(params, "mu")),
+      sigma_(get_double(params, "sigma")),
+      observable_(payoff::ObservableId{get_string(params, "observable")}) {}
+
+std::optional<payoff::ModelCapabilities> GbmPModel::capabilities() const {
+    payoff::ModelCapabilities caps;
+    caps.generated_observables = {observable_};
+    caps.supported_measures = {payoff::ProbabilityMeasure::PhysicalP};
+    // Misma dinamica de difusion que GbmModel (solo cambia el drift), asi que la correccion de
+    // Brownian bridge (§4.2) es igualmente aplicable bajo P.
+    caps.supports_continuous_barrier_bridge = true;
+    return caps;
+}
+
+double GbmPModel::s0() const { return s0_; }
+double GbmPModel::mu() const { return mu_; }
+double GbmPModel::sigma() const { return sigma_; }
+const payoff::ObservableId& GbmPModel::observable() const { return observable_; }
+
 } // namespace engine

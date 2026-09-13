@@ -103,4 +103,32 @@ private:
     payoff::ObservableId observable_;
 };
 
+// Movimiento geometrico browniano bajo P, primer modelo fisico del motor (PLAN_PRODUCTS.md §12
+// Fase 7; dinamica en `rust/crates/engine-core/src/models/gbm_p.rs::GbmP`). Estructuralmente
+// paralelo a GbmModel pero NO reconfigurable a partir de el: `mu` es un drift fisico total (no
+// libre de riesgo, no ajustado por dividendo), y `capabilities()` solo declara `PhysicalP` -- el
+// preflight de las medidas Fase 7 (forecast/hit-probability/P&L bajo P) rechaza este modelo si se
+// le pide una medida Q, igual que GbmModel se rechaza si se le pide una medida P (§6: "el motor
+// debe impedir que la diferencia quede escondida en un nombre ambiguo de modelo").
+// Params requeridos: "s0" (spot inicial), "mu" (drift fisico total), "sigma" (volatilidad),
+// "observable" (string, ObservableId que este modelo genera).
+class GbmPModel : public IModel {
+public:
+    explicit GbmPModel(const Params& params);
+
+    std::string type_name() const override { return "GBM_P"; }
+    std::optional<payoff::ModelCapabilities> capabilities() const override;
+
+    double s0() const;
+    double mu() const;
+    double sigma() const;
+    const payoff::ObservableId& observable() const;
+
+private:
+    double s0_;
+    double mu_;
+    double sigma_;
+    payoff::ObservableId observable_;
+};
+
 } // namespace engine
