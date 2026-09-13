@@ -1,0 +1,30 @@
+{
+  "schema": "engine.payoff/v1",
+  "id": "AAPL_ASIAN_CALL_100",
+  "contract": {
+    "type": "when",
+    "time": 1.0,
+    "child": {
+      "type": "cashflow",
+      "currency": "USD",
+      "amount": {
+        "type": "mul",
+        "left": { "type": "constant", "value": 1000.0 },
+        "right": {
+          "type": "max",
+          "left": {
+            "type": "sub",
+            "left": {
+              "type": "average",
+              "observable": "EQ.SPOT.AAPL",
+              "schedule": [0.25, 0.5, 0.75, 1.0],
+              "weights": [0.25, 0.25, 0.25, 0.25]
+            },
+            "right": { "type": "constant", "value": 100.0 }
+          },
+          "right": { "type": "constant", "value": 0.0 }
+        }
+      }
+    }
+  }
+}
