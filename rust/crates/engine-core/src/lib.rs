@@ -11,7 +11,9 @@ pub mod calibration;
 pub mod curve;
 pub mod exposure;
 pub mod kernel;
+pub mod mc;
 pub mod models;
+pub mod payoff;
 pub mod products;
 pub mod smoke;
 

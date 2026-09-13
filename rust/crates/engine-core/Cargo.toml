@@ -5,6 +5,11 @@ edition.workspace = true
 
 [dependencies]
 burn = { version = "0.21.0", default-features = false, features = ["std", "ndarray", "autodiff"] }
+# PLAN_PRODUCTS.md Fase 5: unico consumidor es `payoff::compile`, que parsea el JSON canonico
+# `engine.payoff/v1` ya producido por `CanonicalVisitor::to_json` (C++/Python) -- version fijada
+# a la ya presente transitivamente via `burn` en Cargo.lock (serde_json 1.0.151) para no
+# duplicar la dependencia con una version distinta.
+serde_json = "1"
 
 [features]
 gpu = ["burn/wgpu"]
