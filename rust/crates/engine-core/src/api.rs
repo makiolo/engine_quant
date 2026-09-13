@@ -12,7 +12,7 @@
 //! con un error claro) ya ocurrió antes, en `engine::ExecutionContext` (capa C++) — el mismo
 //! valor validado allí es el que llega aquí.
 
-use crate::backend::{self, ComputeBackend, CpuBackend};
+use crate::backend::{resolve_backend, ComputeBackend, CpuBackend};
 use crate::backend::Autodiff;
 use crate::exposure::{
     expected_exposure_profile, expected_exposure_profile_2f, expected_exposure_profile_2f_batch,
@@ -27,15 +27,6 @@ use burn::tensor::{Tensor, TensorData};
 
 fn scalar<B: Backend>(value: f64, device: &burn::tensor::Device<B>) -> Tensor<B, 1> {
     Tensor::from_data(TensorData::from([value]), device)
-}
-
-/// Traduce un nombre de backend ("cpu"/"gpu") a `ComputeBackend`, cayendo a `Cpu` si el
-/// nombre no se reconoce o pide un backend no compilado en este build — ver documentación
-/// del módulo: la validación estricta vive en `engine::ExecutionContext` (capa C++), no aquí.
-fn resolve_backend(name: &str) -> ComputeBackend {
-    backend::parse_backend_name(name)
-        .filter(|b| b.is_available())
-        .unwrap_or(ComputeBackend::Cpu)
 }
 
 /// Construye el IRS del caso base (PLAN.md §5.2) para un `model` ya construido: si

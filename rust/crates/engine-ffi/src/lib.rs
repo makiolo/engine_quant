@@ -1020,7 +1020,7 @@ fn price_payoff_gbm_q(
     seed: u64,
 ) -> Result<ffi::PayoffQPriceResult, String> {
     let estimate =
-        engine_core::payoff::price_payoff_gbm_q(&spec_json, &observable, s0, r, q, sigma, n_paths, seed)?;
+        engine_core::payoff::price_payoff_gbm_q("cpu", &spec_json, &observable, s0, r, q, sigma, n_paths, seed)?;
     Ok(ffi::PayoffQPriceResult {
         mean: estimate.mean,
         std_error: estimate.std_error,
@@ -1042,7 +1042,7 @@ fn price_payoff_exercise_gbm_q(
     seed: u64,
 ) -> Result<ffi::ExercisePolicyResult, String> {
     let result =
-        engine_core::payoff::price_payoff_exercise_gbm_q(&spec_json, &observable, s0, r, q, sigma, n_paths, seed)?;
+        engine_core::payoff::price_payoff_exercise_gbm_q("cpu", &spec_json, &observable, s0, r, q, sigma, n_paths, seed)?;
     let dates = result
         .dates
         .into_iter()
@@ -1085,7 +1085,7 @@ fn hit_probability_gbm_q(
     seed: u64,
 ) -> Result<ffi::PayoffQHitProbabilityResult, String> {
     let estimate =
-        engine_core::payoff::hit_probability_gbm_q(&spec_json, &event, &observable, s0, r, q, sigma, n_paths, seed)?;
+        engine_core::payoff::hit_probability_gbm_q("cpu", &spec_json, &event, &observable, s0, r, q, sigma, n_paths, seed)?;
     Ok(ffi::PayoffQHitProbabilityResult {
         probability: estimate.mean,
         std_error: estimate.std_error,
@@ -1108,6 +1108,7 @@ fn payoff_exposure_profile_gbm_q(
     seed: u64,
 ) -> Result<ffi::ExposureProfileResult, String> {
     let profile = engine_core::payoff::payoff_exposure_profile_gbm_q(
+        "cpu",
         &spec_json,
         &observable,
         s0,

@@ -70,6 +70,15 @@ pub fn parse_backend_name(name: &str) -> Option<ComputeBackend> {
     }
 }
 
+/// Traduce un nombre de backend ("cpu"/"gpu") a `ComputeBackend`, cayendo a `Cpu` si el
+/// nombre no se reconoce o pide un backend no compilado en este build. Compartida por
+/// `crate::api` (IRS/Hull-White) y `crate::payoff::api` (Q, Monte Carlo GBM) — la validación
+/// estricta ("cpu"/"gpu" y nada más) vive fuera de Rust, en `engine::ExecutionContext` (capa
+/// C++); esta función es deliberadamente permisiva, ver el doc-comment de `crate::api`.
+pub(crate) fn resolve_backend(name: &str) -> ComputeBackend {
+    parse_backend_name(name).filter(|b| b.is_available()).unwrap_or(ComputeBackend::Cpu)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
