@@ -17,6 +17,7 @@
 //! `Backend` cuando haga falta es un cambio aditivo (Fase 11, "vectorizacion CPU/GPU").
 
 use crate::backend::CpuBackend;
+use crate::exposure::ExposureProfile;
 use crate::mc::{self, McEstimate};
 use crate::models::gbm::Gbm;
 use crate::payoff::compile::compile;
@@ -68,6 +69,25 @@ fn check_single_observable(payoff: &CompiledPayoff, observable: &str, n_paths: u
     Ok(())
 }
 
+/// Simula bajo GBM el unico observable de `payoff` en `times` (ya ordenado/deduplicado/> 0 -- ver
+/// las dos llamantes) y devuelve `columns`: `columns[i][path]` es el valor de ese observable en
+/// `times[i]` para la ruta `path`.
+fn simulate_gbm_columns_at(
+    times: &[f64],
+    s0: f64,
+    r: f64,
+    q: f64,
+    sigma: f64,
+    n_paths: u64,
+    seed: u64,
+) -> Vec<Vec<f64>> {
+    let device = burn::tensor::Device::<CpuBackend>::default();
+    CpuBackend::seed(&device, seed);
+    let model = Gbm::new(scalar(s0, &device), scalar(r, &device), scalar(q, &device), scalar(sigma, &device));
+    let simulated = model.simulate_at_times(times, n_paths as usize, &device);
+    simulated.into_iter().map(|t| t.into_data().to_vec::<f64>().unwrap()).collect()
+}
+
 /// Simula bajo GBM el unico observable de `payoff` en `payoff.required_times()` y devuelve
 /// `(times, columns)`: `columns[i][path]` es el valor de ese observable en `times[i]` para la
 /// ruta `path`. Compartido por `price_payoff_gbm_q`/`hit_probability_gbm_q` -- ambas interpretan
@@ -89,13 +109,7 @@ fn simulate_gbm_columns(
             "payoff: el contrato no depende de ningun instante de mercado (nada que simular bajo Q)".to_string(),
         );
     }
-
-    let device = burn::tensor::Device::<CpuBackend>::default();
-    CpuBackend::seed(&device, seed);
-    let model = Gbm::new(scalar(s0, &device), scalar(r, &device), scalar(q, &device), scalar(sigma, &device));
-    let simulated = model.simulate_at_times(&times, n_paths as usize, &device);
-    let columns: Vec<Vec<f64>> =
-        simulated.into_iter().map(|t| t.into_data().to_vec::<f64>().unwrap()).collect();
+    let columns = simulate_gbm_columns_at(&times, s0, r, q, sigma, n_paths, seed);
     Ok((times, columns))
 }
 
@@ -174,6 +188,95 @@ pub fn hit_probability_gbm_q(
     }
 
     Ok(mc::aggregate(&hit_indicators, mc::Z_95))
+}
+
+/// Perfil de exposicion PATHWISE de un `PayoffProgram` bajo GBM (PLAN_PRODUCTS.md §12 Fase 6:
+/// "perfil de exposicion pathwise a partir del mismo AST y netting explicito"). Para cada `t` en
+/// `exposure_times`, y por cada ruta simulada, `V_t(ruta)` es la suma de
+/// `amount * exp(-r*(payment_time menos t))` sobre los cashflows del ledger de ESA ruta con
+/// `payment_time >= t` -- el valor REALIZADO restante en esa misma ruta ya simulada, descontado
+/// desde `t` (no desde el instante de valoracion). `EE(t) = media(max(V_t, 0))`, `PFE95(t) =
+/// percentil 95 de max(V_t, 0)`, mismo tipo `crate::exposure::ExposureProfile` que ya usa la ruta
+/// legacy IRS+Hull-White (§5.5: reutilizar el tipo de resultado, no inventar uno nuevo).
+///
+/// **Deliberadamente no es una valoracion condicional/anidada**: `V_t` usa el UNICO futuro que
+/// esa ruta ya realizo (el mismo ledger que produce `evaluate_with_events`), no
+/// `E_Q[V_t | F_t]` via regresion (eso es Longstaff-Schwartz, Fase 9, y solo para `Exercise`).
+/// Es una simplificacion deliberada y documentada, no una aproximacion oculta (PLAN_PRODUCTS.md
+/// §16, ultimo punto: "nunca ocultar aproximaciones").
+///
+/// **Netting**: si `spec_json` es un portfolio (`Both(trade_1, trade_2, ...)`), el ledger que
+/// produce `evaluate_with_events` ya combina los cashflows de TODOS los trades sobre la MISMA
+/// ruta -- el netting es automatico por construccion del AST, no un paso aparte (§11).
+///
+/// `exposure_times` no necesita ser subconjunto de `payoff.required_times()`: se simulan ademas
+/// (GBM puede generarse en cualquier instante > 0); un `0.0` en `exposure_times` no se simula
+/// (`Gbm::simulate_at_times` exige tiempos > 0, `S0` en `t=0` ya es conocido) -- se resuelve con
+/// el ledger ya simulado en los demas tiempos, igual que cualquier otro `t`.
+#[allow(clippy::too_many_arguments)]
+pub fn payoff_exposure_profile_gbm_q(
+    spec_json: &str,
+    observable: &str,
+    s0: f64,
+    r: f64,
+    q: f64,
+    sigma: f64,
+    exposure_times: &[f64],
+    n_paths: u64,
+    seed: u64,
+) -> Result<ExposureProfile, String> {
+    let payoff = compile(spec_json)?;
+    check_single_observable(&payoff, observable, n_paths)?;
+    if exposure_times.is_empty() {
+        return Err("payoff: exposure_times no puede estar vacio".to_string());
+    }
+    if exposure_times.iter().any(|t| !t.is_finite() || *t < 0.0) {
+        return Err("payoff: exposure_times debe contener solo instantes finitos >= 0".to_string());
+    }
+
+    let mut simulation_times: Vec<f64> = payoff.required_times();
+    simulation_times.extend(exposure_times.iter().copied().filter(|&t| t > 0.0));
+    simulation_times.sort_by(|a, b| a.partial_cmp(b).expect("payoff: tiempo no finito"));
+    simulation_times.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
+    if simulation_times.is_empty() {
+        return Err(
+            "payoff: el contrato no depende de ningun instante de mercado (nada que simular bajo Q)".to_string(),
+        );
+    }
+
+    let n_paths_usize = n_paths as usize;
+    let columns = simulate_gbm_columns_at(&simulation_times, s0, r, q, sigma, n_paths, seed);
+
+    // Un vector de exposiciones (una por ruta) por cada `t` de `exposure_times` -- se agregan al
+    // final, ya con todas las rutas evaluadas (la mediana/percentil 95 necesita el vector
+    // completo, a diferencia de la media).
+    let mut exposures_by_time: Vec<Vec<f64>> = vec![Vec::with_capacity(n_paths_usize); exposure_times.len()];
+    for path_idx in 0..n_paths_usize {
+        let values: Vec<f64> = columns.iter().map(|col| col[path_idx]).collect();
+        let path = SinglePath { times: &simulation_times, values: &values };
+        let (ledger, _events) = evaluate_with_events(&payoff, &path);
+        for (k, &t) in exposure_times.iter().enumerate() {
+            let remaining_value: f64 = ledger
+                .iter()
+                .filter(|cf| cf.payment_time >= t - 1e-9)
+                .map(|cf| cf.amount * (-r * (cf.payment_time - t)).exp())
+                .sum();
+            exposures_by_time[k].push(remaining_value.max(0.0));
+        }
+    }
+
+    let mut ee = Vec::with_capacity(exposure_times.len());
+    let mut pfe_95 = Vec::with_capacity(exposure_times.len());
+    for exposures in &mut exposures_by_time {
+        let mean = exposures.iter().sum::<f64>() / exposures.len() as f64;
+        exposures.sort_by(|a, b| a.partial_cmp(b).expect("payoff: exposicion no finita"));
+        let q_idx =
+            ((0.95 * exposures.len() as f64).ceil() as usize).saturating_sub(1).min(exposures.len() - 1);
+        ee.push(mean);
+        pfe_95.push(exposures[q_idx]);
+    }
+
+    Ok(ExposureProfile { times: exposure_times.to_vec(), ee, pfe_95 })
 }
 
 #[cfg(test)]
@@ -443,5 +546,100 @@ mod tests {
             coarse.mean,
             coarse.std_error
         );
+    }
+
+    // PLAN_PRODUCTS.md §12 Fase 6 ("perfil de exposicion pathwise a partir del mismo AST").
+    #[test]
+    fn exposure_at_maturity_and_at_zero_match_the_pv_exactly_for_a_nonnegative_payoff() {
+        // Con la MISMA seed/n_paths/tiempos requeridos (una call europea solo depende de
+        // 'maturity'), la simulacion de payoff_exposure_profile_gbm_q es IDENTICA path a path a
+        // la de price_payoff_gbm_q. Como el payoff de una call ya es >= 0, max(V_t,0)=V_t para
+        // t=0 y t=maturity (ambos descuentan el MISMO cashflow desde el MISMO instante base) --
+        // EE(0)=EE(maturity)=PV exactamente, no solo dentro de error estandar. La igualdad EXACTA
+        // depende de que ambas llamadas consuman la MISMA secuencia del RNG global (mismo motivo
+        // que el resto de tests de este modulo que necesitan reproducibilidad -- PLAN.md §7.19).
+        let _guard = crate::rng_test_lock::LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (s0, strike, r, q, sigma, maturity) = (100.0, 100.0, 0.05, 0.0, 0.2, 1.0);
+        let spec = CALL_JSON_TEMPLATE
+            .replace("{maturity}", &maturity.to_string())
+            .replace("{strike}", &strike.to_string());
+        let (n_paths, seed) = (50_000, 7);
+
+        let price = price_payoff_gbm_q(&spec, "EQ.SPOT.XYZ", s0, r, q, sigma, n_paths, seed).unwrap();
+        let profile = payoff_exposure_profile_gbm_q(
+            &spec, "EQ.SPOT.XYZ", s0, r, q, sigma, &[0.0, maturity], n_paths, seed,
+        )
+        .unwrap();
+
+        // EE(t) esta expresado EN EL INSTANTE t, no descontado a hoy (§14: "el visitor de
+        // valoracion decide como descontar", y una exposicion futura se reporta a esa fecha, no
+        // traida a valor presente): EE(0) coincide con el PV (nada que descontar entre 0 y 0),
+        // pero EE(maturity) es el payoff SIN descontar desde maturity -- exactamente
+        // price.mean/discount_factor(0,maturity) = price.mean*exp(r*maturity).
+        assert_eq!(profile.times, vec![0.0, maturity]);
+        assert!((profile.ee[0] - price.mean).abs() < 1e-9, "ee(0)={} price={}", profile.ee[0], price.mean);
+        let undiscounted_payoff_mean = price.mean * (r * maturity).exp();
+        assert!(
+            (profile.ee[1] - undiscounted_payoff_mean).abs() < 1e-9,
+            "ee(maturity)={} payoff_mean_sin_descontar={}",
+            profile.ee[1],
+            undiscounted_payoff_mean
+        );
+    }
+
+    #[test]
+    fn exposure_profile_nets_a_long_and_a_short_of_the_same_trade_to_zero() {
+        // Portfolio = Both(call larga, Give(la misma call)): el ledger neteado es Zero en TODAS
+        // las rutas -- confirma que el netting es automatico por composicion del AST (§11), sin
+        // ningun paso de netting aparte en la medida de exposicion.
+        let (s0, strike, r, q, sigma, maturity) = (100.0, 100.0, 0.05, 0.0, 0.2, 1.0);
+        let call_leg = format!(
+            r#"{{"type": "when", "time": {maturity}, "child": {{"type": "cashflow", "currency": "USD",
+                "amount": {{"type": "max",
+                    "left": {{"type": "sub",
+                        "left": {{"type": "fixing", "observable": "EQ.SPOT.XYZ", "time": {maturity}}},
+                        "right": {{"type": "constant", "value": {strike}}}}},
+                    "right": {{"type": "constant", "value": 0.0}}}}}}}}"#
+        );
+        let spec = format!(
+            r#"{{"schema": "engine.payoff/v1", "id": "NET", "contract": {{"type": "both", "children": [
+                {call_leg}, {{"type": "give", "child": {call_leg}}}
+            ]}}}}"#
+        );
+
+        let profile = payoff_exposure_profile_gbm_q(
+            &spec, "EQ.SPOT.XYZ", s0, r, q, sigma, &[0.5, maturity], 20_000, 7,
+        )
+        .unwrap();
+
+        assert_eq!(profile.ee, vec![0.0, 0.0]);
+        assert_eq!(profile.pfe_95, vec![0.0, 0.0]);
+    }
+
+    #[test]
+    fn exposure_profile_rejects_empty_or_negative_exposure_times() {
+        let spec = CALL_JSON_TEMPLATE.replace("{maturity}", "1.0").replace("{strike}", "100.0");
+        assert!(payoff_exposure_profile_gbm_q(&spec, "EQ.SPOT.XYZ", 100.0, 0.05, 0.0, 0.2, &[], 1_000, 7).is_err());
+        assert!(
+            payoff_exposure_profile_gbm_q(&spec, "EQ.SPOT.XYZ", 100.0, 0.05, 0.0, 0.2, &[-1.0], 1_000, 7).is_err()
+        );
+    }
+
+    #[test]
+    fn exposure_profile_pfe95_dominates_ee_for_a_barrier_payoff() {
+        let _guard = crate::rng_test_lock::LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (s0, strike, barrier, r, q, sigma, maturity) = (100.0, 100.0, 120.0, 0.05, 0.0, 0.2, 1.0);
+        let monitoring_times = [0.25, 0.5, 0.75, 1.0];
+        let spec = up_and_in_call_json(barrier, strike, maturity, &monitoring_times);
+
+        let profile = payoff_exposure_profile_gbm_q(
+            &spec, "EQ.SPOT.XYZ", s0, r, q, sigma, &[0.5, 0.75, maturity], 100_000, 7,
+        )
+        .unwrap();
+
+        for (ee, pfe) in profile.ee.iter().zip(profile.pfe_95.iter()) {
+            assert!(*ee >= 0.0, "ee={ee}");
+            assert!(*pfe >= *ee, "pfe={pfe} deberia dominar a ee={ee}");
+        }
     }
 }

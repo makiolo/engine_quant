@@ -3,6 +3,7 @@
 #include <exception>
 #include <stdexcept>
 #include <utility>
+#include <vector>
 
 #include "engine-ffi-cxx/lib.h"
 #include "engine/payoff/canonical_visitor.hpp"
@@ -13,6 +14,19 @@
 
 namespace engine {
 namespace payoff {
+
+namespace {
+
+// Mismo patron que engine.cpp/calibrator.cpp (duplicado por traduccion unit, no hay helper
+// compartido hoy): cxx no convierte implicitamente std::vector<double> <-> rust::Vec<double>.
+rust::Vec<double> to_rust_vec(const std::vector<double>& v) {
+    rust::Vec<double> out;
+    out.reserve(v.size());
+    for (double x : v) out.push_back(x);
+    return out;
+}
+
+} // namespace
 
 DiscountingPolicy::DiscountingPolicy(Currency currency, CurveId curve) {
     set_curve(std::move(currency), std::move(curve));
@@ -190,6 +204,48 @@ HitProbabilityResult hit_probability_gbm(
         out.ci_high = result.ci_high;
         out.n_paths = result.n_paths;
         out.measure = ProbabilityMeasure::RiskNeutralQ;
+        return out;
+    } catch (const std::exception& e) {
+        throw EvaluationError(e.what(), NodePath::root());
+    }
+}
+
+ExposureProfile payoff_exposure_profile_gbm(
+    const PayoffProgram& program, const GbmModel& model, const std::vector<TimePoint>& exposure_times,
+    std::uint64_t n_paths, std::uint64_t seed
+) {
+    std::optional<ModelCapabilities> capabilities = model.capabilities();
+    if (!capabilities.has_value()) {
+        throw ValidationError("GbmModel no declara ModelCapabilities", NodePath::root());
+    }
+    if (capabilities->supported_measures.find(ProbabilityMeasure::RiskNeutralQ) == capabilities->supported_measures.end()) {
+        throw ValidationError("el modelo no soporta la medida RiskNeutralQ", NodePath::root());
+    }
+
+    DependencyReport dependencies = DependencyVisitor{}.analyze(program.contract);
+    for (const ObservableId& observable : dependencies.observables) {
+        if (capabilities->generated_observables.find(observable) == capabilities->generated_observables.end()) {
+            throw ValidationError(
+                "observable '" + observable.value + "' no generado por el modelo (preflight de Fase 5)",
+                NodePath::root()
+            );
+        }
+    }
+
+    std::vector<double> exposure_times_raw;
+    exposure_times_raw.reserve(exposure_times.size());
+    for (TimePoint t : exposure_times) exposure_times_raw.push_back(t.year_fraction);
+
+    std::string spec_json = CanonicalVisitor::to_json(program.id, program.contract);
+    try {
+        ffi::ExposureProfileResult result = ffi::payoff_exposure_profile_gbm_q(
+            spec_json, model.observable().value, model.s0(), model.r(), model.q(), model.sigma(),
+            to_rust_vec(exposure_times_raw), n_paths, seed
+        );
+        ExposureProfile out;
+        out.times = std::vector<double>(result.times.begin(), result.times.end());
+        out.ee = std::vector<double>(result.ee.begin(), result.ee.end());
+        out.pfe_95 = std::vector<double>(result.pfe_95.begin(), result.pfe_95.end());
         return out;
     } catch (const std::exception& e) {
         throw EvaluationError(e.what(), NodePath::root());

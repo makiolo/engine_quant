@@ -2,7 +2,9 @@
 
 #include <cstdint>
 #include <unordered_map>
+#include <vector>
 
+#include "engine/engine.hpp" // ExposureProfile, ver payoff_exposure_profile_gbm (Fase 6)
 #include "engine/model.hpp"
 #include "engine/payoff/contract.hpp"
 #include "engine/payoff/dependency_visitor.hpp"
@@ -153,6 +155,23 @@ struct HitProbabilityResult {
 HitProbabilityResult hit_probability_gbm(
     const PayoffProgram& program, const GbmModel& model, const EventId& event, std::uint64_t n_paths,
     std::uint64_t seed
+);
+
+// Perfil de exposicion PATHWISE bajo Q de un `PayoffProgram` (PLAN_PRODUCTS.md §12 Fase 6:
+// "perfil de exposicion pathwise a partir del mismo AST y netting explicito"). Reutiliza el
+// mismo `ExposureProfile` (times/ee/pfe_95) que la ruta legacy IRS+Hull-White
+// (`engine::ExposureProfile` en engine.hpp) -- sin inventar un tipo de resultado nuevo (§5.5).
+//
+// Deliberadamente NO es una valoracion condicional/anidada: `EE(t)`/`PFE95(t)` se calculan sobre
+// el valor REALIZADO restante de cada ruta ya simulada (los cashflows del ledger de esa ruta con
+// `payment_time >= t`, descontados desde `t`), no `E_Q[V_t | F_t]` via regresion -- eso es
+// Longstaff-Schwartz (Fase 9), y solo para `Exercise`. Ver el doc-comment de
+// `engine_core::payoff::payoff_exposure_profile_gbm_q` (Rust) para el detalle. Si `program`
+// combina varios trades con `Both`, el netting es automatico (el ledger ya los combina en la
+// misma ruta), sin paso aparte.
+ExposureProfile payoff_exposure_profile_gbm(
+    const PayoffProgram& program, const GbmModel& model, const std::vector<TimePoint>& exposure_times,
+    std::uint64_t n_paths, std::uint64_t seed
 );
 
 } // namespace payoff

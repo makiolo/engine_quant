@@ -178,4 +178,42 @@ TEST(HitProbabilityGbmMeasureTest, RejectsAnEventThatDoesNotExistInTheContract) 
     );
 }
 
+// PLAN_PRODUCTS.md §12 Fase 6 ("perfil de exposicion pathwise ... y netting explicito").
+TEST(PayoffExposureProfileGbmMeasureTest, NetsALongAndAShortOfTheSameTradeToZero) {
+    const pf::ObservableId spot{"EQ.SPOT.XYZ"};
+    pf::ContractPtr call = european_call(spot, 100.0, 1.0);
+    // Both(call larga, Give(la misma call)): el ledger neteado es Zero en TODAS las rutas --
+    // confirma que el netting es automatico por composicion del AST (§11).
+    pf::ContractPtr portfolio = pf::both({call, pf::give(call)});
+    pf::PayoffProduct product("NET", portfolio);
+
+    engine::GbmModel model = make_gbm(100.0, 0.05, 0.0, 0.2, spot.value);
+    std::vector<pf::TimePoint> exposure_times{tp(0.5), tp(1.0)};
+
+    engine::ExposureProfile profile =
+        pf::payoff_exposure_profile_gbm(*product.payoff_program(), model, exposure_times, 20'000, 7);
+
+    ASSERT_EQ(profile.times.size(), 2u);
+    EXPECT_DOUBLE_EQ(profile.ee[0], 0.0);
+    EXPECT_DOUBLE_EQ(profile.ee[1], 0.0);
+    EXPECT_DOUBLE_EQ(profile.pfe_95[0], 0.0);
+    EXPECT_DOUBLE_EQ(profile.pfe_95[1], 0.0);
+}
+
+TEST(PayoffExposureProfileGbmMeasureTest, PfE95DominatesEeAndBothAreNonNegative) {
+    const pf::ObservableId spot{"EQ.SPOT.XYZ"};
+    pf::PayoffProduct product("TEST_CALL", european_call(spot, 100.0, 1.0));
+    engine::GbmModel model = make_gbm(100.0, 0.05, 0.0, 0.2, spot.value);
+    std::vector<pf::TimePoint> exposure_times{tp(0.25), tp(0.5), tp(0.75), tp(1.0)};
+
+    engine::ExposureProfile profile =
+        pf::payoff_exposure_profile_gbm(*product.payoff_program(), model, exposure_times, 100'000, 7);
+
+    ASSERT_EQ(profile.times.size(), 4u);
+    for (std::size_t i = 0; i < profile.times.size(); ++i) {
+        EXPECT_GE(profile.ee[i], 0.0);
+        EXPECT_GE(profile.pfe_95[i], profile.ee[i]);
+    }
+}
+
 } // namespace

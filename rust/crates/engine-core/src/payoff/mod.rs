@@ -32,7 +32,7 @@ pub mod compile;
 pub mod eval;
 pub mod ir;
 
-pub use api::{hit_probability_gbm_q, price_payoff_gbm_q};
+pub use api::{hit_probability_gbm_q, payoff_exposure_profile_gbm_q, price_payoff_gbm_q};
 pub use compile::compile;
 pub use eval::{evaluate, evaluate_with_events, EventOutcome, ObservablePath, PathCashflow};
 pub use ir::{

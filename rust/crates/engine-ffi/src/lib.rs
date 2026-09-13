@@ -6,7 +6,9 @@
 mod ffi {
     /// Resultado plano de un perfil de exposición (PLAN.md §5.5: "los tipos complejos ...
     /// se pasan mediante structs planos"), tres vectores paralelos indexados por fecha de
-    /// monitorización.
+    /// monitorización. Reutilizado tal cual por `payoff_exposure_profile_gbm_q`
+    /// (PLAN_PRODUCTS.md §12 Fase 6, `engine_core::exposure::ExposureProfile`) -- misma forma,
+    /// sin inventar un tipo de resultado nuevo (§5.5).
     struct ExposureProfileResult {
         times: Vec<f64>,
         ee: Vec<f64>,
@@ -420,6 +422,23 @@ mod ffi {
             n_paths: u64,
             seed: u64,
         ) -> Result<PayoffQHitProbabilityResult>;
+
+        // PLAN_PRODUCTS.md §12 Fase 6 ("perfil de exposicion pathwise a partir del mismo AST y
+        // netting explicito"): EE/PFE95 pathwise de un PayoffProgram bajo Q en cada instante de
+        // `exposure_times`, ver engine_core::payoff::payoff_exposure_profile_gbm_q. Mismo
+        // preflight de observables que price_payoff_gbm_q; `exposure_times` vacio o con algun
+        // instante negativo/no finito tambien es un error de preflight.
+        fn payoff_exposure_profile_gbm_q(
+            spec_json: String,
+            observable: String,
+            s0: f64,
+            r: f64,
+            q: f64,
+            sigma: f64,
+            exposure_times: Vec<f64>,
+            n_paths: u64,
+            seed: u64,
+        ) -> Result<ExposureProfileResult>;
     }
 }
 
@@ -906,4 +925,30 @@ fn hit_probability_gbm_q(
         ci_high: estimate.ci_high,
         n_paths: estimate.n_paths,
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn payoff_exposure_profile_gbm_q(
+    spec_json: String,
+    observable: String,
+    s0: f64,
+    r: f64,
+    q: f64,
+    sigma: f64,
+    exposure_times: Vec<f64>,
+    n_paths: u64,
+    seed: u64,
+) -> Result<ffi::ExposureProfileResult, String> {
+    let profile = engine_core::payoff::payoff_exposure_profile_gbm_q(
+        &spec_json,
+        &observable,
+        s0,
+        r,
+        q,
+        sigma,
+        &exposure_times,
+        n_paths,
+        seed,
+    )?;
+    Ok(ffi::ExposureProfileResult { times: profile.times, ee: profile.ee, pfe_95: profile.pfe_95 })
 }
