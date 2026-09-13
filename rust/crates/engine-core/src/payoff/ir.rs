@@ -6,10 +6,22 @@
 //! vez de comparar `String`s en cada evaluacion de ruta (§8 punto 3, "resolucion de nombres a
 //! slots enteros").
 //!
-//! No hay CSE (common-subexpression elimination, §8 punto 4) ni orden topologico explicito mas
-//! alla del que ya impone construir el `Vec` en post-orden durante la compilacion (§8 puntos 4-5):
-//! ambos son optimizaciones de Fase 11, no requisitos de correccion del interprete de referencia
-//! de esta fase.
+//! CSE (common-subexpression elimination, §8 punto 4, Fase 11): `compile::Compiler::intern_scalar`/
+//! `intern_predicate`/`intern_contract` deduplican cada nodo recien construido contra los ya
+//! existentes de su propia categoria mediante escaneo lineal con `==` (mismo estilo que
+//! `observable_slot`/`event_slot`; los `Vec` de opcodes son pequenos -- docenas de nodos -- asi que
+//! no hace falta una tabla hash). Dos subarboles estructuralmente identicos (mismo opcode, mismos
+//! indices de hijos, comparados con el `PartialEq` derivado) terminan compartiendo el mismo indice
+//! en `scalar_ops`/`predicate_ops`/`contract_ops`, y quien los referencia (dos padres distintos)
+//! apunta al mismo nodo sin saberlo. Esto es seguro incluso para `ContractOp::Trigger`, que tiene
+//! estado por ruta (`EventStateResolved`): `eval::resolve_trigger_states` NUNCA recorre el arbol
+//! desde la raiz para resolver un evento, itera `payoff.contract_ops` por INDICE (una vez por
+//! entrada del `Vec`, `.iter().enumerate()`) y `ScalarOp::EventValue` se captura igual, escaneando
+//! `payoff.scalar_ops` completo por indice -- asi que un `Trigger` (o cualquier otro nodo)
+//! compartido por dos padres se resuelve una unica vez, de forma correcta, sin importar cuantos
+//! padres lo referencien. No hay orden topologico explicito mas alla del que ya impone construir
+//! cada `Vec` en post-orden durante la compilacion (§8 punto 5): sigue siendo asi con CSE, ya que
+//! `intern_*` solo se llama con nodos cuyos hijos (subindices) ya se compilaron/internaron antes.
 
 /// Version del formato `CompiledPayoff`. Sube solo si cambia el significado de un opcode ya
 /// publicado (misma regla que `engine_abi_version()` en `cpp/engine/include/engine/abi.h`);

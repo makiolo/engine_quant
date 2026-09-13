@@ -82,6 +82,36 @@ impl Compiler {
         self.event_slots.len() - 1
     }
 
+    /// CSE (common-subexpression elimination, PLAN_PRODUCTS.md §8 punto 4, Fase 11): mismo
+    /// escaneo lineal que `observable_slot`/`event_slot` de arriba, pero sobre nodos ya
+    /// construidos en vez de nombres. Ver el doc-comment de `ir.rs` para por que fusionar dos
+    /// `ContractOp::Trigger` estructuralmente identicos (con estado por ruta) es seguro.
+    fn intern_scalar(&mut self, op: ScalarOp) -> usize {
+        if let Some(i) = self.scalar_ops.iter().position(|existing| existing == &op) {
+            return i;
+        }
+        self.scalar_ops.push(op);
+        self.scalar_ops.len() - 1
+    }
+
+    /// Ver `intern_scalar`.
+    fn intern_predicate(&mut self, op: PredicateOp) -> usize {
+        if let Some(i) = self.predicate_ops.iter().position(|existing| existing == &op) {
+            return i;
+        }
+        self.predicate_ops.push(op);
+        self.predicate_ops.len() - 1
+    }
+
+    /// Ver `intern_scalar`.
+    fn intern_contract(&mut self, op: ContractOp) -> usize {
+        if let Some(i) = self.contract_ops.iter().position(|existing| existing == &op) {
+            return i;
+        }
+        self.contract_ops.push(op);
+        self.contract_ops.len() - 1
+    }
+
     /// Reconoce `condition` como una barrera simple (§4.2, Fase 6): UNICAMENTE
     /// `{"type":"greater_equal"/"less_equal", "left":{"type":"current","observable":X},
     /// "right":{"type":"constant","value":H}}`, la misma forma que emiten las plantillas de
@@ -160,8 +190,7 @@ impl Compiler {
             }
             other => return Err(unsupported_node("escalar", other)),
         };
-        self.scalar_ops.push(op);
-        Ok(self.scalar_ops.len() - 1)
+        Ok(self.intern_scalar(op))
     }
 
     fn compile_predicate(&mut self, node: &Value) -> Result<usize, String> {
@@ -193,8 +222,7 @@ impl Compiler {
             "event_occurred" => PredicateOp::EventOccurred(self.event_slot(str_field(node, "event")?)),
             other => return Err(unsupported_node("predicado", other)),
         };
-        self.predicate_ops.push(op);
-        Ok(self.predicate_ops.len() - 1)
+        Ok(self.intern_predicate(op))
     }
 
     fn compile_contract(&mut self, node: &Value) -> Result<usize, String> {
@@ -305,8 +333,7 @@ impl Compiler {
             }
             other => return Err(unsupported_node("contrato", other)),
         };
-        self.contract_ops.push(op);
-        Ok(self.contract_ops.len() - 1)
+        Ok(self.intern_contract(op))
     }
 
     fn scalar_field(&mut self, node: &Value, field: &str) -> Result<usize, String> {
@@ -569,6 +596,112 @@ mod tests {
         );
         let err = compile(&json).expect_err("condicion con los lados intercambiados no deberia reconocerse");
         assert!(err.contains("continuous_approximation") || err.contains("current"));
+    }
+
+    // CSE (common-subexpression elimination, PLAN_PRODUCTS.md §8 punto 4, Fase 11): dos ramas de
+    // 'both' con subarboles JSON estructuralmente identicos pero como nodos SEPARADOS (no el mismo
+    // objeto Rust) deben compartir indice tras compilar.
+    const DOUBLE_CASHFLOW_JSON: &str = r#"{
+        "schema": "engine.payoff/v1",
+        "id": "DOUBLE_CASHFLOW",
+        "contract": {
+            "type": "when",
+            "time": 1.0,
+            "child": {
+                "type": "both",
+                "children": [
+                    {"type": "cashflow", "currency": "USD", "amount": {"type": "mul",
+                        "left": {"type": "constant", "value": 1000.0},
+                        "right": {"type": "sub",
+                            "left": {"type": "fixing", "observable": "EQ.SPOT.AAPL", "time": 1.0},
+                            "right": {"type": "constant", "value": 100.0}}}},
+                    {"type": "cashflow", "currency": "USD", "amount": {"type": "mul",
+                        "left": {"type": "constant", "value": 1000.0},
+                        "right": {"type": "sub",
+                            "left": {"type": "fixing", "observable": "EQ.SPOT.AAPL", "time": 1.0},
+                            "right": {"type": "constant", "value": 100.0}}}}
+                ]
+            }
+        }
+    }"#;
+
+    #[test]
+    fn cse_deduplicates_two_structurally_identical_cashflow_subtrees() {
+        let compiled = compile(DOUBLE_CASHFLOW_JSON).expect("both con hijos identicos deberia compilar");
+        // Un unico subarbol de 'amount' compilado (constant(1000), fixing, constant(100), sub,
+        // mul): 5 nodos escalares, no 10.
+        assert_eq!(compiled.scalar_ops.len(), 5);
+        // Un unico ContractOp::Cashflow (no dos), y 'Both' referencia el MISMO indice dos veces.
+        assert_eq!(
+            compiled.contract_ops.iter().filter(|op| matches!(op, ContractOp::Cashflow { .. })).count(),
+            1
+        );
+        let when_child = match &compiled.contract_ops[compiled.root] {
+            ContractOp::When { child, .. } => *child,
+            other => panic!("se esperaba ContractOp::When, se obtuvo {other:?}"),
+        };
+        match &compiled.contract_ops[when_child] {
+            ContractOp::Both(children) => {
+                assert_eq!(children.len(), 2);
+                assert_eq!(children[0], children[1], "ambos hijos de Both deberian compartir indice");
+            }
+            other => panic!("se esperaba ContractOp::Both, se obtuvo {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cse_sharing_a_cashflow_index_still_pays_it_twice_when_evaluated() {
+        // La correccion semantica de 'Both' (duplica pagos identicos, ADR-P0-02) no debe romperse
+        // por compartir representacion en el IR: evaluar debe seguir produciendo DOS cashflows.
+        use crate::payoff::eval::{evaluate, ObservablePath};
+
+        struct ConstantSpot(f64);
+        impl ObservablePath for ConstantSpot {
+            fn value_at(&self, _slot: usize, _time: f64) -> f64 {
+                self.0
+            }
+        }
+
+        let compiled = compile(DOUBLE_CASHFLOW_JSON).unwrap();
+        let ledger = evaluate(&compiled, &ConstantSpot(120.0));
+        assert_eq!(ledger.len(), 2, "Both debe seguir pagando dos veces aunque comparta el subarbol");
+        for cf in &ledger {
+            assert_eq!(cf.payment_time, 1.0);
+            assert_eq!(cf.amount, 1000.0 * 20.0);
+        }
+    }
+
+    // CSE tambien debe deduplicar un observable 'current' repetido en dos ramas de un 'if'.
+    const IF_WITH_REPEATED_CURRENT_JSON: &str = r#"{
+        "schema": "engine.payoff/v1",
+        "id": "IF_REPEATED_CURRENT",
+        "contract": {
+            "type": "if",
+            "condition": {"type": "greater",
+                "left": {"type": "current", "observable": "EQ.SPOT.AAPL"},
+                "right": {"type": "constant", "value": 100.0}},
+            "if_true": {"type": "when", "time": 1.0, "child": {"type": "cashflow", "currency": "USD",
+                "amount": {"type": "current", "observable": "EQ.SPOT.AAPL"}}},
+            "if_false": {"type": "when", "time": 1.0, "child": {"type": "cashflow", "currency": "USD",
+                "amount": {"type": "current", "observable": "EQ.SPOT.AAPL"}}}
+        }
+    }"#;
+
+    #[test]
+    fn cse_deduplicates_repeated_current_observable_across_if_branches() {
+        let compiled = compile(IF_WITH_REPEATED_CURRENT_JSON).expect("if deberia compilar");
+        let current_indices: Vec<usize> = compiled
+            .scalar_ops
+            .iter()
+            .enumerate()
+            .filter(|(_, op)| matches!(op, ScalarOp::Current { .. }))
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(
+            current_indices.len(),
+            1,
+            "el 'current' de la condicion y los dos de las ramas deberian compartir un unico indice"
+        );
     }
 
     #[test]
