@@ -1,9 +1,12 @@
 #include "engine/price.hpp"
 
 #include <algorithm>
+#include <optional>
 #include <stdexcept>
 #include <unordered_map>
 #include <unordered_set>
+
+#include "engine/payoff/payoff_product.hpp"
 
 namespace engine {
 
@@ -345,6 +348,19 @@ PriceResult price(
 
 namespace {
 
+// Fingerprint de IR para dedup entre productos distintos del lote (PLAN_PRODUCTS.md §12 Fase
+// 11, "grouping por fingerprint... y modelo"; §9.2 "agrupa por fingerprint de IR, modelo y
+// configuración de medida"). `canonical_hash` ya es exactamente ese fingerprint de IR --
+// `CanonicalVisitor` (payoff/canonical_visitor.cpp) lo calcula como FNV-1a de
+// `to_json(id, contract)`, así que dos productos con el mismo hash tienen el mismo id y el
+// mismo AST byte a byte. Productos sin `payoff_program()` (p.ej. IrSwapProduct) no tienen
+// fingerprint -- devuelve nullopt y el llamador no intenta deduplicarlos.
+std::optional<std::string> payoff_fingerprint(const IProduct& product) {
+    const payoff::PayoffProgram* program = product.payoff_program();
+    if (program == nullptr) return std::nullopt;
+    return program->canonical_hash;
+}
+
 // Lote genérico, producto a producto, vía el registry de medidas (PLAN_PRODUCTS.md §9.2/§12
 // Fase 8: "price_batch deja de asumir IRS al existir el segundo producto universal"). Sin
 // vectorización -- correcto, no optimizado; agrupar/vectorizar un lote `Payoff` heterogéneo es
@@ -352,6 +368,20 @@ namespace {
 // es homogéneamente `IrSwapProduct` (mismo criterio de homogeneidad de tipo que
 // `require_homogeneous_irs_batch`, sin exigir calendario común -- cada producto genérico trae
 // su propio AST).
+//
+// PLAN_PRODUCTS.md §12 Fase 11 ("grouping por fingerprint... y modelo"): `fingerprint_cache`
+// deduplica `computed` (medida registrada + configuración) por `canonical_hash` A TRAVÉS de
+// productos distintos del lote, no solo dentro de uno solo. Dentro de esta función `model`/
+// `market`/`pricing`/`execution` son los mismos objetos para todo el lote (parámetros de la
+// función, no varían por producto) y todos los productos ya comparten `type_name()` (validado
+// más abajo) -- así que si dos productos tienen el mismo `canonical_hash` (mismo id, mismo AST
+// byte a byte), `evaluate()` es una función pura de (model, product, market, pricing,
+// execution) y el producto es idéntico, luego el resultado tiene que ser idéntico. No es una
+// aproximación ni una heurística de similitud: es la misma entrada exacta reevaluada, así que
+// reutilizar el `MeasureResult` ya calculado es correcto por construcción, no solo "razonable".
+// Productos sin fingerprint (payoff_program() == nullptr, p.ej. IrSwapProduct) siguen su
+// `computed` local de siempre, sin compartir nada entre productos -- comportamiento idéntico al
+// anterior para ese caso.
 PriceBatchResult price_batch_generic(
     const Registries& registries,
     const std::vector<const IProduct*>& products,
@@ -372,6 +402,10 @@ PriceBatchResult price_batch_generic(
     }
 
     const std::string& type_name = products.front()->type_name();
+    // Clave externa = canonical_hash (fingerprint de IR); clave interna = cache_key de siempre
+    // (medida registrada + configuración). Compartido entre TODOS los productos del lote que
+    // tengan fingerprint -- ver comentario de `payoff_fingerprint` arriba.
+    std::unordered_map<std::string, std::unordered_map<std::string, MeasureResult>> fingerprint_cache;
     PriceBatchResult result;
     result.reserve(products.size());
     for (std::size_t i = 0; i < products.size(); ++i) {
@@ -381,7 +415,10 @@ PriceBatchResult price_batch_generic(
                 type_name + "' vs '" + products[i]->type_name() + "')"
             );
         }
-        std::unordered_map<std::string, MeasureResult> computed;
+        std::optional<std::string> fingerprint = payoff_fingerprint(*products[i]);
+        std::unordered_map<std::string, MeasureResult> local_computed;
+        std::unordered_map<std::string, MeasureResult>& computed =
+            fingerprint.has_value() ? fingerprint_cache[*fingerprint] : local_computed;
         PriceResult row;
         row.reserve(measures.size());
         for (std::size_t j = 0; j < measures.size(); ++j) {
