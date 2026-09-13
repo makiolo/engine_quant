@@ -8,12 +8,15 @@
 #include <gtest/gtest.h>
 
 #include <cmath>
+#include <vector>
 
 #include "engine/model.hpp"
+#include "engine/payoff/barrier_templates.hpp"
 #include "engine/payoff/errors.hpp"
 #include "engine/payoff/expression.hpp"
 #include "engine/payoff/measures.hpp"
 #include "engine/payoff/payoff_product.hpp"
+#include "engine/payoff/predicate.hpp"
 
 namespace {
 
@@ -73,6 +76,56 @@ TEST(RiskNeutralGbmMeasureTest, PreflightRejectsObservableTheModelDoesNotGenerat
     engine::GbmModel model = make_gbm(100.0, 0.05, 0.0, 0.2, "EQ.SPOT.OTHER_TICKER");
 
     EXPECT_THROW(pf::risk_neutral_price_gbm(*product.payoff_program(), model, 1'000, 7), pf::ValidationError);
+}
+
+// PLAN_PRODUCTS.md §12 Fase 6 ("barrera discreta vectorizada bajo Q"): un AST de barrera
+// construido en C++ (plantilla `templates::up_and_in` + un `up-and-out` armado a mano con el
+// builder de bajo nivel `trigger`, ver §4.2) cruza a Rust como JSON, se compila/evalua alli
+// (ver rust/crates/engine-core/src/payoff/{compile,eval}.rs) y vuelve como `QValuationResult` --
+// confirma el camino completo C++ AST -> JSON -> Rust IR -> Monte Carlo para `Trigger`, no solo
+// el lado Rust (ya cubierto en rust/.../payoff/api.rs). §13.2: "un knock-in + knock-out
+// complementarios reproducen el underlying" -- UI + UO reproduce la vanilla dentro del error
+// estandar combinado (ambas simulaciones son GBM exacto, no hay sesgo de discretizacion).
+TEST(RiskNeutralGbmBarrierMeasureTest, UpAndInPlusUpAndOutReproducesVanillaCallUnderQ) {
+    const pf::ObservableId spot{"EQ.SPOT.XYZ"};
+    const double s0 = 100.0, strike = 100.0, barrier = 120.0, r = 0.05, q = 0.0, sigma = 0.2, maturity = 1.0;
+    const std::vector<pf::TimePoint> monitoring_times{tp(0.25), tp(0.5), tp(0.75), tp(1.0)};
+
+    pf::ContractPtr vanilla = european_call(spot, strike, maturity);
+
+    pf::ContractPtr up_and_in =
+        pf::templates::up_and_in(pf::EventId{"UI"}, spot, barrier, monitoring_times, vanilla);
+
+    // No hay plantilla `up_and_out` en barrier_templates.hpp (solo down_and_out) -- se arma con
+    // el builder de bajo nivel `trigger` (§7.1): mismo predicado que `up_and_in`, on_hit/on_miss
+    // intercambiados (se desactiva -- paga Zero -- si toca la barrera; paga la vanilla si nunca
+    // la toca).
+    pf::PredicatePtr up_and_out_condition = pf::greater_equal(pf::current(spot), pf::constant(barrier));
+    pf::TriggerSpec up_and_out_spec{
+        pf::EventId{"UO"}, monitoring_times, up_and_out_condition, pf::Monitoring::Discrete, pf::Settlement::AtHit,
+        0, true
+    };
+    pf::ContractPtr up_and_out = pf::trigger(up_and_out_spec, pf::zero(), vanilla);
+
+    engine::GbmModel model = make_gbm(s0, r, q, sigma, spot.value);
+    const std::uint64_t n_paths = 300'000;
+
+    pf::PayoffProduct ui_product("UI", up_and_in);
+    pf::PayoffProduct uo_product("UO", up_and_out);
+    pf::PayoffProduct vanilla_product("VANILLA", vanilla);
+
+    pf::QValuationResult ui_result = pf::risk_neutral_price_gbm(*ui_product.payoff_program(), model, n_paths, 7);
+    pf::QValuationResult uo_result = pf::risk_neutral_price_gbm(*uo_product.payoff_program(), model, n_paths, 8);
+    pf::QValuationResult vanilla_result =
+        pf::risk_neutral_price_gbm(*vanilla_product.payoff_program(), model, n_paths, 9);
+
+    double combined_std_error = std::sqrt(
+        ui_result.std_error * ui_result.std_error + uo_result.std_error * uo_result.std_error +
+        vanilla_result.std_error * vanilla_result.std_error
+    );
+    double tolerance = 8.0 * combined_std_error;
+    EXPECT_NEAR(ui_result.mean + uo_result.mean, vanilla_result.mean, tolerance)
+        << "ui=" << ui_result.mean << " uo=" << uo_result.mean << " vanilla=" << vanilla_result.mean;
 }
 
 } // namespace
