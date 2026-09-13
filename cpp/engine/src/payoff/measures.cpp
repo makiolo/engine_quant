@@ -68,6 +68,13 @@ void preflight_gbm_capabilities(
             NodePath::root()
         );
     }
+    if (dependencies.requires_early_exercise_regression && !capabilities->supports_early_exercise_regression) {
+        throw ValidationError(
+            "el contrato usa Exercise (Longstaff-Schwartz) pero el modelo no lo soporta "
+            "(ModelCapabilities::supports_early_exercise_regression=false, PLAN_PRODUCTS.md §10 Fase 9)",
+            NodePath::root()
+        );
+    }
 }
 
 } // namespace
@@ -188,6 +195,41 @@ QValuationResult risk_neutral_price_gbm(
         // CompiledPayoff v1) cruza como excepcion de C++ (ver rust/crates/engine-ffi) -- se
         // relanza en el vocabulario de errores del motor de payoff en vez de dejar escapar el
         // tipo de excepcion interno de cxx.
+        throw EvaluationError(e.what(), NodePath::root());
+    }
+}
+
+ExercisePolicyResult exercise_price_gbm(
+    const PayoffProgram& program, const GbmModel& model, std::uint64_t n_paths, std::uint64_t seed
+) {
+    preflight_gbm_capabilities(program, model.capabilities(), ProbabilityMeasure::RiskNeutralQ);
+
+    std::string spec_json = CanonicalVisitor::to_json(program.id, program.contract);
+    try {
+        ffi::ExercisePolicyResult result = ffi::price_payoff_exercise_gbm_q(
+            spec_json, model.observable().value, model.s0(), model.r(), model.q(), model.sigma(), n_paths, seed
+        );
+        ExercisePolicyResult out;
+        out.price.mean = result.mean;
+        out.price.std_error = result.std_error;
+        out.price.ci_low = result.ci_low;
+        out.price.ci_high = result.ci_high;
+        out.price.n_paths = result.n_paths;
+        out.price.measure = ProbabilityMeasure::RiskNeutralQ;
+        out.dates.reserve(result.dates.size());
+        for (const ffi::ExerciseDateDiagnosticResult& d : result.dates) {
+            ExerciseDateDiagnostic diag;
+            diag.date = d.date;
+            diag.n_in_the_money = d.n_in_the_money;
+            diag.has_regression = d.has_regression;
+            diag.coeff_a = d.coeff_a;
+            diag.coeff_b = d.coeff_b;
+            diag.coeff_c = d.coeff_c;
+            diag.exercised_fraction = d.exercised_fraction;
+            out.dates.push_back(diag);
+        }
+        return out;
+    } catch (const std::exception& e) {
         throw EvaluationError(e.what(), NodePath::root());
     }
 }

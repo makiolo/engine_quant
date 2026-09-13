@@ -100,6 +100,36 @@ mod ffi {
         n_paths: u64,
     }
 
+    /// Diagnostico de UNA fecha de decision de un `Exercise` (PLAN_PRODUCTS.md §10, Fase 9:
+    /// "diagnostico de regresion y politica de ejercicio exportable"), ver
+    /// `engine_core::payoff::ExerciseDateDiagnostic`. `has_regression=false` cuando en `date` no
+    /// hubo suficientes rutas in-the-money para ajustar la regresion (`coeff_a/b/c` son 0.0 en ese
+    /// caso, no un ajuste real -- `has_regression` es la unica forma de distinguirlo de un ajuste
+    /// legitimo de coeficientes nulos).
+    struct ExerciseDateDiagnosticResult {
+        date: f64,
+        n_in_the_money: u64,
+        has_regression: bool,
+        coeff_a: f64,
+        coeff_b: f64,
+        coeff_c: f64,
+        exercised_fraction: f64,
+    }
+
+    /// Precio bajo Q de un `PayoffProgram` con un derecho de ejercicio (PLAN_PRODUCTS.md §10,
+    /// Fase 9), ver `engine_core::payoff::ExercisePolicyResult`: misma forma de precio que
+    /// `PayoffQPriceResult` (`mean`/`std_error`/`ci_low`/`ci_high`/`n_paths`) mas `dates`, el
+    /// diagnostico de la politica de ejercicio resuelta, en el mismo orden ascendente que las
+    /// `dates` declaradas en el contrato.
+    struct ExercisePolicyResult {
+        mean: f64,
+        std_error: f64,
+        ci_low: f64,
+        ci_high: f64,
+        n_paths: u64,
+        dates: Vec<ExerciseDateDiagnosticResult>,
+    }
+
     extern "Rust" {
         fn ping() -> f64;
 
@@ -456,6 +486,24 @@ mod ffi {
             n_paths: u64,
             seed: u64,
         ) -> Result<PayoffQHitProbabilityResult>;
+
+        // PLAN_PRODUCTS.md §10, Fase 9: precio bajo Q (GBM, Longstaff-Schwartz) de un
+        // PayoffProgram con exactamente un ContractOp::Exercise, mas el diagnostico de la
+        // politica de ejercicio resuelta -- ver engine_core::payoff::price_payoff_exercise_gbm_q.
+        // Mismo preflight de observable que price_payoff_gbm_q, mas "el contrato no contiene
+        // ningun nodo Exercise"/"mas de un nodo Exercise" (alcance de esta fase, ver
+        // engine_core::payoff::lsm).
+        #[allow(clippy::too_many_arguments)]
+        fn price_payoff_exercise_gbm_q(
+            spec_json: String,
+            observable: String,
+            s0: f64,
+            r: f64,
+            q: f64,
+            sigma: f64,
+            n_paths: u64,
+            seed: u64,
+        ) -> Result<ExercisePolicyResult>;
 
         // PLAN_PRODUCTS.md §12 Fase 6 ("perfil de exposicion pathwise a partir del mismo AST y
         // netting explicito"): EE/PFE95 pathwise de un PayoffProgram bajo Q en cada instante de
@@ -979,6 +1027,48 @@ fn price_payoff_gbm_q(
         ci_low: estimate.ci_low,
         ci_high: estimate.ci_high,
         n_paths: estimate.n_paths,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn price_payoff_exercise_gbm_q(
+    spec_json: String,
+    observable: String,
+    s0: f64,
+    r: f64,
+    q: f64,
+    sigma: f64,
+    n_paths: u64,
+    seed: u64,
+) -> Result<ffi::ExercisePolicyResult, String> {
+    let result =
+        engine_core::payoff::price_payoff_exercise_gbm_q(&spec_json, &observable, s0, r, q, sigma, n_paths, seed)?;
+    let dates = result
+        .dates
+        .into_iter()
+        .map(|d| {
+            let (has_regression, coeff_a, coeff_b, coeff_c) = match d.regression_coeffs {
+                Some((a, b, c)) => (true, a, b, c),
+                None => (false, 0.0, 0.0, 0.0),
+            };
+            ffi::ExerciseDateDiagnosticResult {
+                date: d.date,
+                n_in_the_money: d.n_in_the_money,
+                has_regression,
+                coeff_a,
+                coeff_b,
+                coeff_c,
+                exercised_fraction: d.exercised_fraction,
+            }
+        })
+        .collect();
+    Ok(ffi::ExercisePolicyResult {
+        mean: result.price.mean,
+        std_error: result.price.std_error,
+        ci_low: result.price.ci_low,
+        ci_high: result.price.ci_high,
+        n_paths: result.price.n_paths,
+        dates,
     })
 }
 

@@ -36,6 +36,11 @@ struct DependencyReport {
     // DependencyVisitor y las capacidades se comparan antes..."); `ScenarioEvaluator` (evaluador
     // determinista) lo rechaza en tiempo de evaluación sin necesidad de consultar este campo.
     bool requires_continuous_barrier_bridge = false;
+
+    // true si el árbol contiene algún `Exercise` (Fase 9, §10): las medidas Q lo comparan contra
+    // `ModelCapabilities::supports_early_exercise_regression` antes de simular, mismo patrón que
+    // `requires_continuous_barrier_bridge`.
+    bool requires_early_exercise_regression = false;
 };
 
 class DependencyVisitor : private ScalarVisitor, private PredicateVisitor, private ContractVisitor {

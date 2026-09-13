@@ -43,6 +43,9 @@ std::optional<payoff::ModelCapabilities> GbmModel::capabilities() const {
     // rust/crates/engine-core/src/payoff/eval.rs::resolve_trigger_states, que la aplica sobre
     // cualquier patron de barrera simple que compile::compile reconozca.
     caps.supports_continuous_barrier_bridge = true;
+    // Fase 9: GBM soporta la regresion de Longstaff-Schwartz para Exercise (§10) -- ver
+    // rust/crates/engine-core/src/payoff/lsm.rs::resolve_exercise_decisions.
+    caps.supports_early_exercise_regression = true;
     return caps;
 }
 

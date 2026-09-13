@@ -146,6 +146,51 @@ struct HitProbabilityResult {
     ProbabilityMeasure measure = ProbabilityMeasure::RiskNeutralQ;
 };
 
+// Diagnostico de UNA fecha de decision de un `Exercise`, resuelto por Longstaff-Schwartz
+// (PLAN_PRODUCTS.md §10, Fase 9: "diagnostico de regresion y politica de ejercicio exportable").
+// `has_regression=false` cuando en `date` no hubo suficientes rutas in-the-money para ajustar la
+// regresion cuadratica -- en ese caso `coeff_a/b/c` son `0.0` (no un ajuste real: `has_regression`
+// es la unica forma de distinguirlo de un ajuste legitimo de coeficientes nulos) y
+// `exercised_fraction` es `0.0` (nadie ejercito ese dia, por falta de evidencia, nunca por
+// extrapolacion -- ver `engine_core::payoff::lsm::resolve_exercise_decisions` en Rust).
+struct ExerciseDateDiagnostic {
+    double date = 0.0;
+    std::uint64_t n_in_the_money = 0;
+    bool has_regression = false;
+    double coeff_a = 0.0;
+    double coeff_b = 0.0;
+    double coeff_c = 0.0;
+    double exercised_fraction = 0.0;
+};
+
+// Precio bajo Q de un `PayoffProgram` con un derecho de ejercicio (PLAN_PRODUCTS.md §10, Fase 9):
+// mismo precio Monte Carlo que `QValuationResult` (`price`) mas la politica de ejercicio
+// exportable (`dates`, en el mismo orden ascendente que las fechas declaradas en el contrato) --
+// criterio de aceptacion explicito de esta fase ("explain muestra la politica").
+struct ExercisePolicyResult {
+    QValuationResult price;
+    std::vector<ExerciseDateDiagnostic> dates;
+};
+
+// Precio bajo Q (Monte Carlo, GBM, Longstaff-Schwartz) de un `PayoffProgram` con exactamente un
+// derecho de ejercicio (`Exercise`, PLAN_PRODUCTS.md §10, Fase 9). Mismo preflight que
+// `risk_neutral_price_gbm` (dependencias vs. capacidades del modelo) mas
+// `ModelCapabilities::supports_early_exercise_regression` (ver `DependencyReport::
+// requires_early_exercise_regression`, comparado antes de simular una sola ruta, igual que
+// `requires_continuous_barrier_bridge` en Fase 6). El contrato debe contener EXACTAMENTE un
+// `Exercise` -- ver el doc-comment de `engine_core::payoff::lsm` (Rust) para el porque de esa
+// restriccion en esta fase; 0 o >1 llega como `EvaluationError` desde la compilacion del JSON en
+// Rust, mismo mecanismo que cualquier otro error de `CompiledPayoff`.
+//
+// Determinista dado `seed`: ninguna decision de ejercicio se toma por ruta de forma aislada --
+// se resuelve una unica vez por Longstaff-Schwartz sobre TODO el lote de rutas simuladas con ese
+// `seed` (ver `engine_core::payoff::lsm::resolve_exercise_decisions`), sin aleatoriedad propia
+// adicional -- "decisiones reproducibles con seed, sin look-ahead", criterio de aceptacion
+// explicito de esta fase.
+ExercisePolicyResult exercise_price_gbm(
+    const PayoffProgram& program, const GbmModel& model, std::uint64_t n_paths, std::uint64_t seed
+);
+
 // Probabilidad bajo Q (Monte Carlo, GBM) de que `event` -- un `Trigger` de `program.contract`,
 // identificado por su `EventId` -- dispare en la ruta (PLAN_PRODUCTS.md §12 Fase 6). Mismo
 // preflight que `risk_neutral_price_gbm` (capacidades del modelo vs. dependencias del contrato);

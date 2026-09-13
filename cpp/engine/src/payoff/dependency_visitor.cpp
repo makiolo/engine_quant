@@ -179,6 +179,7 @@ void DependencyVisitor::visit(const Trigger& node) {
 void DependencyVisitor::visit(const Exercise& node) {
     report_.events.insert(node.id());
     for (TimePoint t : node.dates()) report_.fixing_dates.insert(t);
+    report_.requires_early_exercise_regression = true;
     visit_scalar(node.exercise_value());
     visit_contract(node.continuation());
 }
