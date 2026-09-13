@@ -68,14 +68,39 @@ pub enum PredicateOp {
     EventOccurred(usize),
 }
 
-/// Monitorizacion de un `Trigger` compilado (§4.2). Solo `Discrete` se evalua hoy --
-/// `ContinuousApproximation` (Brownian bridge) requiere que el modelo declare soporte
-/// (`ModelCapabilities::supports_continuous_barrier_bridge`, Fase 6) y `compile::compile` lo
-/// rechaza en preflight hasta que ese soporte exista.
+/// Monitorizacion de un `Trigger` compilado (§4.2). `ContinuousApproximation` requiere que
+/// `compile::compile` haya reconocido el predicado como una barrera simple (`BridgePattern`
+/// abajo) -- ver `ContractOp::Trigger::bridge`. El evaluador determinista de una unica ruta
+/// (`ScenarioEvaluator` en C++, y su equivalente conceptual aqui) no puede aproximar
+/// monitorizacion continua sin Monte Carlo: solo `eval::resolve_trigger_states` (Fase 6, bajo Q)
+/// sabe interpretar `ContinuousApproximation`; el modelo debe ademas declarar soporte
+/// (`ModelCapabilities::supports_continuous_barrier_bridge`) antes de llegar aqui -- ese chequeo
+/// vive en C++ (`measures.cpp`), no en este compilador, que es agnostico al modelo.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MonitoringMode {
     Discrete,
     ContinuousApproximation,
+}
+
+/// Lado de la barrera que activa un `Trigger` con `Monitoring::ContinuousApproximation` (§4.2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BarrierDirection {
+    /// `current(observable) >= barrier`.
+    Up,
+    /// `current(observable) <= barrier`.
+    Down,
+}
+
+/// Patron de barrera simple reconocido por `compile::compile` cuando `monitoring ==
+/// ContinuousApproximation` (§4.2, Fase 6): la UNICA forma de condicion que la correccion de
+/// Brownian bridge sabe interpretar (`current(observable) >= barrier` / `<= barrier`, tal como
+/// las emite `barrier_templates.hpp` en C++). Un predicado mas general con esa monitorizacion se
+/// rechaza en preflight -- ver `compile::Compiler::recognize_barrier_pattern`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BridgePattern {
+    pub observable: usize,
+    pub barrier: f64,
+    pub direction: BarrierDirection,
 }
 
 /// Cuando se paga el `Cashflow` "desnudo" de `on_hit`/`on_miss` (§4.1, ADR-P0-10): en el
@@ -110,6 +135,9 @@ pub enum ContractOp {
         monitoring_times: Vec<f64>,
         condition: usize,
         monitoring: MonitoringMode,
+        /// `Some` unicamente cuando `monitoring == ContinuousApproximation` (invariante que
+        /// mantiene `compile::compile`, nunca se reconstruye a mano).
+        bridge: Option<BridgePattern>,
         settlement: SettlementMode,
         priority: i32,
         latch: bool,

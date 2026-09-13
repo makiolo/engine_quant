@@ -14,7 +14,8 @@
 use serde_json::Value;
 
 use super::ir::{
-    CompiledPayoff, ContractOp, MonitoringMode, PredicateOp, ScalarOp, SettlementMode, COMPILED_PAYOFF_VERSION,
+    BarrierDirection, BridgePattern, CompiledPayoff, ContractOp, MonitoringMode, PredicateOp, ScalarOp,
+    SettlementMode, COMPILED_PAYOFF_VERSION,
 };
 
 /// Compila un documento `engine.payoff/v1` completo (con envoltorio `schema`/`id`/`contract`,
@@ -79,6 +80,48 @@ impl Compiler {
         }
         self.event_slots.push(name.to_string());
         self.event_slots.len() - 1
+    }
+
+    /// Reconoce `condition` como una barrera simple (§4.2, Fase 6): UNICAMENTE
+    /// `{"type":"greater_equal"/"less_equal", "left":{"type":"current","observable":X},
+    /// "right":{"type":"constant","value":H}}`, la misma forma que emiten las plantillas de
+    /// `barrier_templates.hpp` en C++ (`up_and_in`/`down_and_out`/`double_knock_out` usan
+    /// `current(...)` a la izquierda y una constante a la derecha). Cualquier otra forma
+    /// (constante a la izquierda, `fixing` en vez de `current`, un `All`/`Any` compuesto para
+    /// doble barrera, etc.) se rechaza explicitamente en vez de aproximarla mal: `Monitoring::
+    /// ContinuousApproximation` con una condicion asi no tiene sentido geometrico para la
+    /// correccion de Brownian bridge de un unico nivel/direccion (PLAN_PRODUCTS.md §16: nunca
+    /// ocultar una aproximacion).
+    fn recognize_barrier_pattern(&mut self, condition: &Value) -> Result<BridgePattern, String> {
+        let ty = node_type(condition)?;
+        let direction = match ty {
+            "greater_equal" => BarrierDirection::Up,
+            "less_equal" => BarrierDirection::Down,
+            other => {
+                return Err(format!(
+                    "payoff: 'continuous_approximation' no reconoce el predicado '{other}' -- solo \
+                     'greater_equal'/'less_equal' de la forma 'current(observable) vs constante' \
+                     (Brownian bridge, Fase 6); usa 'discrete' para cualquier otra condicion"
+                ));
+            }
+        };
+        let obs_side = field_value(condition, "left")?;
+        let const_side = field_value(condition, "right")?;
+        if node_type(obs_side)? != "current" {
+            return Err(
+                "payoff: 'continuous_approximation' requiere 'current(observable)' en 'left' de la condicion"
+                    .to_string(),
+            );
+        }
+        if node_type(const_side)? != "constant" {
+            return Err(
+                "payoff: 'continuous_approximation' requiere una 'constant' en 'right' de la condicion"
+                    .to_string(),
+            );
+        }
+        let observable = self.observable_slot(str_field(obs_side, "observable")?);
+        let barrier = num_field(const_side, "value")?;
+        Ok(BridgePattern { observable, barrier, direction })
     }
 
     fn compile_scalar(&mut self, node: &Value) -> Result<usize, String> {
@@ -201,13 +244,7 @@ impl Compiler {
                     .collect::<Result<Vec<f64>, String>>()?;
                 let monitoring = match str_field(node, "monitoring")? {
                     "discrete" => MonitoringMode::Discrete,
-                    "continuous_approximation" => {
-                        return Err(format!(
-                            "payoff: 'continuous_approximation' no soportado todavia en CompiledPayoff \
-                             v{COMPILED_PAYOFF_VERSION} (Brownian bridge, PLAN_PRODUCTS.md §4.2/§12 Fase 6): \
-                             usa 'discrete' con una malla de monitorizacion mas fina"
-                        ));
-                    }
+                    "continuous_approximation" => MonitoringMode::ContinuousApproximation,
                     other => return Err(format!("payoff: 'monitoring' desconocido '{other}'")),
                 };
                 let settlement = match str_field(node, "settlement")? {
@@ -217,6 +254,15 @@ impl Compiler {
                 };
                 let priority = num_field(node, "priority")? as i32;
                 let latch = bool_field(node, "latch")?;
+                // Reconocer el patron de barrera ANTES de compilar 'condition' a PredicateOp (que
+                // tambien resuelve 'observable' a slot, de forma idempotente -- mismo indice en
+                // ambos sitios): si 'monitoring' es continua y el patron no se reconoce, fallar
+                // en preflight sin compilar el resto del Trigger.
+                let bridge = if monitoring == MonitoringMode::ContinuousApproximation {
+                    Some(self.recognize_barrier_pattern(field_value(node, "condition")?)?)
+                } else {
+                    None
+                };
                 // 'condition'/'on_hit'/'on_miss' se compilan DESPUES de resolver 'event' (arriba)
                 // para que un 'event_occurred'/'event_value' anidado que se refiera a este mismo
                 // evento (p.ej. el propio TP/SL referenciandose por id, aunque no es el caso de
@@ -229,6 +275,7 @@ impl Compiler {
                     monitoring_times,
                     condition,
                     monitoring,
+                    bridge,
                     settlement,
                     priority,
                     latch,
@@ -416,11 +463,43 @@ mod tests {
     }
 
     #[test]
-    fn rejects_continuous_approximation_monitoring() {
+    fn compiles_continuous_approximation_with_a_recognized_barrier_pattern() {
+        // BARRIER_JSON usa exactamente la forma que reconoce recognize_barrier_pattern:
+        // greater_equal(current(obs), constant(H)) -- la misma que emite barrier_templates.hpp.
         let json = BARRIER_JSON.replace("\"discrete\"", "\"continuous_approximation\"");
-        let err = compile(&json).expect_err("Brownian bridge aun no implementado (Fase 6)");
-        assert!(err.contains("continuous_approximation"));
-        assert!(err.contains("Brownian bridge") || err.contains("bridge"));
+        let compiled = compile(&json).expect("un patron de barrera reconocido debe compilar (Fase 6)");
+        match &compiled.contract_ops[compiled.root] {
+            ContractOp::Trigger { monitoring, bridge, .. } => {
+                assert_eq!(*monitoring, MonitoringMode::ContinuousApproximation);
+                let pattern = (*bridge).expect("bridge deberia reconocerse para este patron");
+                assert_eq!(pattern.barrier, 120.0);
+                assert_eq!(pattern.direction, BarrierDirection::Up);
+                assert_eq!(compiled.observable_slots[pattern.observable], "EQ.SPOT.AAPL");
+            }
+            other => panic!("se esperaba ContractOp::Trigger, se obtuvo {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rejects_continuous_approximation_with_an_unrecognized_condition() {
+        // Mismo BARRIER_JSON pero con los lados de la condicion intercambiados (constante a la
+        // izquierda, current a la derecha) -- geometricamente equivalente pero no la forma
+        // canonica que recognize_barrier_pattern sabe interpretar (§16: nunca ocultar una
+        // aproximacion aplicandola a un patron que no se reconoce con certeza).
+        let json = BARRIER_JSON.replace("\"discrete\"", "\"continuous_approximation\"").replace(
+            r#""condition": {
+                "type": "greater_equal",
+                "left": {"type": "current", "observable": "EQ.SPOT.AAPL"},
+                "right": {"type": "constant", "value": 120.0}
+            },"#,
+            r#""condition": {
+                "type": "less_equal",
+                "left": {"type": "constant", "value": 120.0},
+                "right": {"type": "current", "observable": "EQ.SPOT.AAPL"}
+            },"#,
+        );
+        let err = compile(&json).expect_err("condicion con los lados intercambiados no deberia reconocerse");
+        assert!(err.contains("continuous_approximation") || err.contains("current"));
     }
 
     #[test]

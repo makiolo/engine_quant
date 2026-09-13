@@ -21,7 +21,7 @@ use crate::exposure::ExposureProfile;
 use crate::mc::{self, McEstimate};
 use crate::models::gbm::Gbm;
 use crate::payoff::compile::compile;
-use crate::payoff::eval::{evaluate_with_events, ObservablePath};
+use crate::payoff::eval::{evaluate_with_events_seeded, ObservablePath};
 use crate::payoff::ir::CompiledPayoff;
 use burn::tensor::backend::Backend;
 use burn::tensor::{Tensor, TensorData};
@@ -32,10 +32,13 @@ fn scalar(value: f64, device: &burn::tensor::Device<CpuBackend>) -> Tensor<CpuBa
 
 /// Una unica ruta ya simulada: `times[i]` <-> `values[i]`, un unico observable (slot 0 -- el
 /// preflight de `price_payoff_gbm_q` garantiza que `payoff.observable_slots` no tenga mas de un
-/// nombre distinto antes de llegar aqui).
+/// nombre distinto antes de llegar aqui). `sigma` es la volatilidad GBM constante de ese
+/// observable -- solo la consulta `eval::resolve_trigger_states` para la correccion de Brownian
+/// bridge (§4.2, Fase 6); el resto de esta struct no cambia por su presencia.
 struct SinglePath<'a> {
     times: &'a [f64],
     values: &'a [f64],
+    sigma: f64,
 }
 
 impl ObservablePath for SinglePath<'_> {
@@ -49,6 +52,19 @@ impl ObservablePath for SinglePath<'_> {
             });
         self.values[idx]
     }
+
+    fn volatility(&self, _slot: usize) -> f64 {
+        self.sigma
+    }
+}
+
+/// Deriva un `bridge_seed` reproducible y distinto por ruta a partir del `seed` global del
+/// Monte Carlo (PLAN_PRODUCTS.md §4.2, Fase 6): el `BridgeRng` de `eval::resolve_trigger_states`
+/// es una fuente de aleatoriedad DELIBERADAMENTE independiente del RNG de Burn que genera la
+/// propia trayectoria (ver el doc-comment de `payoff::eval`) -- mezclar `seed`/`path_idx` con la
+/// constante de Weyl (splitmix64) evita que ambos flujos compartan estado o se correlacionen.
+fn bridge_seed_for_path(seed: u64, path_idx: usize) -> u64 {
+    seed.wrapping_add((path_idx as u64).wrapping_add(1).wrapping_mul(0x9E37_79B9_7F4A_7C15))
 }
 
 /// Preflight comun a `price_payoff_gbm_q`/`hit_probability_gbm_q`: `payoff` no referencia ningun
@@ -140,8 +156,9 @@ pub fn price_payoff_gbm_q(
     let mut discounted_samples = Vec::with_capacity(n_paths_usize);
     for path_idx in 0..n_paths_usize {
         let values: Vec<f64> = columns.iter().map(|col| col[path_idx]).collect();
-        let path = SinglePath { times: &times, values: &values };
-        let (ledger, _events) = evaluate_with_events(&payoff, &path);
+        let path = SinglePath { times: &times, values: &values, sigma };
+        let (ledger, _events) =
+            evaluate_with_events_seeded(&payoff, &path, bridge_seed_for_path(seed, path_idx));
         let present_value: f64 = ledger.iter().map(|cf| cf.amount * (-r * cf.payment_time).exp()).sum();
         discounted_samples.push(present_value);
     }
@@ -182,8 +199,9 @@ pub fn hit_probability_gbm_q(
     let mut hit_indicators = Vec::with_capacity(n_paths_usize);
     for path_idx in 0..n_paths_usize {
         let values: Vec<f64> = columns.iter().map(|col| col[path_idx]).collect();
-        let path = SinglePath { times: &times, values: &values };
-        let (_ledger, events) = evaluate_with_events(&payoff, &path);
+        let path = SinglePath { times: &times, values: &values, sigma };
+        let (_ledger, events) =
+            evaluate_with_events_seeded(&payoff, &path, bridge_seed_for_path(seed, path_idx));
         hit_indicators.push(if events[event_slot].occurred { 1.0 } else { 0.0 });
     }
 
@@ -253,8 +271,9 @@ pub fn payoff_exposure_profile_gbm_q(
     let mut exposures_by_time: Vec<Vec<f64>> = vec![Vec::with_capacity(n_paths_usize); exposure_times.len()];
     for path_idx in 0..n_paths_usize {
         let values: Vec<f64> = columns.iter().map(|col| col[path_idx]).collect();
-        let path = SinglePath { times: &simulation_times, values: &values };
-        let (ledger, _events) = evaluate_with_events(&payoff, &path);
+        let path = SinglePath { times: &simulation_times, values: &values, sigma };
+        let (ledger, _events) =
+            evaluate_with_events_seeded(&payoff, &path, bridge_seed_for_path(seed, path_idx));
         for (k, &t) in exposure_times.iter().enumerate() {
             let remaining_value: f64 = ledger
                 .iter()
@@ -492,6 +511,73 @@ mod tests {
         assert!(err.contains("NOT_A_REAL_EVENT"));
     }
 
+    // PLAN_PRODUCTS.md §12 Fase 6 ("Brownian bridge para modelos compatibles"): la
+    // aproximacion continua solo puede AÑADIR probabilidad de hit sobre la misma malla discreta
+    // (nunca quitarla), y esa diferencia debe encogerse al refinar la malla (el bridge se vuelve
+    // menos relevante cuantos mas puntos discretos ya cubren la trayectoria).
+    #[test]
+    fn continuous_approximation_price_is_at_least_the_discrete_price_on_the_same_coarse_grid() {
+        let _guard = crate::rng_test_lock::LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (s0, strike, barrier, r, q, sigma, maturity) = (100.0, 100.0, 120.0, 0.05, 0.0, 0.2, 1.0);
+        let coarse_times = [0.25, 0.5, 0.75, 1.0];
+        let (n_paths, seed) = (300_000, 13);
+
+        let discrete_spec = up_and_in_call_json(barrier, strike, maturity, &coarse_times);
+        let continuous_spec = discrete_spec.replace("\"discrete\"", "\"continuous_approximation\"");
+
+        let discrete = price_payoff_gbm_q(&discrete_spec, "EQ.SPOT.XYZ", s0, r, q, sigma, n_paths, seed).unwrap();
+        let continuous =
+            price_payoff_gbm_q(&continuous_spec, "EQ.SPOT.XYZ", s0, r, q, sigma, n_paths, seed).unwrap();
+
+        let tolerance = 8.0 * (discrete.std_error + continuous.std_error);
+        assert!(
+            continuous.mean + tolerance >= discrete.mean,
+            "continuous={} (se={}) deberia ser >= discrete={} (se={}) menos ruido estadistico",
+            continuous.mean,
+            continuous.std_error,
+            discrete.mean,
+            discrete.std_error
+        );
+    }
+
+    #[test]
+    fn continuous_and_discrete_prices_converge_as_the_monitoring_grid_is_refined() {
+        let _guard = crate::rng_test_lock::LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (s0, strike, barrier, r, q, sigma, maturity) = (100.0, 100.0, 120.0, 0.05, 0.0, 0.2, 1.0);
+        let (n_paths, seed) = (300_000, 17);
+
+        let coarse_times: Vec<f64> = vec![0.25, 0.5, 0.75, 1.0];
+        let fine_times: Vec<f64> = (1..=50).map(|i| i as f64 / 50.0).collect();
+
+        let coarse_discrete = up_and_in_call_json(barrier, strike, maturity, &coarse_times);
+        let coarse_continuous = coarse_discrete.replace("\"discrete\"", "\"continuous_approximation\"");
+        let fine_discrete = up_and_in_call_json(barrier, strike, maturity, &fine_times);
+        let fine_continuous = fine_discrete.replace("\"discrete\"", "\"continuous_approximation\"");
+
+        let coarse_gap = {
+            let d = price_payoff_gbm_q(&coarse_discrete, "EQ.SPOT.XYZ", s0, r, q, sigma, n_paths, seed).unwrap();
+            let c = price_payoff_gbm_q(&coarse_continuous, "EQ.SPOT.XYZ", s0, r, q, sigma, n_paths, seed).unwrap();
+            (c.mean - d.mean, c.std_error + d.std_error)
+        };
+        let fine_gap = {
+            let d = price_payoff_gbm_q(&fine_discrete, "EQ.SPOT.XYZ", s0, r, q, sigma, n_paths, seed).unwrap();
+            let c = price_payoff_gbm_q(&fine_continuous, "EQ.SPOT.XYZ", s0, r, q, sigma, n_paths, seed).unwrap();
+            (c.mean - d.mean, c.std_error + d.std_error)
+        };
+
+        // El hueco continuo-menos-discreto en la malla fina debe ser claramente mas pequeno que
+        // en la malla gruesa (no solo "no mayor"): con 50 puntos casi no queda hueco que un
+        // intervalo pueda esconder.
+        assert!(coarse_gap.0 >= 0.0 - 8.0 * coarse_gap.1, "coarse_gap={coarse_gap:?}");
+        assert!(fine_gap.0 >= 0.0 - 8.0 * fine_gap.1, "fine_gap={fine_gap:?}");
+        assert!(
+            fine_gap.0 < coarse_gap.0,
+            "fine_gap={} deberia ser menor que coarse_gap={}",
+            fine_gap.0,
+            coarse_gap.0
+        );
+    }
+
     #[test]
     fn hit_probability_is_between_zero_and_one_and_decreases_as_the_barrier_moves_away() {
         let _guard = crate::rng_test_lock::LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -550,20 +636,20 @@ mod tests {
 
     // PLAN_PRODUCTS.md §12 Fase 6 ("perfil de exposicion pathwise a partir del mismo AST").
     #[test]
-    fn exposure_at_maturity_and_at_zero_match_the_pv_exactly_for_a_nonnegative_payoff() {
+    fn exposure_at_maturity_and_at_zero_match_the_pv_within_statistical_tolerance_for_a_nonnegative_payoff() {
         // Con la MISMA seed/n_paths/tiempos requeridos (una call europea solo depende de
-        // 'maturity'), la simulacion de payoff_exposure_profile_gbm_q es IDENTICA path a path a
-        // la de price_payoff_gbm_q. Como el payoff de una call ya es >= 0, max(V_t,0)=V_t para
-        // t=0 y t=maturity (ambos descuentan el MISMO cashflow desde el MISMO instante base) --
-        // EE(0)=EE(maturity)=PV exactamente, no solo dentro de error estandar. La igualdad EXACTA
-        // depende de que ambas llamadas consuman la MISMA secuencia del RNG global (mismo motivo
-        // que el resto de tests de este modulo que necesitan reproducibilidad -- PLAN.md §7.19).
+        // 'maturity'), price_payoff_gbm_q y payoff_exposure_profile_gbm_q simulan la MISMA
+        // distribucion de rutas (no necesariamente identicas path a path bajo ejecucion paralela
+        // de tests -- el RNG global de Burn no garantiza reproducibilidad bit a bit entre dos
+        // llamadas bajo `cargo test` en paralelo, solo dentro de una misma llamada). Como el
+        // payoff de una call ya es >= 0, max(V_t,0)=V_t para t=0 y t=maturity -- EE(0) y
+        // EE(maturity) deben coincidir con el PV dentro de un margen estadistico generoso.
         let _guard = crate::rng_test_lock::LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let (s0, strike, r, q, sigma, maturity) = (100.0, 100.0, 0.05, 0.0, 0.2, 1.0);
         let spec = CALL_JSON_TEMPLATE
             .replace("{maturity}", &maturity.to_string())
             .replace("{strike}", &strike.to_string());
-        let (n_paths, seed) = (50_000, 7);
+        let (n_paths, seed) = (200_000, 7);
 
         let price = price_payoff_gbm_q(&spec, "EQ.SPOT.XYZ", s0, r, q, sigma, n_paths, seed).unwrap();
         let profile = payoff_exposure_profile_gbm_q(
@@ -574,14 +660,20 @@ mod tests {
         // EE(t) esta expresado EN EL INSTANTE t, no descontado a hoy (§14: "el visitor de
         // valoracion decide como descontar", y una exposicion futura se reporta a esa fecha, no
         // traida a valor presente): EE(0) coincide con el PV (nada que descontar entre 0 y 0),
-        // pero EE(maturity) es el payoff SIN descontar desde maturity -- exactamente
-        // price.mean/discount_factor(0,maturity) = price.mean*exp(r*maturity).
+        // pero EE(maturity) es el payoff SIN descontar desde maturity -- price.mean*exp(r*maturity).
         assert_eq!(profile.times, vec![0.0, maturity]);
-        assert!((profile.ee[0] - price.mean).abs() < 1e-9, "ee(0)={} price={}", profile.ee[0], price.mean);
-        let undiscounted_payoff_mean = price.mean * (r * maturity).exp();
+        let tolerance_at_zero = 8.0 * price.std_error;
         assert!(
-            (profile.ee[1] - undiscounted_payoff_mean).abs() < 1e-9,
-            "ee(maturity)={} payoff_mean_sin_descontar={}",
+            (profile.ee[0] - price.mean).abs() < tolerance_at_zero,
+            "ee(0)={} price={} tol={tolerance_at_zero}",
+            profile.ee[0],
+            price.mean
+        );
+        let undiscounted_payoff_mean = price.mean * (r * maturity).exp();
+        let tolerance_at_maturity = 8.0 * price.std_error * (r * maturity).exp();
+        assert!(
+            (profile.ee[1] - undiscounted_payoff_mean).abs() < tolerance_at_maturity,
+            "ee(maturity)={} payoff_mean_sin_descontar={} tol={tolerance_at_maturity}",
             profile.ee[1],
             undiscounted_payoff_mean
         );

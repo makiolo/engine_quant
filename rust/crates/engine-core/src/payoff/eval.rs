@@ -16,8 +16,23 @@
 //! `EventId` como desempate -- ADR-P0-03); (2) `eval_contract` interpreta el arbol normalmente,
 //! consultando ese estado ya resuelto via `ContractOp::Trigger`/`ScalarOp::EventValue`/
 //! `PredicateOp::EventOccurred`.
+//!
+//! **Brownian bridge (`Monitoring::ContinuousApproximation`, Fase 6, §4.2)**: entre dos instantes
+//! de monitorizacion CONSECUTIVOS de un mismo `Trigger` (`t_prev`, `t`) donde el chequeo discreto
+//! en `t` no detecto un hit, pero AMBOS extremos estan al mismo lado de la barrera, existe una
+//! probabilidad analitica de que la ruta CONTINUA la haya cruzado dentro de `(t_prev, t)` sin que
+//! la rejilla discreta lo capturara (formula estandar de bridge browniano/lognormal:
+//! `exp(-2*ln(H/a)*ln(H/b) / (sigma^2*dt))`, ver `bridge_crossing_probability`). Para preservar la
+//! semantica de `EventState` (occurred/first_hit_time booleanos, de los que dependen
+//! `EventOccurred`/`EventValue`/TP-SL) esa probabilidad se materializa como un hit/no-hit
+//! CRISPADO por ruta: se compara contra un sorteo uniforme independiente de un PRNG determinista
+//! sembrado por ruta (`BridgeRng`, NUNCA el RNG de Burn que genera la propia trayectoria -- son
+//! dos fuentes de aleatoriedad independientes por diseno). Limitacion documentada (no oculta,
+//! PLAN_PRODUCTS.md §16): no hay correccion de bridge ANTES del primer `monitoring_times` de cada
+//! `Trigger` (no hay un extremo previo con el que formar el intervalo); un usuario que necesite
+//! esa cola debe incluir un punto de monitorizacion temprano.
 
-use super::ir::{CompiledPayoff, ContractOp, PredicateOp, ScalarOp, SettlementMode};
+use super::ir::{BarrierDirection, CompiledPayoff, ContractOp, MonitoringMode, PredicateOp, ScalarOp, SettlementMode};
 
 /// Un cashflow sin agregar, en la moneda unica de `CompiledPayoff::currency`.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -35,6 +50,73 @@ pub struct PathCashflow {
 /// mercado externos y por tanto SI es un `Result`).
 pub trait ObservablePath {
     fn value_at(&self, slot: usize, time: f64) -> f64;
+
+    /// Volatilidad (`sigma`) constante del observable `slot`, necesaria UNICAMENTE para la
+    /// correccion de Brownian bridge de `Monitoring::ContinuousApproximation` (§4.2, Fase 6) --
+    /// ver el doc-comment del modulo y `resolve_trigger_states`. Metodo por defecto que entra en
+    /// panico: solo hace falta sobreescribirlo si el contrato contiene un `Trigger` con esa
+    /// monitorizacion (invariante que ya garantiza `compile::compile` via `ContractOp::
+    /// Trigger::bridge`); los implementadores de rutas deterministas/discretas existentes
+    /// (fixtures de test, `SinglePath` cuando no hay bridge) no necesitan tocar nada.
+    fn volatility(&self, _slot: usize) -> f64 {
+        panic!(
+            "payoff: ObservablePath::volatility no implementado (requerido por \
+             Monitoring::ContinuousApproximation, Fase 6)"
+        )
+    }
+}
+
+/// PRNG determinista minimo (splitmix64) para los sorteos independientes de Brownian bridge --
+/// deliberadamente SEPARADO del RNG de Burn que genera la propia trayectoria (§ doc-comment del
+/// modulo): sembrado una vez por ruta (`resolve_trigger_states`), consume valores en orden
+/// determinista (mismo orden de iteracion de tiempos/triggers en cada llamada), reproducible sin
+/// depender del estado global de Burn ni de cuantos otros tensores se hayan generado antes.
+struct BridgeRng {
+    state: u64,
+}
+
+impl BridgeRng {
+    fn new(seed: u64) -> Self {
+        Self { state: seed }
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        self.state = self.state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = self.state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    }
+
+    /// Uniforme en `[0, 1)` con 53 bits de resolucion (mantisa de un `f64`).
+    fn next_uniform(&mut self) -> f64 {
+        (self.next_u64() >> 11) as f64 * (1.0 / (1u64 << 53) as f64)
+    }
+}
+
+/// Probabilidad analitica (bridge browniano/lognormal) de que la ruta CONTINUA de un GBM haya
+/// cruzado la barrera `barrier` en algun instante de `(t_prev, t)`, dado que los valores
+/// observados en los extremos son `a`/`b` (ambos al mismo lado de `barrier`, ya comprobado por el
+/// llamante) y la volatilidad es `sigma` (PLAN_PRODUCTS.md §4.2). Formula estandar (p.ej. Baldi
+/// 1995 / Beaglehole): `exp(-2*ln(barrier/a)*ln(barrier/b) / (sigma^2*dt))`. `None` si los datos
+/// no permiten aplicarla (extremo no positivo, `dt<=0` o `sigma<=0`).
+fn bridge_crossing_probability(a: f64, b: f64, barrier: f64, sigma: f64, dt: f64) -> Option<f64> {
+    if !(a > 0.0 && b > 0.0 && barrier > 0.0 && sigma > 0.0 && dt > 0.0) {
+        return None;
+    }
+    let log_a = (barrier / a).ln();
+    let log_b = (barrier / b).ln();
+    Some((-2.0 * log_a * log_b / (sigma * sigma * dt)).exp())
+}
+
+/// El instante de `monitoring_times` (propios de UN `Trigger`, no la union global) mas cercano
+/// pero estrictamente anterior a `t`, o `None` si `t` es el primero de esa lista -- el extremo
+/// izquierdo del intervalo que la correccion de bridge necesita para ese `Trigger`.
+fn previous_monitoring_time(monitoring_times: &[f64], t: f64) -> Option<f64> {
+    monitoring_times.iter().copied().filter(|&mt| mt < t - 1e-9).fold(None, |acc, mt| match acc {
+        Some(cur) if cur >= mt => Some(cur),
+        _ => Some(mt),
+    })
 }
 
 /// Resultado de resolver un evento sobre UNA ruta -- subconjunto publico de
@@ -181,7 +263,12 @@ fn eval_predicate(
 /// permite implementar TP/SL por composicion (`Not(EventOccurred(la_otra_regla))`) sin campos
 /// nuevos. `latch=true`: una vez ocurrido, el evento deja de reevaluarse. `latch=false`: el estado
 /// refleja la condicion en la fecha de monitorizacion mas reciente.
-fn resolve_trigger_states(payoff: &CompiledPayoff, path: &dyn ObservablePath) -> Vec<EventStateResolved> {
+///
+/// `bridge_seed` siembra el `BridgeRng` de esta ruta (ver doc-comment del modulo): irrelevante si
+/// `payoff` no contiene ningun `Trigger` con `Monitoring::ContinuousApproximation` (nunca se
+/// instancia el generador en ese caso).
+fn resolve_trigger_states(payoff: &CompiledPayoff, path: &dyn ObservablePath, bridge_seed: u64) -> Vec<EventStateResolved> {
+    let mut bridge_rng = BridgeRng::new(bridge_seed);
     let n_observables = payoff.observable_slots.len();
     let mut states: Vec<EventStateResolved> =
         payoff.event_slots.iter().map(|_| EventStateResolved::new(n_observables)).collect();
@@ -224,11 +311,41 @@ fn resolve_trigger_states(payoff: &CompiledPayoff, path: &dyn ObservablePath) ->
         });
 
         for (_, event, idx) in active {
-            let (condition, latch) = match &payoff.contract_ops[idx] {
-                ContractOp::Trigger { condition, latch, .. } => (*condition, *latch),
+            let (condition, latch, monitoring, bridge, monitoring_times) = match &payoff.contract_ops[idx] {
+                ContractOp::Trigger { condition, latch, monitoring, bridge, monitoring_times, .. } => {
+                    (*condition, *latch, *monitoring, *bridge, monitoring_times.clone())
+                }
                 _ => unreachable!("payoff: 'active' solo contiene indices de ContractOp::Trigger"),
             };
-            let condition_true = eval_predicate(payoff, condition, Some(t), path, &states);
+            let mut condition_true = eval_predicate(payoff, condition, Some(t), path, &states);
+
+            // Correccion de Brownian bridge (§4.2, Fase 6, ver doc-comment del modulo): solo si
+            // el chequeo discreto en `t` no detecto ya un hit, la monitorizacion es
+            // ContinuousApproximation (compile::compile garantiza `bridge.is_some()` en ese caso)
+            // y existe un extremo previo propio de ESTE Trigger con el que formar el intervalo.
+            if !condition_true && monitoring == MonitoringMode::ContinuousApproximation {
+                if let (Some(pattern), Some(t_prev)) =
+                    (bridge, previous_monitoring_time(&monitoring_times, t))
+                {
+                    let a = path.value_at(pattern.observable, t_prev);
+                    let b = path.value_at(pattern.observable, t);
+                    let same_side_and_not_yet_hit = match pattern.direction {
+                        BarrierDirection::Up => a < pattern.barrier && b < pattern.barrier,
+                        BarrierDirection::Down => a > pattern.barrier && b > pattern.barrier,
+                    };
+                    if same_side_and_not_yet_hit {
+                        let sigma = path.volatility(pattern.observable);
+                        if let Some(p_cross) =
+                            bridge_crossing_probability(a, b, pattern.barrier, sigma, t - t_prev)
+                        {
+                            if bridge_rng.next_uniform() < p_cross {
+                                condition_true = true;
+                            }
+                        }
+                    }
+                }
+            }
+
             if condition_true {
                 states[event].occurred = true;
                 states[event].first_hit_time = Some(t);
@@ -322,12 +439,28 @@ fn eval_contract(
 /// al `EventOutcome` de cada evento (indexado como `payoff.event_slots`) -- equivalente Rust de
 /// "Cashflows"/`ScenarioEvaluator::evaluate` (PLAN_PRODUCTS.md §12 Fase 1/4/6), pero sobre el IR
 /// compilado. Usar esta version (en vez de `evaluate`) cuando ademas del ledger haga falta saber
-/// si un evento concreto disparo (p.ej. una futura medida "HitProbability").
+/// si un evento concreto disparo (p.ej. una futura medida "HitProbability"). Equivalente a
+/// `evaluate_with_events_seeded(payoff, path, 0)` -- sin ningun `Trigger` con `Monitoring::
+/// ContinuousApproximation` el `bridge_seed` nunca se consume, asi que el valor fijo es
+/// irrelevante para todo lo que ya soportaba esta funcion antes de Brownian bridge.
 pub fn evaluate_with_events(
     payoff: &CompiledPayoff,
     path: &dyn ObservablePath,
 ) -> (Vec<PathCashflow>, Vec<EventOutcome>) {
-    let states = resolve_trigger_states(payoff, path);
+    evaluate_with_events_seeded(payoff, path, 0)
+}
+
+/// Igual que `evaluate_with_events`, sembrando ademas el `BridgeRng` de esta ruta con
+/// `bridge_seed` (PLAN_PRODUCTS.md §4.2, Fase 6) -- quien orquesta muchas rutas Monte Carlo
+/// (`crate::payoff::api`) debe pasar un `bridge_seed` DISTINTO e independiente por ruta (nunca el
+/// mismo `seed` que siembra el RNG de Burn que genera la propia trayectoria: son dos fuentes de
+/// aleatoriedad independientes por diseno, ver el doc-comment del modulo).
+pub fn evaluate_with_events_seeded(
+    payoff: &CompiledPayoff,
+    path: &dyn ObservablePath,
+    bridge_seed: u64,
+) -> (Vec<PathCashflow>, Vec<EventOutcome>) {
+    let states = resolve_trigger_states(payoff, path, bridge_seed);
     let mut out = Vec::new();
     eval_contract(payoff, payoff.root, None, path, &states, &mut out);
     let outcomes =
@@ -592,5 +725,115 @@ mod tests {
         assert_eq!(ledger, vec![PathCashflow { payment_time: 0.75, amount: 75.0 }]);
         assert_eq!(events[0], EventOutcome { occurred: false, first_hit_time: None });
         assert_eq!(events[1], EventOutcome { occurred: true, first_hit_time: Some(0.75) });
+    }
+
+    // Brownian bridge (PLAN_PRODUCTS.md §4.2, Fase 6).
+
+    #[test]
+    fn bridge_crossing_probability_matches_hand_computed_value() {
+        // exp(-2*ln(120/100)*ln(120/110) / (0.3^2*0.5)) -- calculado a mano con ln(1.2)=0.18232,
+        // ln(120/110)=0.087011.
+        let p = bridge_crossing_probability(100.0, 110.0, 120.0, 0.3, 0.5).unwrap();
+        let expected = (-2.0 * (120.0_f64 / 100.0).ln() * (120.0_f64 / 110.0).ln() / (0.3 * 0.3 * 0.5)).exp();
+        assert!((p - expected).abs() < 1e-12);
+        assert!(p > 0.0 && p < 1.0, "p={p}");
+    }
+
+    #[test]
+    fn bridge_crossing_probability_is_none_for_non_positive_or_degenerate_inputs() {
+        assert!(bridge_crossing_probability(100.0, 110.0, 120.0, 0.3, 0.0).is_none()); // dt=0
+        assert!(bridge_crossing_probability(100.0, 110.0, 120.0, 0.0, 0.5).is_none()); // sigma=0
+        assert!(bridge_crossing_probability(-1.0, 110.0, 120.0, 0.3, 0.5).is_none()); // a<0
+    }
+
+    #[test]
+    fn previous_monitoring_time_finds_the_immediate_predecessor() {
+        let times = [0.25, 0.5, 0.75, 1.0];
+        assert_eq!(previous_monitoring_time(&times, 0.25), None);
+        assert_eq!(previous_monitoring_time(&times, 0.5), Some(0.25));
+        assert_eq!(previous_monitoring_time(&times, 1.0), Some(0.75));
+        assert_eq!(previous_monitoring_time(&times, 2.0), Some(1.0));
+    }
+
+    struct FixedStepPathWithSigma {
+        times: Vec<f64>,
+        values: Vec<f64>,
+        sigma: f64,
+    }
+    impl ObservablePath for FixedStepPathWithSigma {
+        fn value_at(&self, _slot: usize, time: f64) -> f64 {
+            self.times
+                .iter()
+                .position(|&t| (t - time).abs() < 1e-9)
+                .map(|i| self.values[i])
+                .unwrap_or_else(|| panic!("FixedStepPathWithSigma: sin valor para time={time}"))
+        }
+        fn volatility(&self, _slot: usize) -> f64 {
+            self.sigma
+        }
+    }
+
+    const CONTINUOUS_UP_AND_IN_JSON: &str = r#"{
+        "schema": "engine.payoff/v1", "id": "UI_CONT",
+        "contract": {
+            "type": "trigger", "id": "UI",
+            "monitoring_times": [0.5, 1.0],
+            "condition": {"type": "greater_equal",
+                "left": {"type": "current", "observable": "EQ.SPOT.XYZ"},
+                "right": {"type": "constant", "value": 120.0}},
+            "monitoring": "continuous_approximation", "settlement": "at_hit", "priority": 0, "latch": true,
+            "on_hit": {"type": "cashflow", "currency": "USD", "amount": {"type": "constant", "value": 1.0}},
+            "on_miss": {"type": "zero"}
+        }
+    }"#;
+
+    #[test]
+    fn continuous_approximation_hit_rate_over_many_seeds_matches_the_analytic_crossing_probability() {
+        // Ambos extremos (t=0.5 -> 100, t=1.0 -> 110) estan por debajo de la barrera 120: el
+        // chequeo discreto nunca dispara solo, asi que CUALQUIER hit observado viene de la
+        // correccion de bridge. Repetir con muchos bridge_seed distintos sobre la MISMA ruta
+        // aisla el mecanismo de muestreo (RNG + formula) de la simulacion GBM real.
+        let payoff = compile(CONTINUOUS_UP_AND_IN_JSON).unwrap();
+        let (a, b, sigma, barrier, dt) = (100.0, 110.0, 0.3, 120.0, 0.5);
+        let path = FixedStepPathWithSigma { times: vec![0.5, 1.0], values: vec![a, b], sigma };
+        let expected_p = bridge_crossing_probability(a, b, barrier, sigma, dt).unwrap();
+
+        let n_trials = 20_000u64;
+        let hits = (0..n_trials)
+            .filter(|&trial| evaluate_with_events_seeded(&payoff, &path, trial).1[0].occurred)
+            .count();
+        let observed_rate = hits as f64 / n_trials as f64;
+        assert!(
+            (observed_rate - expected_p).abs() < 0.02,
+            "observed={observed_rate} expected={expected_p} (n_trials={n_trials})"
+        );
+    }
+
+    #[test]
+    fn continuous_approximation_never_bridges_before_the_triggers_own_first_monitoring_time() {
+        // Limitacion documentada (doc-comment del modulo): sin extremo previo PROPIO del
+        // Trigger, la correccion de bridge no se aplica -- un solo monitoring_time nunca dispara
+        // por bridge aunque la probabilidad analitica seria alta.
+        let json = CONTINUOUS_UP_AND_IN_JSON.replace(r#""monitoring_times": [0.5, 1.0],"#, r#""monitoring_times": [1.0],"#);
+        let payoff = compile(&json).unwrap();
+        let path = FixedStepPathWithSigma { times: vec![1.0], values: vec![110.0], sigma: 0.3 };
+        for trial in 0..1_000u64 {
+            let (_ledger, events) = evaluate_with_events_seeded(&payoff, &path, trial);
+            assert!(!events[0].occurred, "no deberia haber bridge sin un extremo previo (trial={trial})");
+        }
+    }
+
+    #[test]
+    fn continuous_approximation_still_detects_an_exact_discrete_touch_without_needing_the_bridge() {
+        // Si el extremo YA toca/supera la barrera en un instante de monitorizacion, el chequeo
+        // discreto normal (identico al de Monitoring::Discrete) lo detecta sin necesitar sorteo:
+        // el resultado es determinista para CUALQUIER bridge_seed.
+        let payoff = compile(CONTINUOUS_UP_AND_IN_JSON).unwrap();
+        let path = FixedStepPathWithSigma { times: vec![0.5, 1.0], values: vec![125.0, 110.0], sigma: 0.3 };
+        for trial in 0..50u64 {
+            let (ledger, events) = evaluate_with_events_seeded(&payoff, &path, trial);
+            assert_eq!(events[0], EventOutcome { occurred: true, first_hit_time: Some(0.5) });
+            assert_eq!(ledger, vec![PathCashflow { payment_time: 0.5, amount: 1.0 }]);
+        }
     }
 }
