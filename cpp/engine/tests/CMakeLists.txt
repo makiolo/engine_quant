@@ -10,7 +10,7 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(googletest)
 
-add_executable(engine_tests test_registry.cpp test_abi.cpp test_calibration.cpp payoff/test_ids.cpp payoff/test_expression.cpp payoff/test_predicate.cpp payoff/test_contract_basic.cpp payoff/test_validation.cpp payoff/test_dependency.cpp payoff/test_scenario_evaluator_vanilla.cpp payoff/test_explain.cpp payoff/test_trigger_state.cpp payoff/test_trigger_barrier.cpp payoff/test_tp_sl.cpp payoff/test_measure_cross_check.cpp payoff/test_json_parser.cpp)
+add_executable(engine_tests test_registry.cpp test_abi.cpp test_calibration.cpp payoff/test_ids.cpp payoff/test_expression.cpp payoff/test_predicate.cpp payoff/test_contract_basic.cpp payoff/test_validation.cpp payoff/test_dependency.cpp payoff/test_scenario_evaluator_vanilla.cpp payoff/test_explain.cpp payoff/test_trigger_state.cpp payoff/test_trigger_barrier.cpp payoff/test_tp_sl.cpp payoff/test_measure_cross_check.cpp payoff/test_json_parser.cpp payoff/test_canonical_visitor.cpp)
 target_link_libraries(engine_tests PRIVATE engine engine_abi GTest::gtest_main)
 
 # engine_abi es SHARED (PLAN.md §5.5, Fase 6): Windows no busca el .dll en el directorio del
