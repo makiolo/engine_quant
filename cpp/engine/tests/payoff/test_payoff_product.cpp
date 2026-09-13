@@ -103,4 +103,59 @@ TEST(PayoffProductTest, LegacyProductsStillReturnNullPayoffProgram) {
     EXPECT_EQ(irs->payoff_program(), nullptr);
 }
 
+// PLAN_PRODUCTS.md Fase 10 (§7.1, §5.1): `explain()` como método aditivo de `IProduct` --
+// productos legacy sin AST propio devuelven simplemente su `type_name()`.
+TEST(PayoffProductTest, LegacyProductExplainDefaultsToTypeName) {
+    engine::Registries registries;
+    engine::register_builtins(registries);
+    auto irs = registries.products.create(
+        "IRSwap", engine::Params{
+                      {"notional", 1'000'000.0},
+                      {"payment_times", std::vector<double>{1.0}},
+                      {"accruals", std::vector<double>{1.0}},
+                      {"fixed_rate", 0.03},
+                  }
+    );
+    EXPECT_EQ(irs->explain(), "IRSwap");
+}
+
+// PLAN_PRODUCTS.md Fase 10 (§7.1 "validate() devuelve todos los errores"): valida un spec JSON
+// sin construir el producto.
+TEST(PayoffProductTest, ValidatePayoffSpecReturnsEmptyForValidSpec) {
+    std::string json = CanonicalVisitor::to_json("AAPL_CALL_100", call_100());
+    EXPECT_TRUE(validate_payoff_spec(json).empty());
+}
+
+TEST(PayoffProductTest, ValidatePayoffSpecAggregatesAllTreeErrors) {
+    ContractPtr invalid = both({
+        cashflow(Currency{"USD"}, constant(1.0)),
+        cashflow(Currency{"USD"}, constant(2.0)),
+    });
+    std::string json = CanonicalVisitor::to_json("BAD", invalid);
+
+    auto errors = validate_payoff_spec(json);
+    ASSERT_EQ(errors.size(), 2u);
+    EXPECT_NE(errors[0].find("children[0]"), std::string::npos);
+    EXPECT_NE(errors[1].find("children[1]"), std::string::npos);
+}
+
+TEST(PayoffProductTest, ValidatePayoffSpecReportsUnparsableJsonAsSingleError) {
+    auto errors = validate_payoff_spec("{not json");
+    EXPECT_EQ(errors.size(), 1u);
+}
+
+TEST(PayoffProductTest, ExplainPayoffSpecMatchesConstructedProduct) {
+    ContractPtr contract = call_100();
+    std::string json = CanonicalVisitor::to_json("AAPL_CALL_100", contract);
+    PayoffProduct product("AAPL_CALL_100", contract);
+
+    EXPECT_EQ(explain_payoff_spec(json), product.explain());
+}
+
+TEST(PayoffProductTest, ExplainPayoffSpecThrowsOnInvalidContract) {
+    ContractPtr invalid = cashflow(Currency{"USD"}, constant(1.0));
+    std::string json = CanonicalVisitor::to_json("BAD", invalid);
+    EXPECT_THROW(explain_payoff_spec(json), std::invalid_argument);
+}
+
 } // namespace

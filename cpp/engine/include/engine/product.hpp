@@ -23,6 +23,12 @@ public:
     // productos legacy (IrSwapProduct, FakeProduct de test) devuelven `nullptr` hasta ser
     // migrados -- no rompe ningún consumidor existente.
     virtual const payoff::PayoffProgram* payoff_program() const { return nullptr; }
+
+    // Evolución aditiva (PLAN_PRODUCTS.md §5.1, §12 Fase 10: "ExplainVisitor sera una funcion
+    // de producto", expuesta ahora en nanobind/C ABI/Excel). Default = `type_name()`: productos
+    // legacy sin AST propio (IrSwapProduct, FakeProduct de test) no necesitan implementarlo;
+    // `PayoffProduct` lo sobrescribe con el árbol/cashflows legibles de `ExplainVisitor`.
+    virtual std::string explain() const { return type_name(); }
 };
 
 // IRS vanilla (mismo caso base que `rust/crates/engine-core/src/products/irs.rs`, PLAN.md

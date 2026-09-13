@@ -39,5 +39,27 @@ std::string PayoffProduct::explain() const {
     return header + ExplainVisitor{}.explain_tree(program_.contract);
 }
 
+std::vector<std::string> validate_payoff_spec(const std::string& spec_json) {
+    ParsedPayoffDocument doc;
+    try {
+        doc = parse_payoff_document(spec_json);
+    } catch (const std::exception& e) {
+        return {e.what()};
+    }
+    auto errors = ValidationVisitor{}.validate(doc.contract);
+    std::vector<std::string> messages;
+    messages.reserve(errors.size());
+    for (const auto& e : errors) {
+        messages.emplace_back(e.what());
+    }
+    return messages;
+}
+
+std::string explain_payoff_spec(const std::string& spec_json) {
+    ParsedPayoffDocument doc = parse_payoff_document(spec_json);
+    PayoffProduct product(std::move(doc.id), std::move(doc.contract));
+    return product.explain();
+}
+
 } // namespace payoff
 } // namespace engine
