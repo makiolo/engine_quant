@@ -79,7 +79,11 @@ typedef struct EngineCalibrator EngineCalibrator;
 typedef enum EngineParamKind {
     ENGINE_PARAM_DOUBLE = 0,
     ENGINE_PARAM_VECTOR = 1,
-    ENGINE_PARAM_BOOL = 2
+    ENGINE_PARAM_BOOL = 2,
+    ENGINE_PARAM_STRING = 3 /* PLAN_PRODUCTS.md Fase 3: unico consumidor hoy es
+                             * engine_abi_create_product("Payoff", ...), clave "spec". Solo
+                             * direccion de entrada (to_params); export_params() (salida de
+                             * calibracion) no produce strings, ver abi.cpp. */
 } EngineParamKind;
 
 typedef struct EngineParam {
@@ -88,6 +92,15 @@ typedef struct EngineParam {
     double scalar;         /* valido si kind es ENGINE_PARAM_DOUBLE o ENGINE_PARAM_BOOL (0.0/1.0) */
     const double* values;  /* valido (no NULL) si kind es ENGINE_PARAM_VECTOR */
     size_t count;           /* longitud de values; valido si kind es ENGINE_PARAM_VECTOR */
+    const char* string_value; /* anadido al FINAL de la struct (PLAN_PRODUCTS.md Fase 3): valido
+                                * (no NULL) si kind es ENGINE_PARAM_STRING; UTF-8, NUL-terminado,
+                                * no se retiene tras la llamada (se copia internamente). Anadir un
+                                * campo al final de un struct ya publicado NO sube
+                                * engine_abi_version() (ver el comentario de esa funcion, arriba
+                                * en este archivo): un caller compilado contra un abi.h anterior a
+                                * este campo nunca puede construir kind == ENGINE_PARAM_STRING, asi
+                                * que esta libreria nunca necesita leer string_value para un
+                                * EngineParam construido por ese caller. */
 } EngineParam;
 
 /* --- Listado de modelos/productos registrados (PLAN.md §5.4) y medidas de ENGINE.PRICE

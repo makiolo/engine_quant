@@ -38,6 +38,15 @@ EngineParam vector_param(const char* key, const std::vector<double>& values) {
     return p;
 }
 
+// PLAN_PRODUCTS.md Fase 3: unico consumidor hoy es engine_abi_create_product("Payoff", ...).
+EngineParam string_param(const char* key, const char* value) {
+    EngineParam p{};
+    p.key = key;
+    p.kind = ENGINE_PARAM_STRING;
+    p.string_value = value;
+    return p;
+}
+
 std::string last_error() {
     std::size_t len = engine_abi_last_error(nullptr, 0);
     std::string buffer(len, '\0');
@@ -719,5 +728,26 @@ TEST(Abi, CalibrateRejectsNullMarket) {
 TEST(Abi, CreateUnknownCalibratorReturnsNull) {
     EngineCalibrator* calibrator = engine_abi_create_calibrator("NoExiste");
     EXPECT_EQ(calibrator, nullptr);
+    EXPECT_FALSE(last_error().empty());
+}
+
+// PLAN_PRODUCTS.md Fase 3 (SS12): ENGINE_PARAM_STRING + engine_abi_create_product("Payoff",
+// ...) -- confirma que el tercer consumidor generico (tras Python/Excel) tambien funciona.
+TEST(Abi, CreateProductPayoffFromJsonSpec) {
+    std::string spec = R"({"schema":"engine.payoff/v1","id":"AAPL_CALL_100","contract":{)"
+                        R"("type":"when","time":1.0,"child":{)"
+                        R"("type":"cashflow","currency":"USD","amount":{)"
+                        R"("type":"constant","value":30000.0)"
+                        R"(}}}})";
+    EngineParam params[] = {string_param("spec", spec.c_str())};
+    ProductHandle product{engine_abi_create_product("Payoff", params, 1)};
+    ASSERT_NE(product.ptr, nullptr) << last_error();
+}
+
+TEST(Abi, CreateProductPayoffRejectsUnknownSchemaVersion) {
+    std::string spec = R"({"schema":"engine.payoff/v2","id":"X","contract":{"type":"zero"}})";
+    EngineParam params[] = {string_param("spec", spec.c_str())};
+    ProductHandle product{engine_abi_create_product("Payoff", params, 1)};
+    EXPECT_EQ(product.ptr, nullptr);
     EXPECT_FALSE(last_error().empty());
 }

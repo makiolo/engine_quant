@@ -67,6 +67,9 @@ engine::Params to_params(const EngineParam* params, std::size_t n_params) {
             case ENGINE_PARAM_VECTOR:
                 result.emplace(p.key, std::vector<double>(p.values, p.values + p.count));
                 break;
+            case ENGINE_PARAM_STRING:
+                result.emplace(p.key, std::string(p.string_value ? p.string_value : ""));
+                break;
         }
     }
     return result;
