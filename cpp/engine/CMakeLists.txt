@@ -37,6 +37,7 @@ add_library(engine STATIC
     src/payoff/scenario_evaluator.cpp
     src/payoff/explain_visitor.cpp
     src/payoff/barrier_templates.cpp
+    src/payoff/irs_templates.cpp
     src/payoff/tp_sl.cpp
     src/payoff/json_parser.cpp
     src/payoff/canonical_visitor.cpp
