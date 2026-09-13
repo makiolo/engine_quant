@@ -128,6 +128,37 @@ def test_fx_forward_template_sign_flips_both_legs():
     assert domestic_flow.amount.value == 1_100_000.0
 
 
+def test_product_explain_includes_id_hash_and_tree():
+    eng = engine.Engine()
+    trade = q.PayoffProduct(id="AAPL_CALL_100", contract=_call_100())
+    product = eng.create_product(trade.product_type, trade.to_params())
+    text = product.explain()
+    assert "AAPL_CALL_100" in text
+    assert "When" in text
+
+
+def test_legacy_product_explain_defaults_to_type_name():
+    eng = engine.Engine()
+    irs = eng.create_product(
+        "IRSwap",
+        {"notional": 1_000_000.0, "payment_times": [1.0], "accruals": [1.0], "fixed_rate": 0.03},
+    )
+    assert irs.explain() == "IRSwap"
+
+
+def test_validate_payoff_spec_returns_empty_list_for_valid_spec():
+    trade = q.PayoffProduct(id="AAPL_CALL_100", contract=_call_100())
+    errors = engine.validate_payoff_spec(trade.to_params()["spec"])
+    assert errors == []
+
+
+def test_validate_payoff_spec_reports_errors_without_creating_product():
+    invalid = q.PayoffProduct(id="BAD", contract=q.cashflow("USD", q.constant(1.0)))
+    errors = engine.validate_payoff_spec(invalid.to_params()["spec"])
+    assert len(errors) == 1
+    assert "instante activo" in errors[0]
+
+
 if __name__ == "__main__":
     test_operator_sugar_builds_expected_tree()
     test_payoff_product_to_params_serializes_canonical_envelope()
@@ -140,4 +171,8 @@ if __name__ == "__main__":
     test_irs_template_rejects_mismatched_schedule_lengths()
     test_fx_forward_template_matches_plan_ast()
     test_fx_forward_template_sign_flips_both_legs()
+    test_product_explain_includes_id_hash_and_tree()
+    test_legacy_product_explain_defaults_to_type_name()
+    test_validate_payoff_spec_returns_empty_list_for_valid_spec()
+    test_validate_payoff_spec_reports_errors_without_creating_product()
     print("OK: tests de engine_typed.payoff pasaron")

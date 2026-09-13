@@ -11,6 +11,7 @@
 #include "engine/price.hpp"
 #include "engine/calibrator.hpp"
 #include "engine/engine.hpp"
+#include "engine/payoff/payoff_product.hpp"
 
 namespace nb = nanobind;
 using namespace nb::literals;
@@ -259,6 +260,14 @@ NB_MODULE(engine, m) {
         "usar para decidir si pedir \"gpu\"/\"auto\" en ExecutionContext tiene sentido."
     );
 
+    m.def(
+        "validate_payoff_spec",
+        &engine::payoff::validate_payoff_spec,
+        nb::arg("spec_json"),
+        "Valida un documento engine.payoff/v1 (JSON) sin construir el producto -- lista de "
+        "mensajes de error (vacia si el spec es valido), PLAN_PRODUCTS.md Fase 10 SS7.1."
+    );
+
     // --- Registry de modelos/productos (Fase 3, PLAN.md §5.4/§7.6) ---
 
     nb::class_<engine::IModel>(m, "Model")
@@ -267,6 +276,11 @@ NB_MODULE(engine, m) {
 
     nb::class_<engine::IProduct>(m, "Product")
         .def_prop_ro("type_name", &engine::IProduct::type_name)
+        .def(
+            "explain", &engine::IProduct::explain,
+            "Arbol/cashflows legibles (PayoffProduct) o solo el type_name (productos legacy sin "
+            "AST propio) -- PLAN_PRODUCTS.md Fase 10, SS5.1."
+        )
         .def("__repr__", [](const engine::IProduct& self) { return "<Product '" + self.type_name() + "'>"; });
 
     nb::class_<engine::MeasureResult>(m, "MeasureResult")
