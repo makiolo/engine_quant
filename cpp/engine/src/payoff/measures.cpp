@@ -1,10 +1,14 @@
 #include "engine/payoff/measures.hpp"
 
+#include <exception>
 #include <stdexcept>
 #include <utility>
 
+#include "engine-ffi-cxx/lib.h"
+#include "engine/payoff/canonical_visitor.hpp"
 #include "engine/payoff/errors.hpp"
 #include "engine/payoff/event_state.hpp"
+#include "engine/payoff/model_capabilities.hpp"
 #include "engine/payoff/scenario_evaluator.hpp"
 
 namespace engine {
@@ -101,6 +105,51 @@ double bump_and_reval_fixing(
     ValuationResult bumped_result = present_value(root, bumped_context, discounting, reporting_currency, valuation_time);
 
     return bumped_result.present_value - base_result.present_value;
+}
+
+QValuationResult risk_neutral_price_gbm(
+    const PayoffProgram& program, const GbmModel& model, std::uint64_t n_paths, std::uint64_t seed
+) {
+    std::optional<ModelCapabilities> capabilities = model.capabilities();
+    if (!capabilities.has_value()) {
+        throw ValidationError("GbmModel no declara ModelCapabilities", NodePath::root());
+    }
+    if (capabilities->supported_measures.find(ProbabilityMeasure::RiskNeutralQ) == capabilities->supported_measures.end()) {
+        throw ValidationError("el modelo no soporta la medida RiskNeutralQ", NodePath::root());
+    }
+
+    // Preflight (PLAN_PRODUCTS.md §12 Fase 5, criterio de aceptacion): ningun observable del
+    // contrato entra en el bridge hacia Rust sin que el modelo declare que lo genera.
+    DependencyReport dependencies = DependencyVisitor{}.analyze(program.contract);
+    for (const ObservableId& observable : dependencies.observables) {
+        if (capabilities->generated_observables.find(observable) == capabilities->generated_observables.end()) {
+            throw ValidationError(
+                "observable '" + observable.value + "' no generado por el modelo (preflight de Fase 5)",
+                NodePath::root()
+            );
+        }
+    }
+
+    std::string spec_json = CanonicalVisitor::to_json(program.id, program.contract);
+    try {
+        ffi::PayoffQPriceResult result = ffi::price_payoff_gbm_q(
+            spec_json, model.observable().value, model.s0(), model.r(), model.q(), model.sigma(), n_paths, seed
+        );
+        QValuationResult out;
+        out.mean = result.mean;
+        out.std_error = result.std_error;
+        out.ci_low = result.ci_low;
+        out.ci_high = result.ci_high;
+        out.n_paths = result.n_paths;
+        out.measure = ProbabilityMeasure::RiskNeutralQ;
+        return out;
+    } catch (const std::exception& e) {
+        // Un Err(String) del lado Rust (compilacion del JSON, p.ej. un nodo no soportado en
+        // CompiledPayoff v1) cruza como excepcion de C++ (ver rust/crates/engine-ffi) -- se
+        // relanza en el vocabulario de errores del motor de payoff en vez de dejar escapar el
+        // tipo de excepcion interno de cxx.
+        throw EvaluationError(e.what(), NodePath::root());
+    }
 }
 
 } // namespace payoff

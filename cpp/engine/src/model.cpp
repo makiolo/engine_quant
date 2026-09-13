@@ -28,4 +28,24 @@ double HullWhite2FModel::eta() const { return eta_; }
 double HullWhite2FModel::rho() const { return rho_; }
 double HullWhite2FModel::r0() const { return r0_; }
 
+GbmModel::GbmModel(const Params& params)
+    : s0_(get_double(params, "s0")),
+      r_(get_double(params, "r")),
+      q_(get_double(params, "q")),
+      sigma_(get_double(params, "sigma")),
+      observable_(payoff::ObservableId{get_string(params, "observable")}) {}
+
+std::optional<payoff::ModelCapabilities> GbmModel::capabilities() const {
+    payoff::ModelCapabilities caps;
+    caps.generated_observables = {observable_};
+    caps.supported_measures = {payoff::ProbabilityMeasure::RiskNeutralQ};
+    return caps;
+}
+
+double GbmModel::s0() const { return s0_; }
+double GbmModel::r() const { return r_; }
+double GbmModel::q() const { return q_; }
+double GbmModel::sigma() const { return sigma_; }
+const payoff::ObservableId& GbmModel::observable() const { return observable_; }
+
 } // namespace engine

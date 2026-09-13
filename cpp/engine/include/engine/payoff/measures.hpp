@@ -1,21 +1,19 @@
 #pragma once
 
+#include <cstdint>
 #include <unordered_map>
 
+#include "engine/model.hpp"
 #include "engine/payoff/contract.hpp"
 #include "engine/payoff/dependency_visitor.hpp"
 #include "engine/payoff/evaluation_context.hpp"
 #include "engine/payoff/ledger.hpp"
 #include "engine/payoff/market_path.hpp"
+#include "engine/payoff/payoff_product.hpp"
+#include "engine/payoff/probability_measure.hpp"
 
 namespace engine {
 namespace payoff {
-
-// Medida probabilistica bajo la que se obtuvo un resultado (PLAN_PRODUCTS.md §6). Fase 4 solo
-// produce `DeterministicScenario`: una unica ruta de mercado conocida, sin simulacion Monte
-// Carlo ni calibracion fisica -- `RiskNeutralQ` (Fase 5+) y `PhysicalP` (Fase 7+) llegan cuando
-// exista un `IModel` que genere rutas bajo esas medidas.
-enum class ProbabilityMeasure { RiskNeutralQ, PhysicalP, DeterministicScenario };
 
 // Que curva descuenta cada moneda del ledger (§5.2 `ValuationContext::discounting`). Ausencia de
 // una moneda pedida es error explicito (`curve_for`), nunca una curva por defecto silenciosa
@@ -104,6 +102,33 @@ double bump_and_reval_fixing(
     const ContractPtr& root, const MarketPath& base_path, const FixingStore& historical_fixings,
     const DiscountingPolicy& discounting, const Currency& reporting_currency,
     const ObservableId& observable, double bump, TimePoint valuation_time = TimePoint{0.0}
+);
+
+// Resultado de precio bajo Q via Monte Carlo (PLAN_PRODUCTS.md §12 Fase 5): media, error
+// estandar e intervalo de confianza del estimador (espejo de `engine_core::mc::McEstimate` en
+// Rust), mas la medida para trazabilidad (§14). A diferencia de `ValuationResult` (una unica
+// ruta determinista), no hay `ledger`: el ledger pathwise vive por ruta Monte Carlo dentro de
+// Rust y no cruza la frontera, solo el agregado.
+struct QValuationResult {
+    double mean = 0.0;
+    double std_error = 0.0;
+    double ci_low = 0.0;
+    double ci_high = 0.0;
+    std::uint64_t n_paths = 0;
+    ProbabilityMeasure measure = ProbabilityMeasure::RiskNeutralQ;
+};
+
+// Precio bajo Q (Monte Carlo, GBM) de un `PayoffProgram` (PLAN_PRODUCTS.md §12 Fase 5).
+// Preflight ANTES de simular una sola ruta (criterio de aceptacion explicito de esta fase):
+// compara `DependencyVisitor::analyze(program.contract)` contra `model.capabilities()` y lanza
+// `ValidationError` si el contrato referencia un observable que el modelo no genera o pide una
+// medida que no soporta. Delegado sobre `engine::ffi::price_payoff_gbm_q`
+// (`rust/crates/engine-ffi`), que a su vez compila/evalua el `CompiledPayoff` enteramente en
+// Rust (`engine_core::payoff`) -- un error de compilacion del JSON (p.ej. un nodo no soportado
+// en Fase 5, ver `docs/schema/engine.payoff/v1.schema.json`) llega como excepcion de Rust y se
+// relanza aqui como `EvaluationError`.
+QValuationResult risk_neutral_price_gbm(
+    const PayoffProgram& program, const GbmModel& model, std::uint64_t n_paths, std::uint64_t seed
 );
 
 } // namespace payoff

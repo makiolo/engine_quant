@@ -7,6 +7,7 @@ namespace engine {
 void register_builtins(Registries& registries) {
     registries.models.register_type<HullWhite1FModel>("HullWhite1F");
     registries.models.register_type<HullWhite2FModel>("HullWhite2F");
+    registries.models.register_type<GbmModel>("GBM");
     registries.products.register_type<IrSwapProduct>("IRSwap");
     registries.products.register_type<payoff::PayoffProduct>("Payoff");
     registries.measures.register_type<ExposureProfileMeasure>("ExposureProfile");
