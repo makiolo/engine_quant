@@ -137,6 +137,25 @@ ENGINE_ABI_API void engine_abi_free_model(EngineModel* model);
 ENGINE_ABI_API void engine_abi_free_product(EngineProduct* product);
 ENGINE_ABI_API void engine_abi_free_calibrator(EngineCalibrator* calibrator);
 
+/* --- Autoria/validacion de PayoffProduct sin registry (PLAN_PRODUCTS.md Fase 10, SS7.1) -----
+ * Superficie de autoria (validar/explicar) sin crear ningun handle, para las mismas UX que
+ * nanobind/Excel (engine.validate_payoff_spec / Product.explain -- ver clients/python/src/
+ * engine_py_ext.cpp, clients/excel/src/handles.cpp). */
+
+/* Valida un documento engine.payoff/v1 (JSON, misma clave "spec" que engine_abi_create_product
+ * con name="Payoff") sin construir ningun EngineProduct. Devuelve 0 si el spec es valido, != 0
+ * si no -- el detalle (todos los errores agregados, mismo formato que si
+ * engine_abi_create_product("Payoff", ...) fallara) se consulta con engine_abi_last_error. */
+ENGINE_ABI_API int engine_abi_validate_payoff_spec(const char* spec_json);
+
+/* Arbol/cashflows legibles de un producto ya creado (PayoffProduct) o solo su type_name
+ * (productos legacy sin AST propio -- ver IProduct::explain()). Misma convencion snprintf que
+ * engine_abi_last_error: escribe hasta buffer_len bytes (incluido el NUL) y devuelve la
+ * longitud real del mensaje sin contar el NUL; buffer/buffer_len pueden ser NULL/0 para solo
+ * consultar la longitud. `product` NULL es un error (ver engine_abi_last_error), no un explain
+ * vacio. */
+ENGINE_ABI_API size_t engine_abi_explain_product(const EngineProduct* product, char* buffer, size_t buffer_len);
+
 /* --- Market / PricingContext / ExecutionContext (PLAN.md §7.15) -------------------------
  * Structs planos, no handles: se construyen y se pasan directamente a
  * engine_abi_calibrate/engine_abi_price, sin creacion/liberacion propia. */

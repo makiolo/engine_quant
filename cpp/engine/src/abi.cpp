@@ -11,6 +11,7 @@
 
 #include "engine/price.hpp"
 #include "engine/engine.hpp"
+#include "engine/payoff/payoff_product.hpp"
 
 #include <algorithm>
 #include <cstring>
@@ -314,6 +315,39 @@ EngineCalibrator* engine_abi_create_calibrator(const char* name) {
     } catch (const std::exception& e) {
         set_last_error(e);
         return nullptr;
+    }
+}
+
+int engine_abi_validate_payoff_spec(const char* spec_json) {
+    try {
+        if (!spec_json) throw std::invalid_argument("engine_abi_validate_payoff_spec: spec_json no puede ser NULL");
+        std::vector<std::string> errors = engine::payoff::validate_payoff_spec(spec_json);
+        if (errors.empty()) {
+            clear_last_error();
+            return 0;
+        }
+        std::string message = std::to_string(errors.size()) + " error(es) de validacion:";
+        for (const auto& e : errors) {
+            message += "\n  - ";
+            message += e;
+        }
+        set_last_error(std::invalid_argument(message));
+        return 1;
+    } catch (const std::exception& e) {
+        set_last_error(e);
+        return 1;
+    }
+}
+
+std::size_t engine_abi_explain_product(const EngineProduct* product, char* buffer, std::size_t buffer_len) {
+    try {
+        if (!product) throw std::invalid_argument("engine_abi_explain_product: product no puede ser NULL");
+        std::string text = product->ptr->explain();
+        clear_last_error();
+        return copy_to_buffer(text, buffer, buffer_len);
+    } catch (const std::exception& e) {
+        set_last_error(e);
+        return copy_to_buffer(std::string(), buffer, buffer_len);
     }
 }
 

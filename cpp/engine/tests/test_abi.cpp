@@ -751,3 +751,72 @@ TEST(Abi, CreateProductPayoffRejectsUnknownSchemaVersion) {
     EXPECT_EQ(product.ptr, nullptr);
     EXPECT_FALSE(last_error().empty());
 }
+
+// PLAN_PRODUCTS.md Fase 10 (SS7.1): validate/explain sin registry, misma superficie que
+// nanobind (engine.validate_payoff_spec/Product.explain) y Excel (ENGINE.VALIDATE_PAYOFF_SPEC/
+// ENGINE.EXPLAIN_PRODUCT).
+
+TEST(Abi, ValidatePayoffSpecReturnsZeroForValidSpec) {
+    std::string spec = R"({"schema":"engine.payoff/v1","id":"X","contract":{)"
+                        R"("type":"when","time":1.0,"child":{)"
+                        R"("type":"cashflow","currency":"USD","amount":{"type":"constant","value":1.0})"
+                        R"(}}})";
+    EXPECT_EQ(engine_abi_validate_payoff_spec(spec.c_str()), 0);
+}
+
+TEST(Abi, ValidatePayoffSpecReportsAggregatedErrorsWithoutCreatingProduct) {
+    std::string spec = R"({"schema":"engine.payoff/v1","id":"BAD","contract":{)"
+                        R"("type":"both","children":[)"
+                        R"({"type":"cashflow","currency":"USD","amount":{"type":"constant","value":1.0}},)"
+                        R"({"type":"cashflow","currency":"USD","amount":{"type":"constant","value":2.0}})"
+                        R"(]}})";
+    EXPECT_NE(engine_abi_validate_payoff_spec(spec.c_str()), 0);
+    std::string error = last_error();
+    EXPECT_NE(error.find("children[0]"), std::string::npos);
+    EXPECT_NE(error.find("children[1]"), std::string::npos);
+}
+
+TEST(Abi, ValidatePayoffSpecRejectsNullSpec) {
+    EXPECT_NE(engine_abi_validate_payoff_spec(nullptr), 0);
+    EXPECT_FALSE(last_error().empty());
+}
+
+TEST(Abi, ExplainProductReturnsTreeForPayoffProduct) {
+    std::string spec = R"({"schema":"engine.payoff/v1","id":"AAPL_CALL_100","contract":{)"
+                        R"("type":"when","time":1.0,"child":{)"
+                        R"("type":"cashflow","currency":"USD","amount":{"type":"constant","value":30000.0})"
+                        R"(}}})";
+    EngineParam params[] = {string_param("spec", spec.c_str())};
+    ProductHandle product{engine_abi_create_product("Payoff", params, 1)};
+    ASSERT_NE(product.ptr, nullptr) << last_error();
+
+    std::size_t len = engine_abi_explain_product(product.ptr, nullptr, 0);
+    std::string text(len, '\0');
+    engine_abi_explain_product(product.ptr, text.data(), len + 1);
+
+    EXPECT_NE(text.find("AAPL_CALL_100"), std::string::npos);
+    EXPECT_NE(text.find("When"), std::string::npos);
+}
+
+TEST(Abi, ExplainProductDefaultsToTypeNameForLegacyProduct) {
+    EngineParam params[] = {
+        scalar_param("notional", 1'000'000.0),
+        vector_param("payment_times", {1.0}),
+        vector_param("accruals", {1.0}),
+        scalar_param("fixed_rate", 0.03),
+    };
+    ProductHandle irs{engine_abi_create_product("IRSwap", params, 4)};
+    ASSERT_NE(irs.ptr, nullptr) << last_error();
+
+    std::size_t len = engine_abi_explain_product(irs.ptr, nullptr, 0);
+    std::string text(len, '\0');
+    engine_abi_explain_product(irs.ptr, text.data(), len + 1);
+    EXPECT_EQ(text, "IRSwap");
+}
+
+TEST(Abi, ExplainProductRejectsNullProduct) {
+    char buffer[16];
+    std::size_t len = engine_abi_explain_product(nullptr, buffer, sizeof(buffer));
+    EXPECT_EQ(len, 0u);
+    EXPECT_FALSE(last_error().empty());
+}
