@@ -28,11 +28,13 @@
 //! resultado final de precio (`crate::mc::McEstimate`) cruza de vuelta a C++.
 
 pub mod api;
+pub mod api_p;
 pub mod compile;
 pub mod eval;
 pub mod ir;
 
 pub use api::{hit_probability_gbm_q, payoff_exposure_profile_gbm_q, price_payoff_gbm_q};
+pub use api_p::{forecast_gbm_p, hit_probability_gbm_p, pnl_distribution_gbm_p, PnlDistribution};
 pub use compile::compile;
 pub use eval::{evaluate, evaluate_with_events, evaluate_with_events_seeded, EventOutcome, ObservablePath, PathCashflow};
 pub use ir::{

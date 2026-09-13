@@ -71,7 +71,7 @@ fn bridge_seed_for_path(seed: u64, path_idx: usize) -> u64 {
 /// observable distinto de `observable` (el UNICO que este `Gbm` genera, PLAN_PRODUCTS.md §6
 /// "`ModelCapabilities::generated_observables`") y `n_paths > 0`. `Err` ANTES de simular una sola
 /// ruta -- criterio de aceptacion explicito de Fase 5.
-fn check_single_observable(payoff: &CompiledPayoff, observable: &str, n_paths: u64) -> Result<(), String> {
+pub(crate) fn check_single_observable(payoff: &CompiledPayoff, observable: &str, n_paths: u64) -> Result<(), String> {
     for used in &payoff.observable_slots {
         if used != observable {
             return Err(format!(
