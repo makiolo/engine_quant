@@ -29,7 +29,7 @@ def test_schema_itself_is_a_valid_json_schema():
 
 def test_examples_exist():
     examples = sorted(_EXAMPLES_DIR.glob("*.json"))
-    expected = {"call.json", "forward.json", "swap.json", "barrier.json", "tp_sl.json"}
+    expected = {"call.json", "forward.json", "swap.json", "barrier.json", "tp_sl.json", "exercise.json"}
     found = {p.name for p in examples}
     assert expected <= found, f"faltan ejemplos: {expected - found}"
 
@@ -63,4 +63,4 @@ if __name__ == "__main__":
     test_examples_exist()
     test_all_examples_validate_against_schema()
     test_unknown_field_is_rejected()
-    print("OK: schema engine.payoff/v1 y ejemplos (call/forward/swap/barrier/tp_sl) validan")
+    print("OK: schema engine.payoff/v1 y ejemplos (call/forward/swap/barrier/tp_sl/exercise) validan")

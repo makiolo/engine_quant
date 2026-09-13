@@ -1,0 +1,35 @@
+{
+  "schema": "engine.payoff/v1",
+  "id": "AAPL_BERMUDA_PUT_100",
+  "contract": {
+    "type": "exercise",
+    "id": "EX",
+    "dates": [0.25, 0.5, 0.75],
+    "exercise_value": {
+      "type": "max",
+      "left": {
+        "type": "sub",
+        "left": { "type": "constant", "value": 100.0 },
+        "right": { "type": "current", "observable": "EQ.SPOT.AAPL" }
+      },
+      "right": { "type": "constant", "value": 0.0 }
+    },
+    "continuation": {
+      "type": "when",
+      "time": 1.0,
+      "child": {
+        "type": "cashflow",
+        "currency": "USD",
+        "amount": {
+          "type": "max",
+          "left": {
+            "type": "sub",
+            "left": { "type": "constant", "value": 100.0 },
+            "right": { "type": "fixing", "observable": "EQ.SPOT.AAPL", "time": 1.0 }
+          },
+          "right": { "type": "constant", "value": 0.0 }
+        }
+      }
+    }
+  }
+}
