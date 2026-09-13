@@ -23,10 +23,12 @@
 //! simple `String`; este modulo lo compila y evalua enteramente del lado Rust, y unicamente el
 //! resultado final de precio (`crate::mc::McEstimate`) cruza de vuelta a C++.
 
+pub mod api;
 pub mod compile;
 pub mod eval;
 pub mod ir;
 
+pub use api::price_payoff_gbm_q;
 pub use compile::compile;
 pub use eval::{evaluate, ObservablePath, PathCashflow};
 pub use ir::{CompiledPayoff, ContractOp, PredicateOp, ScalarOp, COMPILED_PAYOFF_VERSION};

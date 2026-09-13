@@ -92,3 +92,29 @@ pub struct CompiledPayoff {
     /// Indice en `contract_ops` de la raiz del programa.
     pub root: usize,
 }
+
+impl CompiledPayoff {
+    /// Todos los instantes en los que un modelo debe generar el (unico) observable para poder
+    /// interpretar este programa: los `Fixing` explicitos y los `When` que fijan el "instante
+    /// activo" que `Current` puede leer (ADR-P0-08) -- union deduplicada y ordenada ascendente.
+    /// Quien simula (p.ej. `models::gbm::Gbm::simulate_at_times`) usa exactamente este conjunto,
+    /// nunca una rejilla propia: asi `eval::ObservablePath::value_at` siempre encuentra el
+    /// tiempo exacto que le pida el interprete.
+    pub fn required_times(&self) -> Vec<f64> {
+        let mut times: Vec<f64> = self
+            .scalar_ops
+            .iter()
+            .filter_map(|op| match op {
+                ScalarOp::Fixing { time, .. } => Some(*time),
+                _ => None,
+            })
+            .collect();
+        times.extend(self.contract_ops.iter().filter_map(|op| match op {
+            ContractOp::When { time, .. } => Some(*time),
+            _ => None,
+        }));
+        times.sort_by(|a, b| a.partial_cmp(b).expect("payoff: tiempo no finito en CompiledPayoff"));
+        times.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
+        times
+    }
+}
