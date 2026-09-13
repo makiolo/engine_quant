@@ -36,7 +36,7 @@ The result is one vocabulary and one calculation path across every client.
 | Area | Implemented |
 | --- | --- |
 | Models | `HullWhite1F`; `HullWhite2F` / G2++ |
-| Products | Vanilla interest-rate swap (`IRSwap`), par or explicit fixed rate |
+| Products | Vanilla interest-rate swap (`IRSwap`) and generic composable payoff (`Payoff`) |
 | Measures | `PV`, `DV01`, `ExpectedExposure`, `PFE95`, `UnilateralCVA` |
 | Calibration | Registry-based calibrators for both short-rate models, using damped Gauss-Newton and AAD Jacobians |
 | Compute | Burn tensor backend; CPU by default; opt-in WGPU backend |
@@ -165,6 +165,87 @@ execution = engine.ExecutionContext({"backend": "auto", "precision": "FP64"})
 results = eng.price(trade, ["PV", "DV01"], model, market, pricing, execution)
 print(results["PV"].scalar)
 ```
+
+### Custom products from Python
+
+Custom products are represented by `engine_typed.PayoffProduct`: compose a contract from
+expressions, predicates, and timed cashflows, then register it with the generic `"Payoff"`
+product type. The typed builders validate the tree before it crosses into the native engine.
+
+For example, this creates a one-year European call on an observable named
+`EQ.SPOT.AAPL`:
+
+```python
+import engine
+import engine_typed as q
+
+eng = engine.Engine()
+
+call = q.when(
+    1.0,
+    q.cashflow(
+        "USD",
+        1_000 * q.maximum(q.fixing("EQ.SPOT.AAPL", 1.0) - 100.0, 0.0),
+    ),
+)
+trade = q.PayoffProduct(id="AAPL_CALL_100", contract=call)
+product = eng.create_product(trade.product_type, trade.to_params())
+
+print(product.type_name())  # Payoff
+```
+
+The same contract nodes can be combined to create path-dependent products. For example, this
+adds a discrete up-and-in barrier and pays the call only if the barrier is hit:
+
+```python
+barrier_call = q.trigger(
+    id="UP_AND_IN",
+    monitoring_times=[0.25, 0.5, 0.75, 1.0],
+    condition=q.greater_equal(q.current("EQ.SPOT.AAPL"), 120.0),
+    monitoring="discrete",
+    settlement="at_scheduled_payment",
+    priority=0,
+    latch=True,
+    on_hit=call,
+    on_miss=q.zero(),
+)
+barrier_trade = q.PayoffProduct(id="AAPL_UP_AND_IN", contract=barrier_call)
+barrier_product = eng.create_product(
+    barrier_trade.product_type,
+    barrier_trade.to_params(),
+)
+```
+
+For integrations that already produce JSON, the lower-level facade accepts the same
+`engine.payoff/v1` envelope:
+
+```python
+import json
+
+spec = {
+    "schema": "engine.payoff/v1",
+    "id": "FIXED_LEG_2Y",
+    "contract": {
+        "type": "both",
+        "children": [
+            {"type": "when", "time": 1.0, "child": {
+                "type": "cashflow", "currency": "USD",
+                "amount": {"type": "constant", "value": 30_000.0},
+            }},
+            {"type": "when", "time": 2.0, "child": {
+                "type": "cashflow", "currency": "USD",
+                "amount": {"type": "constant", "value": 30_000.0},
+            }},
+        ],
+    },
+}
+fixed_leg = eng.create_product("Payoff", {"spec": json.dumps(spec)})
+```
+
+See the [payoff schema examples](docs/schema/engine.payoff/examples/) for more contract
+shapes. Custom payoff creation and validation are available from Python; the generic payoff
+valuation API is currently exposed through the native C++ payoff namespace, while
+`Engine.price(...)` continues to cover the specialized `IRSwap` flow.
 
 ## Calibration
 
@@ -311,8 +392,9 @@ PLAN.md                    Architectural decisions and implementation history
 
 ## Scope and known limitations
 
-- Only one product (`IRSwap`) and unilateral CVA are implemented; DVA, FVA, MVA, and KVA
-  remain roadmap items.
+- The specialized pricing flow currently covers `IRSwap`; generic `Payoff` products support
+  composable contract creation/validation and have native C++ payoff valuation APIs. DVA, FVA,
+  MVA, and KVA remain roadmap items.
 - `pricing_date` is currently metadata. Calendar generation and day-count arithmetic are
   not implemented.
 - `PV` and `DV01` discount from the observed `MarketSnapshot` curve and no longer depend on
