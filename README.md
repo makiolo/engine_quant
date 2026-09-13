@@ -36,8 +36,10 @@ The result is one vocabulary and one calculation path across every client.
 | Area | Implemented |
 | --- | --- |
 | Models | `HullWhite1F`; `HullWhite2F` / G2++ |
-| Products | Vanilla interest-rate swap (`IRSwap`) and generic composable payoff (`Payoff`) |
-| Measures | `PV`, `DV01`, `ExpectedExposure`, `PFE95`, `UnilateralCVA` |
+| Products | Vanilla interest-rate swap (`IRSwap`); generic composable payoff (`Payoff`) — vanilla, barrier, Asian, take-profit/stop-loss, and American/Bermuda-exercise contracts, plus `IRSwap`/`FXForward` templates that compile to the same AST |
+| Measures | `PV`, `DV01`, `ExpectedExposure`, `PFE95`, `UnilateralCVA` (via `Engine.price(...)`) |
+| Payoff valuation | Deterministic ledger PV and bump-and-reval Greeks for any `Payoff`; Monte Carlo GBM under the risk-neutral measure Q (price, barrier hit probability, exposure profile, Longstaff-Schwartz American/Bermuda exercise) and under a physical measure P (forecast, hit probability, P&L distribution/expected shortfall) — implemented and tested end-to-end in C++/Rust, not yet reachable from `Engine.price(...)` or any client (see [Scope and known limitations](#scope-and-known-limitations)) |
+| Payoff authoring | `engine_typed.payoff` builders, versioned JSON schema (`engine.payoff/v1`) with fixtures, and cross-layer `validate`/`explain` (Python, Excel, C ABI) that agree on the same canonical hash |
 | Calibration | Registry-based calibrators for both short-rate models, using damped Gauss-Newton and AAD Jacobians |
 | Compute | Burn tensor backend; CPU by default; opt-in WGPU backend |
 | Clients | Python extension, Excel XLL, native C++ API, and versioned C ABI |
@@ -46,6 +48,12 @@ The result is one vocabulary and one calculation path across every client.
 `Engine.price(...)` accepts a batch of measure names. `ExpectedExposure` and `PFE95`, for
 example, reuse one exposure simulation rather than running Monte Carlo twice. `price_batch`/
 `price_many`/`price_grid` extend that batching across trades, and across models and markets.
+Within a batch, they also deduplicate `Payoff` trades that share the same canonical AST hash
+(same id, same contract byte-for-byte): the measure is evaluated once and the result is shared
+rather than recomputed per duplicate trade. The Rust payoff compiler performs
+common-subexpression elimination on the AST before evaluation, and the Monte Carlo GBM pricer
+is generic over the Burn CPU/GPU backend (opt-in `gpu` feature) — though today the
+C++/Python/Excel/C ABI surface only ever requests the CPU backend for it.
 
 ## Architecture
 
@@ -243,9 +251,21 @@ fixed_leg = eng.create_product("Payoff", {"spec": json.dumps(spec)})
 ```
 
 See the [payoff schema examples](docs/schema/engine.payoff/examples/) for more contract
-shapes. Custom payoff creation and validation are available from Python; the generic payoff
-valuation API is currently exposed through the native C++ payoff namespace, while
-`Engine.price(...)` continues to cover the specialized `IRSwap` flow.
+shapes, including barrier, Asian, take-profit/stop-loss, exercise, `IRSwap`, and `FXForward`
+fixtures. Creating a `Payoff` product, validating a spec (`validate_payoff_spec`), and
+explaining a built product (`Product.explain()`) are available from Python, Excel
+(`ENGINE.VALIDATE_PAYOFF_SPEC` / `ENGINE.EXPLAIN_PRODUCT`), and the C ABI
+(`engine_abi_validate_payoff_spec` / `engine_abi_explain_product`) — the same JSON fixture
+produces the same canonical hash and result across all three, plus C++ and Rust.
+
+Monte Carlo *valuation* of a `Payoff` under a Black-Scholes/GBM model is implemented and
+tested in C++/Rust — price, barrier hit probability, and exposure profile under the
+risk-neutral measure Q; Longstaff-Schwartz American/Bermuda exercise under Q; forecast, hit
+probability, and P&L distribution/expected shortfall under a physical measure P — but it is
+not yet wired into `Engine.price(...)` or any client outside C++. `Engine.price(...)` still
+only covers `IRSwap` and the deterministic ledger measures (`PV`/`DV01`) of `Payoff`. See
+[PLAN_PRODUCTS.md](PLAN_PRODUCTS.md) for the full design and phased roadmap of the payoff
+engine.
 
 ## Calibration
 
@@ -388,13 +408,17 @@ examples/abi/              External-language examples for the stable C ABI
 installer/                 Inno Setup packaging for Windows
 .github/workflows/         CI and release pipelines
 PLAN.md                    Architectural decisions and implementation history
+PLAN_PRODUCTS.md           Universal payoff engine: AST, Q/P Monte Carlo, phased roadmap
 ```
 
 ## Scope and known limitations
 
-- The specialized pricing flow currently covers `IRSwap`; generic `Payoff` products support
-  composable contract creation/validation and have native C++ payoff valuation APIs. DVA, FVA,
-  MVA, and KVA remain roadmap items.
+- `Engine.price(...)` currently covers `IRSwap` and the deterministic ledger measures
+  (`PV`/`DV01`, bump-and-reval) of `Payoff`. Monte Carlo Q/P valuation of a `Payoff` (barriers,
+  Asian, take-profit/stop-loss, American/Bermuda exercise, forecast, hit probability, P&L
+  distribution) is implemented and tested end-to-end in C++/Rust but not yet reachable from
+  `Engine.price(...)` or any client outside C++ — see [PLAN_PRODUCTS.md](PLAN_PRODUCTS.md).
+  DVA, FVA, MVA, and KVA remain roadmap items.
 - `pricing_date` is currently metadata. Calendar generation and day-count arithmetic are
   not implemented.
 - `PV` and `DV01` discount from the observed `MarketSnapshot` curve and no longer depend on
@@ -413,7 +437,9 @@ PLAN.md                    Architectural decisions and implementation history
   C ABI still take plain measure names.
 
 See [PLAN.md](PLAN.md) for the detailed architecture record, numerical-validation strategy,
-completed phases, and future work.
+completed phases, and future work on the `IRSwap`/CVA/exposure engine, and
+[PLAN_PRODUCTS.md](PLAN_PRODUCTS.md) for the universal payoff engine (AST, Q/P Monte Carlo,
+phased roadmap, and current status).
 
 ## Contributing
 
