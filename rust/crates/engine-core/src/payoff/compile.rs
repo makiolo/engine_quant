@@ -283,6 +283,26 @@ impl Compiler {
                     on_miss,
                 }
             }
+            "exercise" => {
+                // Mismo orden que 'trigger': resolver 'event' (id) antes de compilar el resto,
+                // por si 'exercise_value'/'continuation' referencian este mismo EventId (§10).
+                let event = self.event_slot(str_field(node, "id")?);
+                let dates = array_field(node, "dates")?
+                    .iter()
+                    .map(|v| v.as_f64().ok_or_else(|| "payoff: 'dates' debe contener solo numeros".to_string()))
+                    .collect::<Result<Vec<f64>, String>>()?;
+                if dates.is_empty() {
+                    return Err("payoff: 'exercise' requiere al menos una fecha en 'dates'".to_string());
+                }
+                for w in dates.windows(2) {
+                    if w[1] <= w[0] {
+                        return Err("payoff: 'dates' de 'exercise' debe ser estrictamente ascendente".to_string());
+                    }
+                }
+                let exercise_value = self.scalar_field(node, "exercise_value")?;
+                let continuation = self.contract_field(node, "continuation")?;
+                ContractOp::Exercise { event, dates, exercise_value, continuation }
+            }
             other => return Err(unsupported_node("contrato", other)),
         };
         self.contract_ops.push(op);
@@ -310,9 +330,9 @@ impl Compiler {
 fn unsupported_node(category: &str, node_type: &str) -> String {
     format!(
         "payoff: nodo de {category} '{node_type}' no soportado en CompiledPayoff v{COMPILED_PAYOFF_VERSION} \
-         (PLAN_PRODUCTS.md §12): requiere ejercicio (Exercise, Fase 9), un agregado sobre schedule \
-         (Average/RunningMin/RunningMax) o un observable de mercado (DiscountFactor/FxConversion/Parameter/ \
-         EventTime/Before/After) que ningun modelo Q de esta fase evalua todavia"
+         (PLAN_PRODUCTS.md §12): requiere un agregado sobre schedule (Average/RunningMin/RunningMax) o un \
+         observable de mercado (DiscountFactor/FxConversion/Parameter/EventTime/Before/After) que ningun \
+         modelo Q de esta fase evalua todavia"
     )
 }
 
@@ -403,13 +423,62 @@ mod tests {
 
     #[test]
     fn rejects_unsupported_node_before_evaluating_anything() {
-        let exercise_json = r#"{
+        let average_json = r#"{
             "schema": "engine.payoff/v1",
             "id": "x",
-            "contract": {"type": "exercise"}
+            "contract": {"type": "average"}
         }"#;
-        let err = compile(exercise_json).expect_err("Exercise no deberia soportarse hasta Fase 9");
-        assert!(err.contains("exercise"));
+        let err = compile(average_json).expect_err("Average no deberia soportarse todavia (fuera de alcance Fase 5-9)");
+        assert!(err.contains("average"));
+    }
+
+    // PLAN_PRODUCTS.md §10, Fase 9: derecho de ejercicio americano/bermuda.
+    const EXERCISE_JSON: &str = r#"{
+        "schema": "engine.payoff/v1",
+        "id": "PUT_BERMUDA",
+        "contract": {
+            "type": "exercise",
+            "id": "EX",
+            "dates": [0.5, 1.0],
+            "exercise_value": {
+                "type": "max",
+                "left": {"type": "sub",
+                    "left": {"type": "constant", "value": 100.0},
+                    "right": {"type": "current", "observable": "EQ.SPOT.XYZ"}},
+                "right": {"type": "constant", "value": 0.0}
+            },
+            "continuation": {"type": "when", "time": 1.0, "child": {"type": "cashflow", "currency": "USD",
+                "amount": {"type": "max",
+                    "left": {"type": "sub",
+                        "left": {"type": "constant", "value": 100.0},
+                        "right": {"type": "fixing", "observable": "EQ.SPOT.XYZ", "time": 1.0}},
+                    "right": {"type": "constant", "value": 0.0}}}}
+        }
+    }"#;
+
+    #[test]
+    fn compiles_exercise_with_event_slot_and_dates_in_required_times() {
+        let compiled = compile(EXERCISE_JSON).expect("exercise deberia compilar (Fase 9)");
+        assert_eq!(compiled.event_slots, vec!["EX".to_string()]);
+        assert_eq!(compiled.required_times(), vec![0.5, 1.0]);
+        assert!(matches!(
+            compiled.contract_ops[compiled.root],
+            ContractOp::Exercise { ref dates, .. } if dates == &vec![0.5, 1.0]
+        ));
+    }
+
+    #[test]
+    fn rejects_exercise_with_empty_dates() {
+        let json = EXERCISE_JSON.replace(r#""dates": [0.5, 1.0],"#, r#""dates": [],"#);
+        let err = compile(&json).expect_err("dates vacio deberia rechazarse");
+        assert!(err.contains("dates"));
+    }
+
+    #[test]
+    fn rejects_exercise_with_non_ascending_dates() {
+        let json = EXERCISE_JSON.replace(r#""dates": [0.5, 1.0],"#, r#""dates": [1.0, 0.5],"#);
+        let err = compile(&json).expect_err("dates no ascendente deberia rechazarse");
+        assert!(err.contains("ascendente"));
     }
 
     // Mismo documento que docs/schema/engine.payoff/examples/barrier.json (up-and-in AAPL,

@@ -12,11 +12,18 @@
 //! (`eval::resolve_trigger_states`) la misma semantica de dos pasadas que `ScenarioEvaluator` en
 //! C++ (ADR-P0-03/08/10): primer hit, latch, prioridad/orden de `EventId` y "instante activo", mas
 //! la correccion de Brownian bridge para monitorizacion continua (ver el doc-comment de `eval`).
-//! `Exercise`/`Average`/`RunningMin`/`RunningMax`/`EventTime`/`DiscountFactor`/`FxConversion`/
-//! `Parameter`/`Before`/`After` quedan fuera: requieren ejercicio (Fase 9) o un observable/
-//! agregado que ningun modelo Q de esta fase genera, igual que el `ValidationVisitor`/
-//! `ScenarioEvaluator` de C++ tampoco los evalua hasta esas fases -- `compile::compile` rechaza
-//! esos nodos en preflight, nunca ejecutando parcialmente el contrato.
+//! `Average`/`RunningMin`/`RunningMax`/`EventTime`/`DiscountFactor`/`FxConversion`/`Parameter`/
+//! `Before`/`After` quedan fuera: requieren un observable/agregado que ningun modelo Q de esta
+//! fase genera, igual que el `ValidationVisitor`/`ScenarioEvaluator` de C++ tampoco los evalua
+//! todavia -- `compile::compile` rechaza esos nodos en preflight, nunca ejecutando parcialmente
+//! el contrato.
+//!
+//! **`Exercise` (Fase 9, PLAN_PRODUCTS.md §10)**: soportado, pero por un camino DISTINTO al resto
+//! de `ContractOp` -- `eval::eval_contract` solo sabe APLICAR una decision de ejercicio ya
+//! resuelta (nunca la toma), y esa decision se resuelve por Longstaff-Schwartz sobre el LOTE
+//! completo de rutas (`lsm::resolve_exercise_decisions`), no ruta a ruta como `Trigger`. Ver el
+//! doc-comment de `lsm` y `api::price_payoff_exercise_gbm_q` (la unica funcion publica que sabe
+//! orquestar las dos pasadas).
 //!
 //! **Como cruza la frontera cxx**: `CompiledPayoff` en si mismo NUNCA se serializa a traves de
 //! `cxx` -- sus enums de datos (`ScalarOp`, `PredicateOp`, `ContractOp`) no tienen representacion
@@ -32,8 +39,12 @@ pub mod api_p;
 pub mod compile;
 pub mod eval;
 pub mod ir;
+pub mod lsm;
 
-pub use api::{hit_probability_gbm_q, payoff_exposure_profile_gbm_q, price_payoff_gbm_q};
+pub use api::{
+    hit_probability_gbm_q, payoff_exposure_profile_gbm_q, price_payoff_exercise_gbm_q, price_payoff_gbm_q,
+    ExercisePolicyResult,
+};
 pub use api_p::{forecast_gbm_p, hit_probability_gbm_p, pnl_distribution_gbm_p, PnlDistribution};
 pub use compile::compile;
 pub use eval::{evaluate, evaluate_with_events, evaluate_with_events_seeded, EventOutcome, ObservablePath, PathCashflow};
@@ -41,3 +52,4 @@ pub use ir::{
     BarrierDirection, BridgePattern, CompiledPayoff, ContractOp, MonitoringMode, PredicateOp, ScalarOp,
     SettlementMode, COMPILED_PAYOFF_VERSION,
 };
+pub use lsm::ExerciseDateDiagnostic;

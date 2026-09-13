@@ -144,6 +144,21 @@ pub enum ContractOp {
         on_hit: usize,
         on_miss: usize,
     },
+    /// Derecho de ejercicio americano/bermuda (PLAN_PRODUCTS.md §3.4, §10, Fase 9): en cualquier
+    /// instante de `dates` el titular puede recibir `exercise_value` (evaluado con el cursor
+    /// fijado a esa fecha) en vez de mantener `continuation`. `event` (mismo espacio de indices
+    /// que `Trigger::event`, ver `compile::Compiler::event_slot`) identifica este derecho para
+    /// diagnostico/explain -- no hay `EventOccurred`/`EventValue` definidos sobre el todavia (a
+    /// diferencia de un `Trigger`, la decision de ejercicio no se resuelve por ruta sino por lote
+    /// via Longstaff-Schwartz, ver `crate::payoff::lsm`). La politica de decision NO vive aqui
+    /// (§10: "El AST solo declara el derecho; la política pertenece al pricer") -- este opcode es
+    /// puramente estructural, `eval::eval_contract` solo sabe APLICAR una decision ya resuelta.
+    Exercise {
+        event: usize,
+        dates: Vec<f64>,
+        exercise_value: usize,
+        continuation: usize,
+    },
 }
 
 /// IR plana completa de un `PayoffProgram` (PLAN_PRODUCTS.md §8). Inmutable una vez compilada;
@@ -191,6 +206,7 @@ impl CompiledPayoff {
             match op {
                 ContractOp::When { time, .. } => times.push(*time),
                 ContractOp::Trigger { monitoring_times, .. } => times.extend(monitoring_times.iter().copied()),
+                ContractOp::Exercise { dates, .. } => times.extend(dates.iter().copied()),
                 _ => {}
             }
         }

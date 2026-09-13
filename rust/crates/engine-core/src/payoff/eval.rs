@@ -132,17 +132,23 @@ pub struct EventOutcome {
 
 /// Estado interno (por ruta) de un evento -- ver el doc-comment del modulo y
 /// `event_state.hpp`/`EventState` en C++, que este tipo replica campo a campo.
+///
+/// Reutilizado tal cual para representar una decision de `Exercise` ya resuelta (Fase 9, ver
+/// `crate::payoff::lsm`): `occurred=true`/`first_hit_time=Some(t)` significa "se ejercito en la
+/// fecha `t`", igual que "el evento disparo en `t`" para un `Trigger` -- misma forma, dos
+/// productores distintos (`resolve_trigger_states` por ruta vs. `lsm::resolve_exercise_decisions`
+/// por lote, ver el doc-comment de ese modulo para el porque de la diferencia).
 #[derive(Debug, Clone)]
-struct EventStateResolved {
-    occurred: bool,
-    first_hit_time: Option<f64>,
+pub(crate) struct EventStateResolved {
+    pub(crate) occurred: bool,
+    pub(crate) first_hit_time: Option<f64>,
     /// Indexado por `observable_slot` (paralelo a `CompiledPayoff::observable_slots`); `None`
     /// hasta que el evento dispara y captura ese observable.
-    captured_values: Vec<Option<f64>>,
+    pub(crate) captured_values: Vec<Option<f64>>,
 }
 
 impl EventStateResolved {
-    fn new(n_observables: usize) -> Self {
+    pub(crate) fn new(n_observables: usize) -> Self {
         Self { occurred: false, first_hit_time: None, captured_values: vec![None; n_observables] }
     }
 }
@@ -151,7 +157,7 @@ impl EventStateResolved {
 /// (PLAN_PRODUCTS.md): solo `ContractOp::When`/`ContractOp::Trigger` (settlement `AtHit`) lo
 /// fijan; `Current` lo requiere. `states` es el resultado ya resuelto de
 /// `resolve_trigger_states` -- `EventValue` lo consulta, nunca lo muta.
-fn eval_scalar(
+pub(crate) fn eval_scalar(
     payoff: &CompiledPayoff,
     idx: usize,
     cursor: Option<f64>,
@@ -267,7 +273,11 @@ fn eval_predicate(
 /// `bridge_seed` siembra el `BridgeRng` de esta ruta (ver doc-comment del modulo): irrelevante si
 /// `payoff` no contiene ningun `Trigger` con `Monitoring::ContinuousApproximation` (nunca se
 /// instancia el generador en ese caso).
-fn resolve_trigger_states(payoff: &CompiledPayoff, path: &dyn ObservablePath, bridge_seed: u64) -> Vec<EventStateResolved> {
+pub(crate) fn resolve_trigger_states(
+    payoff: &CompiledPayoff,
+    path: &dyn ObservablePath,
+    bridge_seed: u64,
+) -> Vec<EventStateResolved> {
     let mut bridge_rng = BridgeRng::new(bridge_seed);
     let n_observables = payoff.observable_slots.len();
     let mut states: Vec<EventStateResolved> =
@@ -378,7 +388,7 @@ fn resolve_trigger_states(payoff: &CompiledPayoff, path: &dyn ObservablePath, br
 
 /// Evalua `payoff.contract_ops[idx]`, acumulando cashflows en `out`. `Give`/`Scale` aplican su
 /// transformacion a TODOS los cashflows que su hijo produjo (ADR-P0-02), no solo al primero.
-fn eval_contract(
+pub(crate) fn eval_contract(
     payoff: &CompiledPayoff,
     idx: usize,
     cursor: Option<f64>,
@@ -432,6 +442,27 @@ fn eval_contract(
                 eval_contract(payoff, *on_miss, cursor, path, states, out);
             }
         }
+        // Aplica una decision de ejercicio YA RESUELTA (Fase 9, PLAN_PRODUCTS.md §10): este
+        // interprete NUNCA decide por si mismo (nada de comparar exercise_value contra un valor
+        // intrinseco de continuacion aqui -- eso seria exactamente el look-ahead/miopia que §10
+        // prohibe). `states[*event]` debe venir ya resuelto por `crate::payoff::lsm` (via
+        // Longstaff-Schwartz sobre todo el lote de rutas) antes de llamar a esta funcion; un
+        // `Exercise` evaluado con el estado por defecto (`occurred=false`, nunca ejercido) que
+        // nadie resolvio explicitamente simplemente cae en `continuation` -- silenciosamente
+        // "correcto" pero sin sentido economico, de ahi que `crate::payoff::api` nunca llame a
+        // `evaluate`/`evaluate_with_events` (que siembran estados en blanco) sobre un programa con
+        // `Exercise`, solo a las funciones dedicadas de `api::price_payoff_exercise_gbm_q`.
+        ContractOp::Exercise { event, exercise_value, continuation, .. } => {
+            let state = &states[*event];
+            if state.occurred {
+                let t = state
+                    .first_hit_time
+                    .expect("payoff: Exercise 'occurred' sin first_hit_time (estado de decision inconsistente)");
+                out.push(PathCashflow { payment_time: t, amount: eval_scalar(payoff, *exercise_value, Some(t), path, states) });
+            } else {
+                eval_contract(payoff, *continuation, cursor, path, states, out);
+            }
+        }
     }
 }
 
@@ -473,6 +504,24 @@ pub fn evaluate_with_events_seeded(
 /// pero sobre el IR compilado).
 pub fn evaluate(payoff: &CompiledPayoff, path: &dyn ObservablePath) -> Vec<PathCashflow> {
     evaluate_with_events(payoff, path).0
+}
+
+/// Interpreta `payoff` sobre una unica ruta usando un `states` YA RESUELTO por el llamante --
+/// unica forma valida de evaluar un programa con `ContractOp::Exercise` (Fase 9, PLAN_PRODUCTS.md
+/// §10, ver el doc-comment de ese caso en `eval_contract`): a diferencia de
+/// `evaluate`/`evaluate_with_events`, que siembran `states` en blanco via
+/// `resolve_trigger_states` (una decision de ejercicio nunca ocurre ahi), aqui `states` debe
+/// combinar el resultado de `resolve_trigger_states` (para cualquier `Trigger` del arbol) con la
+/// decision de `crate::payoff::lsm::resolve_exercise_decisions` para cada `Exercise` -- ver
+/// `crate::payoff::api::price_payoff_exercise_gbm_q`, la unica llamante de esta funcion.
+pub(crate) fn evaluate_with_resolved_states(
+    payoff: &CompiledPayoff,
+    path: &dyn ObservablePath,
+    states: &[EventStateResolved],
+) -> Vec<PathCashflow> {
+    let mut out = Vec::new();
+    eval_contract(payoff, payoff.root, None, path, states, &mut out);
+    out
 }
 
 #[cfg(test)]
@@ -821,6 +870,51 @@ mod tests {
             let (_ledger, events) = evaluate_with_events_seeded(&payoff, &path, trial);
             assert!(!events[0].occurred, "no deberia haber bridge sin un extremo previo (trial={trial})");
         }
+    }
+
+    // Exercise (PLAN_PRODUCTS.md §10, Fase 9): estos tests fijan la semantica de APLICAR una
+    // decision ya resuelta (nunca de tomarla -- eso es `payoff::lsm`, probado aparte), inyectando
+    // `EventStateResolved` a mano igual que hace `evaluate_with_resolved_states`.
+    const EXERCISE_PUT_JSON: &str = r#"{
+        "schema": "engine.payoff/v1", "id": "PUT_BERMUDA",
+        "contract": {
+            "type": "exercise", "id": "EX",
+            "dates": [0.5, 1.0],
+            "exercise_value": {"type": "max",
+                "left": {"type": "sub",
+                    "left": {"type": "constant", "value": 100.0},
+                    "right": {"type": "current", "observable": "EQ.SPOT.XYZ"}},
+                "right": {"type": "constant", "value": 0.0}},
+            "continuation": {"type": "when", "time": 1.0, "child": {"type": "cashflow", "currency": "USD",
+                "amount": {"type": "max",
+                    "left": {"type": "sub",
+                        "left": {"type": "constant", "value": 100.0},
+                        "right": {"type": "fixing", "observable": "EQ.SPOT.XYZ", "time": 1.0}},
+                    "right": {"type": "constant", "value": 0.0}}}}
+        }
+    }"#;
+
+    #[test]
+    fn exercise_with_no_decision_falls_back_to_continuation() {
+        let payoff = compile(EXERCISE_PUT_JSON).unwrap();
+        let path = StepPath(vec![(0.5, 90.0), (1.0, 80.0)]);
+        let states = vec![EventStateResolved::new(payoff.observable_slots.len())]; // occurred=false
+        let ledger = evaluate_with_resolved_states(&payoff, &path, &states);
+        // Nunca ejercido: paga el intrinseco de la 'continuation' (put europea a T=1) tal cual.
+        assert_eq!(ledger, vec![PathCashflow { payment_time: 1.0, amount: 20.0 }]);
+    }
+
+    #[test]
+    fn exercise_with_a_decision_pays_the_exercise_value_at_that_date_and_ignores_continuation() {
+        let payoff = compile(EXERCISE_PUT_JSON).unwrap();
+        let path = StepPath(vec![(0.5, 60.0), (1.0, 95.0)]);
+        let mut state = EventStateResolved::new(payoff.observable_slots.len());
+        state.occurred = true;
+        state.first_hit_time = Some(0.5);
+        let ledger = evaluate_with_resolved_states(&payoff, &path, &[state]);
+        // Ejercido en t=0.5 (spot=60): paga max(100-60,0)=40 en t=0.5, nunca llega a evaluar
+        // 'continuation' (que en t=1.0, spot=95, pagaria 5 -- valor claramente distinto).
+        assert_eq!(ledger, vec![PathCashflow { payment_time: 0.5, amount: 40.0 }]);
     }
 
     #[test]

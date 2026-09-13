@@ -21,8 +21,9 @@ use crate::exposure::ExposureProfile;
 use crate::mc::{self, McEstimate};
 use crate::models::gbm::Gbm;
 use crate::payoff::compile::compile;
-use crate::payoff::eval::{evaluate_with_events_seeded, ObservablePath};
+use crate::payoff::eval::{evaluate_with_events_seeded, evaluate_with_resolved_states, resolve_trigger_states, ObservablePath};
 use crate::payoff::ir::CompiledPayoff;
+use crate::payoff::lsm::{self, ExerciseDateDiagnostic};
 use burn::tensor::backend::Backend;
 use burn::tensor::{Tensor, TensorData};
 
@@ -164,6 +165,80 @@ pub fn price_payoff_gbm_q(
     }
 
     Ok(mc::aggregate(&discounted_samples, mc::Z_95))
+}
+
+/// Precio bajo Q de un programa con exactamente un `ContractOp::Exercise` mas el diagnostico de la
+/// politica de ejercicio que produjo ese precio (PLAN_PRODUCTS.md §10, Fase 9): "politica de
+/// ejercicio exportable", criterio de aceptacion explicito de esta fase. `price` tiene la misma
+/// forma que el resultado de `price_payoff_gbm_q` (media/error estandar/intervalo de confianza del
+/// estimador Monte Carlo); `dates` documenta, por cada fecha de decision (orden ascendente), cuantas
+/// rutas estaban in-the-money, los coeficientes de la regresion de continuacion ajustada (si pudo
+/// ajustarse) y que fraccion de esas rutas ejercito en esa fecha -- ver `lsm::ExerciseDateDiagnostic`.
+#[derive(Debug)]
+pub struct ExercisePolicyResult {
+    pub price: McEstimate,
+    pub dates: Vec<ExerciseDateDiagnostic>,
+}
+
+/// Precio bajo Q (Monte Carlo, GBM, Longstaff-Schwartz) de un `PayoffProgram` con un derecho de
+/// ejercicio americano/bermuda (PLAN_PRODUCTS.md §10, Fase 9). Mismos parametros/preflight de
+/// observable que `price_payoff_gbm_q`, mas `lsm::find_single_exercise_node` (el contrato debe
+/// contener EXACTAMENTE un `ContractOp::Exercise`, ver el doc-comment de `lsm` para el porque de
+/// esa restriccion) -- todo ANTES de simular una sola ruta.
+///
+/// Dos pasadas sobre las mismas `n_paths` rutas GBM: (1) `lsm::resolve_exercise_decisions` decide,
+/// por Longstaff-Schwartz, en que fecha (si alguna) ejercita cada ruta; (2) cada ruta se
+/// reinterpreta con esa decision ya fijada (`eval::evaluate_with_resolved_states`, que APLICA la
+/// decision sin volver a tomarla -- ver el doc-comment de `ContractOp::Exercise` en `eval`) y se
+/// descuenta/agrega igual que `price_payoff_gbm_q`. Determinista dado `seed` (ninguna de las dos
+/// pasadas consume aleatoriedad propia mas alla de la simulacion GBM inicial): dos llamadas con el
+/// mismo `seed` producen el mismo precio y el mismo diagnostico -- "decisiones reproducibles con
+/// seed", criterio de aceptacion de esta fase.
+#[allow(clippy::too_many_arguments)]
+pub fn price_payoff_exercise_gbm_q(
+    spec_json: &str,
+    observable: &str,
+    s0: f64,
+    r: f64,
+    q: f64,
+    sigma: f64,
+    n_paths: u64,
+    seed: u64,
+) -> Result<ExercisePolicyResult, String> {
+    let payoff = compile(spec_json)?;
+    check_single_observable(&payoff, observable, n_paths)?;
+    let node = lsm::find_single_exercise_node(&payoff)?;
+    let (times, columns) = simulate_gbm_columns(&payoff, s0, r, q, sigma, n_paths, seed)?;
+    let n_paths_usize = n_paths as usize;
+
+    // Materializar los valores de TODAS las rutas antes de construir los `SinglePath` (que solo
+    // guardan referencias): a diferencia de `price_payoff_gbm_q`, aqui hace falta tener todas las
+    // rutas vivas SIMULTANEAMENTE (la regresion de cada fecha es transversal sobre el lote
+    // completo, no se puede procesar ruta a ruta de forma independiente).
+    let all_values: Vec<Vec<f64>> =
+        (0..n_paths_usize).map(|path_idx| columns.iter().map(|col| col[path_idx]).collect()).collect();
+    let paths: Vec<SinglePath> = all_values.iter().map(|values| SinglePath { times: &times, values, sigma }).collect();
+
+    let trigger_states_by_path: Vec<_> = paths
+        .iter()
+        .enumerate()
+        .map(|(path_idx, path)| resolve_trigger_states(&payoff, path, bridge_seed_for_path(seed, path_idx)))
+        .collect();
+
+    let (decisions, diagnostics) =
+        lsm::resolve_exercise_decisions(&payoff, &node, &paths, &trigger_states_by_path, r);
+
+    let mut discounted_samples = Vec::with_capacity(n_paths_usize);
+    for path_idx in 0..n_paths_usize {
+        let mut states = trigger_states_by_path[path_idx].clone();
+        states[node.event].occurred = decisions[path_idx].is_some();
+        states[node.event].first_hit_time = decisions[path_idx];
+        let ledger = evaluate_with_resolved_states(&payoff, &paths[path_idx], &states);
+        let present_value: f64 = ledger.iter().map(|cf| cf.amount * (-r * cf.payment_time).exp()).sum();
+        discounted_samples.push(present_value);
+    }
+
+    Ok(ExercisePolicyResult { price: mc::aggregate(&discounted_samples, mc::Z_95), dates: diagnostics })
 }
 
 /// Probabilidad bajo Q de que el evento `event` (un `Trigger` de `spec_json`, identificado por su
@@ -732,6 +807,223 @@ mod tests {
         for (ee, pfe) in profile.ee.iter().zip(profile.pfe_95.iter()) {
             assert!(*ee >= 0.0, "ee={ee}");
             assert!(*pfe >= *ee, "pfe={pfe} deberia dominar a ee={ee}");
+        }
+    }
+
+    // Exercise / Longstaff-Schwartz (PLAN_PRODUCTS.md §10, Fase 9). `dates` son fechas de
+    // ejercicio anticipado ESTRICTAMENTE anteriores a `maturity` -- `continuation` ya paga el
+    // intrinseco europeo en `maturity`, asi que incluir `maturity` en `dates` seria redundante
+    // (la decision ahi coincidiria siempre con la propia continuacion).
+    fn bermuda_contract_json(event_id: &str, kind: &str, strike: f64, maturity: f64, dates: &[f64]) -> String {
+        let dates_json = dates.iter().map(|t| t.to_string()).collect::<Vec<_>>().join(",");
+        let (ev_left, ev_right) = match kind {
+            "put" => (
+                r#"{"type": "constant", "value": {strike}}"#,
+                r#"{"type": "current", "observable": "EQ.SPOT.XYZ"}"#,
+            ),
+            "call" => (
+                r#"{"type": "current", "observable": "EQ.SPOT.XYZ"}"#,
+                r#"{"type": "constant", "value": {strike}}"#,
+            ),
+            other => panic!("kind desconocido: {other}"),
+        };
+        let (cont_left, cont_right) = match kind {
+            "put" => (
+                r#"{"type": "constant", "value": {strike}}"#,
+                r#"{"type": "fixing", "observable": "EQ.SPOT.XYZ", "time": {maturity}}"#,
+            ),
+            "call" => (
+                r#"{"type": "fixing", "observable": "EQ.SPOT.XYZ", "time": {maturity}}"#,
+                r#"{"type": "constant", "value": {strike}}"#,
+            ),
+            other => panic!("kind desconocido: {other}"),
+        };
+        format!(
+            r#"{{
+                "type": "exercise", "id": "{event_id}",
+                "dates": [{dates_json}],
+                "exercise_value": {{"type": "max", "left": {ev_left}, "right": {ev_right}}},
+                "continuation": {{"type": "when", "time": {maturity}, "child": {{"type": "cashflow",
+                    "currency": "USD",
+                    "amount": {{"type": "max", "left": {cont_left}, "right": {cont_right}}}}}}}
+            }}"#
+        )
+        .replace("{strike}", &strike.to_string())
+        .replace("{maturity}", &maturity.to_string())
+    }
+
+    fn bermuda_json(kind: &str, strike: f64, maturity: f64, dates: &[f64]) -> String {
+        let contract = bermuda_contract_json("EX", kind, strike, maturity, dates);
+        format!(r#"{{"schema": "engine.payoff/v1", "id": "BERMUDA_{kind}", "contract": {contract}}}"#)
+    }
+
+    fn european_vanilla_json(kind: &str, strike: f64, maturity: f64) -> String {
+        let (left, right) = match kind {
+            "put" => (
+                r#"{"type": "constant", "value": {strike}}"#,
+                r#"{"type": "fixing", "observable": "EQ.SPOT.XYZ", "time": {maturity}}"#,
+            ),
+            "call" => (
+                r#"{"type": "fixing", "observable": "EQ.SPOT.XYZ", "time": {maturity}}"#,
+                r#"{"type": "constant", "value": {strike}}"#,
+            ),
+            other => panic!("kind desconocido: {other}"),
+        };
+        format!(
+            r#"{{"schema": "engine.payoff/v1", "id": "EUROPEAN_{kind}", "contract": {{"type": "when",
+                "time": {maturity}, "child": {{"type": "cashflow", "currency": "USD",
+                "amount": {{"type": "max", "left": {left}, "right": {right}}}}}}}}}"#
+        )
+        .replace("{strike}", &strike.to_string())
+        .replace("{maturity}", &maturity.to_string())
+    }
+
+    #[test]
+    fn exercise_preflight_rejects_a_contract_without_any_exercise_node() {
+        let spec = CALL_JSON_TEMPLATE.replace("{maturity}", "1.0").replace("{strike}", "100.0");
+        let err = price_payoff_exercise_gbm_q(&spec, "EQ.SPOT.XYZ", 100.0, 0.05, 0.0, 0.2, 1_000, 7)
+            .expect_err("un contrato sin Exercise debe fallar en preflight");
+        assert!(err.contains("Exercise"));
+    }
+
+    #[test]
+    fn exercise_preflight_rejects_more_than_one_exercise_node() {
+        let leg1 = bermuda_contract_json("EX1", "put", 100.0, 1.0, &[0.5]);
+        let leg2 = bermuda_contract_json("EX2", "put", 100.0, 1.0, &[0.5]);
+        let spec = format!(
+            r#"{{"schema": "engine.payoff/v1", "id": "TWO_EXERCISE", "contract": {{"type": "both",
+                "children": [{leg1}, {leg2}]}}}}"#
+        );
+        let err = price_payoff_exercise_gbm_q(&spec, "EQ.SPOT.XYZ", 100.0, 0.05, 0.0, 0.2, 1_000, 7)
+            .expect_err("dos nodos Exercise en el mismo contrato deben rechazarse (alcance de Fase 9)");
+        assert!(err.contains("Exercise"));
+    }
+
+    #[test]
+    fn bermuda_put_price_is_at_least_the_european_put_price_without_dividends() {
+        // PLAN_PRODUCTS.md §12 Fase 9, criterio de aceptacion explicito: "americana >= europea
+        // para put sin dividendos" -- el derecho de ejercicio anticipado nunca puede valer menos
+        // que no tenerlo.
+        let _guard = crate::rng_test_lock::LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (s0, strike, r, q, sigma, maturity) = (100.0, 100.0, 0.05, 0.0, 0.2, 1.0);
+        let (n_paths, seed) = (200_000, 21);
+
+        let european_spec = european_vanilla_json("put", strike, maturity);
+        let bermuda_spec = bermuda_json("put", strike, maturity, &[0.25, 0.5, 0.75]);
+
+        let european = price_payoff_gbm_q(&european_spec, "EQ.SPOT.XYZ", s0, r, q, sigma, n_paths, seed).unwrap();
+        let bermuda =
+            price_payoff_exercise_gbm_q(&bermuda_spec, "EQ.SPOT.XYZ", s0, r, q, sigma, n_paths, seed + 1).unwrap();
+
+        let tolerance = 8.0 * (european.std_error + bermuda.price.std_error);
+        assert!(
+            bermuda.price.mean + tolerance >= european.mean,
+            "bermuda={} (se={}) deberia ser >= europea={} (se={})",
+            bermuda.price.mean,
+            bermuda.price.std_error,
+            european.mean,
+            european.std_error
+        );
+    }
+
+    #[test]
+    fn bermuda_put_price_increases_as_more_exercise_dates_are_added() {
+        // "convergencia por fechas": mas oportunidades de ejercicio anticipado nunca reducen el
+        // valor de la opcion (mismo argumento de monotonia que las barreras de Fase 6, aqui sobre
+        // el numero de fechas de decision en vez del numero de puntos de monitorizacion).
+        let _guard = crate::rng_test_lock::LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (s0, strike, r, q, sigma, maturity) = (100.0, 100.0, 0.05, 0.0, 0.2, 1.0);
+        let (n_paths, seed) = (200_000, 23);
+
+        let sparse_spec = bermuda_json("put", strike, maturity, &[0.5]);
+        let dense_spec = bermuda_json("put", strike, maturity, &[0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]);
+
+        let sparse =
+            price_payoff_exercise_gbm_q(&sparse_spec, "EQ.SPOT.XYZ", s0, r, q, sigma, n_paths, seed).unwrap();
+        let dense = price_payoff_exercise_gbm_q(&dense_spec, "EQ.SPOT.XYZ", s0, r, q, sigma, n_paths, seed).unwrap();
+
+        let tolerance = 8.0 * (sparse.price.std_error + dense.price.std_error);
+        assert!(
+            dense.price.mean + tolerance >= sparse.price.mean,
+            "dense={} (se={}) deberia ser >= sparse={} (se={})",
+            dense.price.mean,
+            dense.price.std_error,
+            sparse.price.mean,
+            sparse.price.std_error
+        );
+    }
+
+    #[test]
+    fn bermuda_call_price_matches_the_european_call_price_without_dividends() {
+        // Resultado clasico (sin dividendos, sin costes de carry negativos): nunca es optimo
+        // ejercer una call americana anticipadamente -- la politica de Longstaff-Schwartz deberia
+        // descubrirlo por si misma y el precio bermuda/americano debe coincidir con el europeo
+        // dentro de tolerancia estadistica (no solo >=).
+        let _guard = crate::rng_test_lock::LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (s0, strike, r, q, sigma, maturity) = (100.0, 100.0, 0.05, 0.0, 0.2, 1.0);
+        let (n_paths, seed) = (200_000, 29);
+
+        let european_spec = european_vanilla_json("call", strike, maturity);
+        let bermuda_spec = bermuda_json("call", strike, maturity, &[0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]);
+
+        let european = price_payoff_gbm_q(&european_spec, "EQ.SPOT.XYZ", s0, r, q, sigma, n_paths, seed).unwrap();
+        let bermuda =
+            price_payoff_exercise_gbm_q(&bermuda_spec, "EQ.SPOT.XYZ", s0, r, q, sigma, n_paths, seed + 1).unwrap();
+
+        let tolerance = 8.0 * (european.std_error + bermuda.price.std_error);
+        assert!(
+            (bermuda.price.mean - european.mean).abs() < tolerance,
+            "bermuda={} (se={}) europea={} (se={}) tol={tolerance}",
+            bermuda.price.mean,
+            bermuda.price.std_error,
+            european.mean,
+            european.std_error
+        );
+    }
+
+    #[test]
+    fn exercise_decisions_are_reproducible_given_the_same_seed() {
+        // "decisiones reproducibles con seed": misma seed, mismo precio Y mismo diagnostico de
+        // politica -- ninguna de las dos pasadas (simulacion, regresion) consume aleatoriedad
+        // fuera de la sembrada explicitamente. El guard es necesario aqui por la MISMA razon que
+        // en el resto de este archivo (ver el doc-comment de rng_test_lock): CpuBackend::seed
+        // fija un estado GLOBAL de Burn, asi que dos llamadas que dependen de la MISMA seed deben
+        // quedar serializadas frente a cualquier otro test de este binario que tambien siembre el
+        // backend en paralelo -- sin el guard, esta prueba compara dos ejecuciones que en
+        // realidad NO compartieron el mismo estado de RNG (la propia causa de la "no
+        // reproducibilidad" que fallaria aqui, no un bug del pricer).
+        let _guard = crate::rng_test_lock::LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (s0, strike, r, q, sigma, maturity) = (100.0, 100.0, 0.05, 0.0, 0.2, 1.0);
+        let spec = bermuda_json("put", strike, maturity, &[0.25, 0.5, 0.75]);
+        let (n_paths, seed) = (20_000, 41);
+
+        let first = price_payoff_exercise_gbm_q(&spec, "EQ.SPOT.XYZ", s0, r, q, sigma, n_paths, seed).unwrap();
+        let second = price_payoff_exercise_gbm_q(&spec, "EQ.SPOT.XYZ", s0, r, q, sigma, n_paths, seed).unwrap();
+
+        assert_eq!(first.price.mean, second.price.mean);
+        assert_eq!(first.price.std_error, second.price.std_error);
+        assert_eq!(first.dates.len(), second.dates.len());
+        for (a, b) in first.dates.iter().zip(second.dates.iter()) {
+            assert_eq!(a.date, b.date);
+            assert_eq!(a.n_in_the_money, b.n_in_the_money);
+            assert_eq!(a.exercised_fraction, b.exercised_fraction);
+        }
+    }
+
+    #[test]
+    fn exercise_policy_diagnostics_are_reported_in_ascending_date_order_with_plausible_fields() {
+        let (s0, strike, r, q, sigma, maturity) = (100.0, 100.0, 0.05, 0.0, 0.2, 1.0);
+        let spec = bermuda_json("put", strike, maturity, &[0.25, 0.5, 0.75]);
+
+        let result = price_payoff_exercise_gbm_q(&spec, "EQ.SPOT.XYZ", s0, r, q, sigma, 20_000, 7).unwrap();
+
+        assert_eq!(result.dates.len(), 3);
+        assert_eq!(result.dates.iter().map(|d| d.date).collect::<Vec<_>>(), vec![0.25, 0.5, 0.75]);
+        for d in &result.dates {
+            assert!(d.exercised_fraction >= 0.0 && d.exercised_fraction <= 1.0, "frac={}", d.exercised_fraction);
+            if d.regression_coeffs.is_none() {
+                assert_eq!(d.exercised_fraction, 0.0);
+            }
         }
     }
 }
