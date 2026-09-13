@@ -128,4 +128,54 @@ TEST(RiskNeutralGbmBarrierMeasureTest, UpAndInPlusUpAndOutReproducesVanillaCallU
         << "ui=" << ui_result.mean << " uo=" << uo_result.mean << " vanilla=" << vanilla_result.mean;
 }
 
+// PLAN_PRODUCTS.md §12 Fase 6 ("hit probability Q como medida separada del PV"), autoria del AST
+// desde C++.
+TEST(HitProbabilityGbmMeasureTest, ProbabilityIsBetweenZeroAndOneAndDecreasesAsBarrierMovesAway) {
+    const pf::ObservableId spot{"EQ.SPOT.XYZ"};
+    const double s0 = 100.0, r = 0.05, q = 0.0, sigma = 0.2;
+    std::vector<pf::TimePoint> monitoring_times;
+    for (int i = 1; i <= 50; ++i) monitoring_times.push_back(tp(i / 50.0));
+
+    // `compile()` en Rust exige al menos un Cashflow (para inferir la moneda de reporting, ver
+    // compile.rs) aunque HitProbability no lo use -- un Cashflow de importe 0 en on_hit lo
+    // satisface sin afectar la medida.
+    auto up_and_in_event = [&](double barrier) {
+        return pf::templates::up_and_in(
+            pf::EventId{"UI"}, spot, barrier, monitoring_times, pf::cashflow(pf::Currency{"USD"}, pf::constant(0.0))
+        );
+    };
+
+    engine::GbmModel model = make_gbm(s0, r, q, sigma, spot.value);
+    const std::uint64_t n_paths = 200'000;
+
+    pf::PayoffProduct near_product("UI_NEAR", up_and_in_event(105.0));
+    pf::PayoffProduct far_product("UI_FAR", up_and_in_event(140.0));
+
+    pf::HitProbabilityResult near_result =
+        pf::hit_probability_gbm(*near_product.payoff_program(), model, pf::EventId{"UI"}, n_paths, 7);
+    pf::HitProbabilityResult far_result =
+        pf::hit_probability_gbm(*far_product.payoff_program(), model, pf::EventId{"UI"}, n_paths, 7);
+
+    EXPECT_EQ(near_result.measure, pf::ProbabilityMeasure::RiskNeutralQ);
+    EXPECT_GT(near_result.probability, 0.0);
+    EXPECT_LT(near_result.probability, 1.0);
+    EXPECT_GT(far_result.probability, 0.0);
+    EXPECT_LT(far_result.probability, 1.0);
+
+    double tolerance = 8.0 * (near_result.std_error + far_result.std_error);
+    EXPECT_GT(near_result.probability, far_result.probability + tolerance)
+        << "near=" << near_result.probability << " far=" << far_result.probability;
+}
+
+TEST(HitProbabilityGbmMeasureTest, RejectsAnEventThatDoesNotExistInTheContract) {
+    const pf::ObservableId spot{"EQ.SPOT.XYZ"};
+    pf::PayoffProduct product("TEST_CALL", european_call(spot, 100.0, 1.0));
+    engine::GbmModel model = make_gbm(100.0, 0.05, 0.0, 0.2, spot.value);
+
+    EXPECT_THROW(
+        pf::hit_probability_gbm(*product.payoff_program(), model, pf::EventId{"NOT_A_REAL_EVENT"}, 1'000, 7),
+        pf::EvaluationError
+    );
+}
+
 } // namespace

@@ -20,7 +20,8 @@ use crate::backend::CpuBackend;
 use crate::mc::{self, McEstimate};
 use crate::models::gbm::Gbm;
 use crate::payoff::compile::compile;
-use crate::payoff::eval::{evaluate, ObservablePath};
+use crate::payoff::eval::{evaluate_with_events, ObservablePath};
+use crate::payoff::ir::CompiledPayoff;
 use burn::tensor::backend::Backend;
 use burn::tensor::{Tensor, TensorData};
 
@@ -49,6 +50,55 @@ impl ObservablePath for SinglePath<'_> {
     }
 }
 
+/// Preflight comun a `price_payoff_gbm_q`/`hit_probability_gbm_q`: `payoff` no referencia ningun
+/// observable distinto de `observable` (el UNICO que este `Gbm` genera, PLAN_PRODUCTS.md §6
+/// "`ModelCapabilities::generated_observables`") y `n_paths > 0`. `Err` ANTES de simular una sola
+/// ruta -- criterio de aceptacion explicito de Fase 5.
+fn check_single_observable(payoff: &CompiledPayoff, observable: &str, n_paths: u64) -> Result<(), String> {
+    for used in &payoff.observable_slots {
+        if used != observable {
+            return Err(format!(
+                "payoff: observable '{used}' no generado por este modelo GBM (unico observable soportado: '{observable}')"
+            ));
+        }
+    }
+    if n_paths == 0 {
+        return Err("payoff: n_paths debe ser > 0".to_string());
+    }
+    Ok(())
+}
+
+/// Simula bajo GBM el unico observable de `payoff` en `payoff.required_times()` y devuelve
+/// `(times, columns)`: `columns[i][path]` es el valor de ese observable en `times[i]` para la
+/// ruta `path`. Compartido por `price_payoff_gbm_q`/`hit_probability_gbm_q` -- ambas interpretan
+/// el mismo `CompiledPayoff` sobre las mismas rutas, solo difiere que agregan al final (cashflow
+/// descontado vs. indicador de hit).
+#[allow(clippy::too_many_arguments)]
+fn simulate_gbm_columns(
+    payoff: &CompiledPayoff,
+    s0: f64,
+    r: f64,
+    q: f64,
+    sigma: f64,
+    n_paths: u64,
+    seed: u64,
+) -> Result<(Vec<f64>, Vec<Vec<f64>>), String> {
+    let times = payoff.required_times();
+    if times.is_empty() {
+        return Err(
+            "payoff: el contrato no depende de ningun instante de mercado (nada que simular bajo Q)".to_string(),
+        );
+    }
+
+    let device = burn::tensor::Device::<CpuBackend>::default();
+    CpuBackend::seed(&device, seed);
+    let model = Gbm::new(scalar(s0, &device), scalar(r, &device), scalar(q, &device), scalar(sigma, &device));
+    let simulated = model.simulate_at_times(&times, n_paths as usize, &device);
+    let columns: Vec<Vec<f64>> =
+        simulated.into_iter().map(|t| t.into_data().to_vec::<f64>().unwrap()).collect();
+    Ok((times, columns))
+}
+
 /// Precio bajo Q (`E_Q[cashflows descontados]`) de un `PayoffProgram` serializado en
 /// `spec_json` (`engine.payoff/v1`) bajo GBM (`s0`/`r`/`q`/`sigma`), mas error estandar e
 /// intervalo de confianza del estimador Monte Carlo (`crate::mc::McEstimate`).
@@ -69,43 +119,61 @@ pub fn price_payoff_gbm_q(
     seed: u64,
 ) -> Result<McEstimate, String> {
     let payoff = compile(spec_json)?;
-
-    for used in &payoff.observable_slots {
-        if used != observable {
-            return Err(format!(
-                "payoff: observable '{used}' no generado por este modelo GBM (unico observable soportado: '{observable}')"
-            ));
-        }
-    }
-    if n_paths == 0 {
-        return Err("payoff: n_paths debe ser > 0".to_string());
-    }
-
-    let times = payoff.required_times();
-    if times.is_empty() {
-        return Err(
-            "payoff: el contrato no depende de ningun instante de mercado (nada que simular bajo Q)".to_string(),
-        );
-    }
-
-    let device = burn::tensor::Device::<CpuBackend>::default();
-    CpuBackend::seed(&device, seed);
-    let model = Gbm::new(scalar(s0, &device), scalar(r, &device), scalar(q, &device), scalar(sigma, &device));
+    check_single_observable(&payoff, observable, n_paths)?;
+    let (times, columns) = simulate_gbm_columns(&payoff, s0, r, q, sigma, n_paths, seed)?;
     let n_paths_usize = n_paths as usize;
-    let simulated = model.simulate_at_times(&times, n_paths_usize, &device);
-    let columns: Vec<Vec<f64>> =
-        simulated.into_iter().map(|t| t.into_data().to_vec::<f64>().unwrap()).collect();
 
     let mut discounted_samples = Vec::with_capacity(n_paths_usize);
     for path_idx in 0..n_paths_usize {
         let values: Vec<f64> = columns.iter().map(|col| col[path_idx]).collect();
         let path = SinglePath { times: &times, values: &values };
-        let ledger = evaluate(&payoff, &path);
+        let (ledger, _events) = evaluate_with_events(&payoff, &path);
         let present_value: f64 = ledger.iter().map(|cf| cf.amount * (-r * cf.payment_time).exp()).sum();
         discounted_samples.push(present_value);
     }
 
     Ok(mc::aggregate(&discounted_samples, mc::Z_95))
+}
+
+/// Probabilidad bajo Q de que el evento `event` (un `Trigger` de `spec_json`, identificado por su
+/// `EventId`) dispare en la ruta, estimada por Monte Carlo (PLAN_PRODUCTS.md §12 Fase 6: "hit
+/// probability Q como medida separada del PV") -- media (la propia probabilidad, en `[0,1]`),
+/// error estandar e intervalo de confianza de `crate::mc::McEstimate`, agregando el indicador
+/// `1.0`/`0.0` de "el evento ocurrio en esta ruta" sobre las mismas rutas que usaria
+/// `price_payoff_gbm_q` para el mismo `spec_json`/modelo (misma simulacion, agregacion distinta:
+/// nunca se descuenta un indicador de hit, a diferencia de un cashflow).
+#[allow(clippy::too_many_arguments)]
+pub fn hit_probability_gbm_q(
+    spec_json: &str,
+    event: &str,
+    observable: &str,
+    s0: f64,
+    r: f64,
+    q: f64,
+    sigma: f64,
+    n_paths: u64,
+    seed: u64,
+) -> Result<McEstimate, String> {
+    let payoff = compile(spec_json)?;
+    check_single_observable(&payoff, observable, n_paths)?;
+    let event_slot = payoff.event_slots.iter().position(|e| e == event).ok_or_else(|| {
+        format!(
+            "payoff: el evento '{event}' no existe en este contrato (eventos declarados: {:?})",
+            payoff.event_slots
+        )
+    })?;
+    let (times, columns) = simulate_gbm_columns(&payoff, s0, r, q, sigma, n_paths, seed)?;
+    let n_paths_usize = n_paths as usize;
+
+    let mut hit_indicators = Vec::with_capacity(n_paths_usize);
+    for path_idx in 0..n_paths_usize {
+        let values: Vec<f64> = columns.iter().map(|col| col[path_idx]).collect();
+        let path = SinglePath { times: &times, values: &values };
+        let (_ledger, events) = evaluate_with_events(&payoff, &path);
+        hit_indicators.push(if events[event_slot].occurred { 1.0 } else { 0.0 });
+    }
+
+    Ok(mc::aggregate(&hit_indicators, mc::Z_95))
 }
 
 #[cfg(test)]
@@ -300,6 +368,71 @@ mod tests {
 
         let coarse = price_payoff_gbm_q(&coarse_spec, "EQ.SPOT.XYZ", s0, r, q, sigma, n_paths, seed).unwrap();
         let fine = price_payoff_gbm_q(&fine_spec, "EQ.SPOT.XYZ", s0, r, q, sigma, n_paths, seed).unwrap();
+
+        let tolerance = 8.0 * (coarse.std_error + fine.std_error);
+        assert!(
+            fine.mean + tolerance >= coarse.mean,
+            "fine={} (se={}) deberia ser >= coarse={} (se={}) menos ruido estadistico",
+            fine.mean,
+            fine.std_error,
+            coarse.mean,
+            coarse.std_error
+        );
+    }
+
+    // PLAN_PRODUCTS.md §12 Fase 6 ("hit probability Q como medida separada del PV").
+    #[test]
+    fn hit_probability_preflight_rejects_an_event_that_does_not_exist() {
+        let spec = up_and_in_call_json(120.0, 100.0, 1.0, &[0.25, 0.5, 0.75, 1.0]);
+        let err = hit_probability_gbm_q(&spec, "NOT_A_REAL_EVENT", "EQ.SPOT.XYZ", 100.0, 0.05, 0.0, 0.2, 1_000, 7)
+            .expect_err("un evento que no existe en el contrato debe fallar en preflight");
+        assert!(err.contains("NOT_A_REAL_EVENT"));
+    }
+
+    #[test]
+    fn hit_probability_is_between_zero_and_one_and_decreases_as_the_barrier_moves_away() {
+        let _guard = crate::rng_test_lock::LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (s0, strike, r, q, sigma, maturity) = (100.0, 100.0, 0.05, 0.0, 0.2, 1.0);
+        let monitoring_times: Vec<f64> = (1..=50).map(|i| i as f64 / 50.0).collect();
+        let (n_paths, seed) = (200_000, 7);
+
+        // Barrera mas cercana al spot (105, 5% OTM) se toca con mas probabilidad que una mas
+        // lejana (140, 40% OTM) -- sanity check direccional, no una cota analitica.
+        let near_spec = up_and_in_call_json(105.0, strike, maturity, &monitoring_times);
+        let far_spec = up_and_in_call_json(140.0, strike, maturity, &monitoring_times);
+
+        let near = hit_probability_gbm_q(&near_spec, "UI", "EQ.SPOT.XYZ", s0, r, q, sigma, n_paths, seed).unwrap();
+        let far = hit_probability_gbm_q(&far_spec, "UI", "EQ.SPOT.XYZ", s0, r, q, sigma, n_paths, seed).unwrap();
+
+        assert!(near.mean > 0.0 && near.mean < 1.0, "near={}", near.mean);
+        assert!(far.mean > 0.0 && far.mean < 1.0, "far={}", far.mean);
+        let tolerance = 8.0 * (near.std_error + far.std_error);
+        assert!(
+            near.mean > far.mean + tolerance,
+            "near={} (se={}) deberia ser claramente mayor que far={} (se={})",
+            near.mean,
+            near.std_error,
+            far.mean,
+            far.std_error
+        );
+    }
+
+    #[test]
+    fn hit_probability_increases_as_the_monitoring_grid_is_refined() {
+        // Mismo argumento de monotonia que `up_and_in_price_increases_as_the_monitoring_grid_is_refined`,
+        // pero sobre la probabilidad de hit en si misma en vez del precio derivado de ella.
+        let _guard = crate::rng_test_lock::LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (s0, strike, barrier, r, q, sigma, maturity) = (100.0, 100.0, 120.0, 0.05, 0.0, 0.2, 1.0);
+        let (n_paths, seed) = (300_000, 11);
+
+        let coarse_times: Vec<f64> = vec![0.25, 0.5, 0.75, 1.0];
+        let fine_times: Vec<f64> = (1..=50).map(|i| i as f64 / 50.0).collect();
+
+        let coarse_spec = up_and_in_call_json(barrier, strike, maturity, &coarse_times);
+        let fine_spec = up_and_in_call_json(barrier, strike, maturity, &fine_times);
+
+        let coarse = hit_probability_gbm_q(&coarse_spec, "UI", "EQ.SPOT.XYZ", s0, r, q, sigma, n_paths, seed).unwrap();
+        let fine = hit_probability_gbm_q(&fine_spec, "UI", "EQ.SPOT.XYZ", s0, r, q, sigma, n_paths, seed).unwrap();
 
         let tolerance = 8.0 * (coarse.std_error + fine.std_error);
         assert!(

@@ -131,5 +131,29 @@ QValuationResult risk_neutral_price_gbm(
     const PayoffProgram& program, const GbmModel& model, std::uint64_t n_paths, std::uint64_t seed
 );
 
+// Resultado de HitProbability bajo Q (PLAN_PRODUCTS.md §12 Fase 6: "hit probability Q como
+// medida separada del PV"). Misma forma que `QValuationResult` (espejo de
+// `engine_core::mc::McEstimate` en Rust) pero `probability` es una probabilidad en `[0,1]`, no un
+// valor monetario -- sin `ledger` por el mismo motivo que `QValuationResult` no lo tiene.
+struct HitProbabilityResult {
+    double probability = 0.0;
+    double std_error = 0.0;
+    double ci_low = 0.0;
+    double ci_high = 0.0;
+    std::uint64_t n_paths = 0;
+    ProbabilityMeasure measure = ProbabilityMeasure::RiskNeutralQ;
+};
+
+// Probabilidad bajo Q (Monte Carlo, GBM) de que `event` -- un `Trigger` de `program.contract`,
+// identificado por su `EventId` -- dispare en la ruta (PLAN_PRODUCTS.md §12 Fase 6). Mismo
+// preflight que `risk_neutral_price_gbm` (capacidades del modelo vs. dependencias del contrato);
+// si `event` no nombra ningun `Trigger` del arbol, el error llega desde Rust (compilacion del
+// JSON conoce los `EventId` declarados) y se relanza como `EvaluationError`, igual que un nodo no
+// soportado.
+HitProbabilityResult hit_probability_gbm(
+    const PayoffProgram& program, const GbmModel& model, const EventId& event, std::uint64_t n_paths,
+    std::uint64_t seed
+);
+
 } // namespace payoff
 } // namespace engine

@@ -152,5 +152,49 @@ QValuationResult risk_neutral_price_gbm(
     }
 }
 
+HitProbabilityResult hit_probability_gbm(
+    const PayoffProgram& program, const GbmModel& model, const EventId& event, std::uint64_t n_paths,
+    std::uint64_t seed
+) {
+    std::optional<ModelCapabilities> capabilities = model.capabilities();
+    if (!capabilities.has_value()) {
+        throw ValidationError("GbmModel no declara ModelCapabilities", NodePath::root());
+    }
+    if (capabilities->supported_measures.find(ProbabilityMeasure::RiskNeutralQ) == capabilities->supported_measures.end()) {
+        throw ValidationError("el modelo no soporta la medida RiskNeutralQ", NodePath::root());
+    }
+
+    // Mismo preflight de observables que risk_neutral_price_gbm (PLAN_PRODUCTS.md §12 Fase 5/6):
+    // que event no exista en el contrato es un error de EVALUACION (lo detecta la compilacion
+    // del JSON en Rust, que conoce los EventId declarados), no de preflight de observables.
+    DependencyReport dependencies = DependencyVisitor{}.analyze(program.contract);
+    for (const ObservableId& observable : dependencies.observables) {
+        if (capabilities->generated_observables.find(observable) == capabilities->generated_observables.end()) {
+            throw ValidationError(
+                "observable '" + observable.value + "' no generado por el modelo (preflight de Fase 5)",
+                NodePath::root()
+            );
+        }
+    }
+
+    std::string spec_json = CanonicalVisitor::to_json(program.id, program.contract);
+    try {
+        ffi::PayoffQHitProbabilityResult result = ffi::hit_probability_gbm_q(
+            spec_json, event.value, model.observable().value, model.s0(), model.r(), model.q(), model.sigma(),
+            n_paths, seed
+        );
+        HitProbabilityResult out;
+        out.probability = result.probability;
+        out.std_error = result.std_error;
+        out.ci_low = result.ci_low;
+        out.ci_high = result.ci_high;
+        out.n_paths = result.n_paths;
+        out.measure = ProbabilityMeasure::RiskNeutralQ;
+        return out;
+    } catch (const std::exception& e) {
+        throw EvaluationError(e.what(), NodePath::root());
+    }
+}
+
 } // namespace payoff
 } // namespace engine

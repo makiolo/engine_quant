@@ -51,6 +51,19 @@ mod ffi {
         n_paths: u64,
     }
 
+    /// Probabilidad de hit bajo Q de un evento (`Trigger`) de un `PayoffProgram`
+    /// (PLAN_PRODUCTS.md §12 Fase 6: `engine_core::mc::McEstimate` sobre un indicador 0/1 de "el
+    /// evento ocurrio en esta ruta", ver `engine_core::payoff::hit_probability_gbm_q`). Misma
+    /// forma que `PayoffQPriceResult` pero `mean` es una probabilidad en `[0,1]`, no un valor
+    /// monetario -- struct separado para que el nombre no induzca a leerlo como precio.
+    struct PayoffQHitProbabilityResult {
+        probability: f64,
+        std_error: f64,
+        ci_low: f64,
+        ci_high: f64,
+        n_paths: u64,
+    }
+
     extern "Rust" {
         fn ping() -> f64;
 
@@ -390,6 +403,23 @@ mod ffi {
             n_paths: u64,
             seed: u64,
         ) -> Result<PayoffQPriceResult>;
+
+        // PLAN_PRODUCTS.md §12 Fase 6: probabilidad bajo Q de que `event` (un Trigger del
+        // contrato) dispare, sobre las mismas rutas GBM que usaria `price_payoff_gbm_q` para el
+        // mismo `spec_json`/modelo. Preflight identico (observable no generado) mas "el evento
+        // '{event}' no existe en este contrato" si `event` no coincide con ningun `EventId`
+        // declarado -- ver engine_core::payoff::hit_probability_gbm_q.
+        fn hit_probability_gbm_q(
+            spec_json: String,
+            event: String,
+            observable: String,
+            s0: f64,
+            r: f64,
+            q: f64,
+            sigma: f64,
+            n_paths: u64,
+            seed: u64,
+        ) -> Result<PayoffQHitProbabilityResult>;
     }
 }
 
@@ -848,6 +878,29 @@ fn price_payoff_gbm_q(
         engine_core::payoff::price_payoff_gbm_q(&spec_json, &observable, s0, r, q, sigma, n_paths, seed)?;
     Ok(ffi::PayoffQPriceResult {
         mean: estimate.mean,
+        std_error: estimate.std_error,
+        ci_low: estimate.ci_low,
+        ci_high: estimate.ci_high,
+        n_paths: estimate.n_paths,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn hit_probability_gbm_q(
+    spec_json: String,
+    event: String,
+    observable: String,
+    s0: f64,
+    r: f64,
+    q: f64,
+    sigma: f64,
+    n_paths: u64,
+    seed: u64,
+) -> Result<ffi::PayoffQHitProbabilityResult, String> {
+    let estimate =
+        engine_core::payoff::hit_probability_gbm_q(&spec_json, &event, &observable, s0, r, q, sigma, n_paths, seed)?;
+    Ok(ffi::PayoffQHitProbabilityResult {
+        probability: estimate.mean,
         std_error: estimate.std_error,
         ci_low: estimate.ci_low,
         ci_high: estimate.ci_high,
