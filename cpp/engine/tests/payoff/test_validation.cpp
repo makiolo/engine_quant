@@ -129,7 +129,10 @@ TEST(ValidationVisitorTest, DanglingEventReferenceIsRejected) {
     EXPECT_TRUE(has_error_containing(errors, "sin Trigger/Exercise que lo defina"));
 }
 
-TEST(ValidationVisitorTest, ContinuousApproximationIsRejectedInFases1And2) {
+TEST(ValidationVisitorTest, ContinuousApproximationIsStructurallyValid) {
+    // Fase 6: Monitoring::ContinuousApproximation ya no es un error estructural -- su rechazo
+    // (cuando corresponda) vive en ScenarioEvaluator (evaluador determinista, en tiempo de
+    // evaluacion) y en las medidas Q (comparando ModelCapabilities), no en ValidationVisitor.
     TriggerSpec spec{
         EventId{"UI"}, {TimePoint{1.0}}, greater_equal(constant(1.0), constant(0.0)),
         Monitoring::ContinuousApproximation, Settlement::AtHit, 0, true
@@ -137,7 +140,7 @@ TEST(ValidationVisitorTest, ContinuousApproximationIsRejectedInFases1And2) {
     ContractPtr tree = trigger(spec, cashflow(Currency{"USD"}, constant(1.0)), zero());
     ValidationVisitor validator;
     auto errors = validator.validate(tree);
-    EXPECT_TRUE(has_error_containing(errors, "Brownian bridge"));
+    EXPECT_TRUE(errors.empty());
 }
 
 TEST(ValidationVisitorTest, AllErrorsAreAggregatedNotJustFirst) {

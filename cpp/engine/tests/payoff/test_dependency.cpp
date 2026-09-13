@@ -74,6 +74,20 @@ TEST(DependencyVisitorTest, BarrierReportsObservableEventAndMonitoringTimesAsFix
     EXPECT_EQ(report.observables, (std::set<ObservableId>{ObservableId{"EQ.SPOT.AAPL"}}));
     EXPECT_EQ(report.events, (std::set<EventId>{EventId{"UI"}}));
     EXPECT_EQ(report.fixing_dates.size(), 4u);
+    EXPECT_FALSE(report.requires_continuous_barrier_bridge);
+}
+
+TEST(DependencyVisitorTest, ContinuousApproximationTriggerSetsRequiresContinuousBarrierBridge) {
+    // PLAN_PRODUCTS.md §12 Fase 6: las medidas Q comparan este flag contra
+    // ModelCapabilities::supports_continuous_barrier_bridge antes de simular.
+    TriggerSpec spec{
+        EventId{"UI"}, {TimePoint{0.5}, TimePoint{1.0}}, greater_equal(current(ObservableId{"EQ.SPOT.AAPL"}), constant(120.0)),
+        Monitoring::ContinuousApproximation, Settlement::AtScheduledPayment, 0, true
+    };
+    ContractPtr barrier = trigger(spec, cashflow(Currency{"USD"}, constant(1.0)), zero());
+
+    DependencyReport report = DependencyVisitor{}.analyze(barrier);
+    EXPECT_TRUE(report.requires_continuous_barrier_bridge);
 }
 
 TEST(DependencyVisitorTest, FxConversionReportsBothCurrencies) {

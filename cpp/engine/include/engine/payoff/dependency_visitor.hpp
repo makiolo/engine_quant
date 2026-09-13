@@ -29,6 +29,13 @@ struct DependencyReport {
     // saber qué capturar en `EventState::captured_values` al resolver un `Trigger` (Fase 2),
     // reutilizando este único recorrido en vez de un escáner ad-hoc por evento.
     std::unordered_map<EventId, std::set<ObservableId>> event_value_observables;
+
+    // true si el árbol contiene algún `Trigger` con `Monitoring::ContinuousApproximation`
+    // (Fase 6, §4.2): las medidas Q lo comparan contra
+    // `ModelCapabilities::supports_continuous_barrier_bridge` antes de simular (§6, "el
+    // DependencyVisitor y las capacidades se comparan antes..."); `ScenarioEvaluator` (evaluador
+    // determinista) lo rechaza en tiempo de evaluación sin necesidad de consultar este campo.
+    bool requires_continuous_barrier_bridge = false;
 };
 
 class DependencyVisitor : private ScalarVisitor, private PredicateVisitor, private ContractVisitor {

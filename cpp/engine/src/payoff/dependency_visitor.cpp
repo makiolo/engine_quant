@@ -168,6 +168,9 @@ void DependencyVisitor::visit(const When& node) { visit_contract(node.child()); 
 void DependencyVisitor::visit(const Trigger& node) {
     report_.events.insert(node.spec().id);
     for (TimePoint t : node.spec().monitoring_times) report_.fixing_dates.insert(t);
+    if (node.spec().monitoring == Monitoring::ContinuousApproximation) {
+        report_.requires_continuous_barrier_bridge = true;
+    }
     visit_predicate(node.spec().condition);
     visit_contract(node.on_hit());
     visit_contract(node.on_miss());

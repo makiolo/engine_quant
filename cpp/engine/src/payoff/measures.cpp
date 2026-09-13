@@ -26,6 +26,38 @@ rust::Vec<double> to_rust_vec(const std::vector<double>& v) {
     return out;
 }
 
+// Preflight comun a las tres medidas Q de GBM (PLAN_PRODUCTS.md §6, §12 Fase 5/6): capacidades
+// declaradas, medida RiskNeutralQ soportada, todo observable referenciado generado por el
+// modelo, y -- si el contrato usa `Monitoring::ContinuousApproximation` -- el modelo declara
+// `supports_continuous_barrier_bridge`. Nunca simula una sola ruta antes de pasar este chequeo.
+void preflight_gbm_capabilities(const PayoffProgram& program, const GbmModel& model) {
+    std::optional<ModelCapabilities> capabilities = model.capabilities();
+    if (!capabilities.has_value()) {
+        throw ValidationError("GbmModel no declara ModelCapabilities", NodePath::root());
+    }
+    if (capabilities->supported_measures.find(ProbabilityMeasure::RiskNeutralQ) == capabilities->supported_measures.end()) {
+        throw ValidationError("el modelo no soporta la medida RiskNeutralQ", NodePath::root());
+    }
+
+    DependencyReport dependencies = DependencyVisitor{}.analyze(program.contract);
+    for (const ObservableId& observable : dependencies.observables) {
+        if (capabilities->generated_observables.find(observable) == capabilities->generated_observables.end()) {
+            throw ValidationError(
+                "observable '" + observable.value + "' no generado por el modelo (preflight de Fase 5)",
+                NodePath::root()
+            );
+        }
+    }
+    if (dependencies.requires_continuous_barrier_bridge && !capabilities->supports_continuous_barrier_bridge) {
+        throw ValidationError(
+            "el contrato usa Monitoring::ContinuousApproximation (Brownian bridge) pero el modelo no lo "
+            "soporta (ModelCapabilities::supports_continuous_barrier_bridge=false, PLAN_PRODUCTS.md §4.2 "
+            "Fase 6)",
+            NodePath::root()
+        );
+    }
+}
+
 } // namespace
 
 DiscountingPolicy::DiscountingPolicy(Currency currency, CurveId curve) {
@@ -124,25 +156,7 @@ double bump_and_reval_fixing(
 QValuationResult risk_neutral_price_gbm(
     const PayoffProgram& program, const GbmModel& model, std::uint64_t n_paths, std::uint64_t seed
 ) {
-    std::optional<ModelCapabilities> capabilities = model.capabilities();
-    if (!capabilities.has_value()) {
-        throw ValidationError("GbmModel no declara ModelCapabilities", NodePath::root());
-    }
-    if (capabilities->supported_measures.find(ProbabilityMeasure::RiskNeutralQ) == capabilities->supported_measures.end()) {
-        throw ValidationError("el modelo no soporta la medida RiskNeutralQ", NodePath::root());
-    }
-
-    // Preflight (PLAN_PRODUCTS.md §12 Fase 5, criterio de aceptacion): ningun observable del
-    // contrato entra en el bridge hacia Rust sin que el modelo declare que lo genera.
-    DependencyReport dependencies = DependencyVisitor{}.analyze(program.contract);
-    for (const ObservableId& observable : dependencies.observables) {
-        if (capabilities->generated_observables.find(observable) == capabilities->generated_observables.end()) {
-            throw ValidationError(
-                "observable '" + observable.value + "' no generado por el modelo (preflight de Fase 5)",
-                NodePath::root()
-            );
-        }
-    }
+    preflight_gbm_capabilities(program, model);
 
     std::string spec_json = CanonicalVisitor::to_json(program.id, program.contract);
     try {
@@ -170,26 +184,9 @@ HitProbabilityResult hit_probability_gbm(
     const PayoffProgram& program, const GbmModel& model, const EventId& event, std::uint64_t n_paths,
     std::uint64_t seed
 ) {
-    std::optional<ModelCapabilities> capabilities = model.capabilities();
-    if (!capabilities.has_value()) {
-        throw ValidationError("GbmModel no declara ModelCapabilities", NodePath::root());
-    }
-    if (capabilities->supported_measures.find(ProbabilityMeasure::RiskNeutralQ) == capabilities->supported_measures.end()) {
-        throw ValidationError("el modelo no soporta la medida RiskNeutralQ", NodePath::root());
-    }
-
-    // Mismo preflight de observables que risk_neutral_price_gbm (PLAN_PRODUCTS.md §12 Fase 5/6):
-    // que event no exista en el contrato es un error de EVALUACION (lo detecta la compilacion
-    // del JSON en Rust, que conoce los EventId declarados), no de preflight de observables.
-    DependencyReport dependencies = DependencyVisitor{}.analyze(program.contract);
-    for (const ObservableId& observable : dependencies.observables) {
-        if (capabilities->generated_observables.find(observable) == capabilities->generated_observables.end()) {
-            throw ValidationError(
-                "observable '" + observable.value + "' no generado por el modelo (preflight de Fase 5)",
-                NodePath::root()
-            );
-        }
-    }
+    // Que 'event' no exista en el contrato es un error de EVALUACION (lo detecta la compilacion
+    // del JSON en Rust, que conoce los EventId declarados), no de preflight de capacidades.
+    preflight_gbm_capabilities(program, model);
 
     std::string spec_json = CanonicalVisitor::to_json(program.id, program.contract);
     try {
@@ -214,23 +211,7 @@ ExposureProfile payoff_exposure_profile_gbm(
     const PayoffProgram& program, const GbmModel& model, const std::vector<TimePoint>& exposure_times,
     std::uint64_t n_paths, std::uint64_t seed
 ) {
-    std::optional<ModelCapabilities> capabilities = model.capabilities();
-    if (!capabilities.has_value()) {
-        throw ValidationError("GbmModel no declara ModelCapabilities", NodePath::root());
-    }
-    if (capabilities->supported_measures.find(ProbabilityMeasure::RiskNeutralQ) == capabilities->supported_measures.end()) {
-        throw ValidationError("el modelo no soporta la medida RiskNeutralQ", NodePath::root());
-    }
-
-    DependencyReport dependencies = DependencyVisitor{}.analyze(program.contract);
-    for (const ObservableId& observable : dependencies.observables) {
-        if (capabilities->generated_observables.find(observable) == capabilities->generated_observables.end()) {
-            throw ValidationError(
-                "observable '" + observable.value + "' no generado por el modelo (preflight de Fase 5)",
-                NodePath::root()
-            );
-        }
-    }
+    preflight_gbm_capabilities(program, model);
 
     std::vector<double> exposure_times_raw;
     exposure_times_raw.reserve(exposure_times.size());

@@ -39,6 +39,10 @@ std::optional<payoff::ModelCapabilities> GbmModel::capabilities() const {
     payoff::ModelCapabilities caps;
     caps.generated_observables = {observable_};
     caps.supported_measures = {payoff::ProbabilityMeasure::RiskNeutralQ};
+    // Fase 6: GBM soporta la correccion de Brownian bridge para barreras (§4.2) -- ver
+    // rust/crates/engine-core/src/payoff/eval.rs::resolve_trigger_states, que la aplica sobre
+    // cualquier patron de barrera simple que compile::compile reconozca.
+    caps.supports_continuous_barrier_bridge = true;
     return caps;
 }
 

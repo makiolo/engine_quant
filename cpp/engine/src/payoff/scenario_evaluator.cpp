@@ -337,6 +337,21 @@ void resolve_trigger_states(const ContractPtr& root, EvaluationContext& context)
     collector.collect(root);
     if (collector.triggers.empty()) return;
 
+    // ScenarioEvaluator interpreta UNA UNICA ruta ya conocida (§5.2): no puede aproximar
+    // monitorizacion continua sin Monte Carlo (eso vive en Rust bajo Q, ver
+    // engine::payoff::risk_neutral_price_gbm/PLAN_PRODUCTS.md §4.2 Fase 6). Rechazo en tiempo de
+    // EVALUACION (no de construccion/validacion, ADR-P0-05), mismo estilo que Exercise
+    // (ADR-P0-04): ValidationVisitor ya no lo trata como error estructural.
+    for (const Trigger* trig : collector.triggers) {
+        if (trig->spec().monitoring == Monitoring::ContinuousApproximation) {
+            throw std::logic_error(
+                "Monitoring::ContinuousApproximation no soportado por ScenarioEvaluator (evaluador "
+                "determinista de una unica ruta): requiere Brownian bridge bajo Q, ver "
+                "engine::payoff::risk_neutral_price_gbm (PLAN_PRODUCTS.md §4.2/§12 Fase 6)"
+            );
+        }
+    }
+
     DependencyReport deps = DependencyVisitor().analyze(root);
 
     std::vector<TimePoint> all_times;

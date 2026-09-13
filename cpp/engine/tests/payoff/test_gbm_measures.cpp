@@ -216,4 +216,44 @@ TEST(PayoffExposureProfileGbmMeasureTest, PfE95DominatesEeAndBothAreNonNegative)
     }
 }
 
+// PLAN_PRODUCTS.md §12 Fase 6 ("Brownian bridge para modelos compatibles"), autoria del AST y
+// capacidad del modelo desde C++: GbmModel declara `supports_continuous_barrier_bridge` (§6), asi
+// que un Trigger con `Monitoring::ContinuousApproximation` pasa el preflight de
+// `risk_neutral_price_gbm` (a diferencia de `ScenarioEvaluator`, que lo rechaza -- ver
+// test_trigger_barrier.cpp) y produce un precio mayor o igual al de la MISMA malla en Discrete
+// (mismos monitoring_times -> mismas rutas simuladas bajo el mismo seed, comparacion valida
+// dentro de error estandar combinado).
+TEST(RiskNeutralGbmBarrierMeasureTest, ContinuousApproximationPricesAtLeastAsHighAsDiscreteOnTheSameGrid) {
+    const pf::ObservableId spot{"EQ.SPOT.XYZ"};
+    const double s0 = 100.0, strike = 100.0, barrier = 120.0, r = 0.05, q = 0.0, sigma = 0.2, maturity = 1.0;
+    const std::vector<pf::TimePoint> monitoring_times{tp(0.25), tp(0.5), tp(0.75), tp(1.0)};
+    pf::ContractPtr vanilla = european_call(spot, strike, maturity);
+    pf::PredicatePtr condition = pf::greater_equal(pf::current(spot), pf::constant(barrier));
+
+    pf::TriggerSpec discrete_spec{
+        pf::EventId{"UI"}, monitoring_times, condition, pf::Monitoring::Discrete, pf::Settlement::AtHit, 0, true
+    };
+    pf::TriggerSpec continuous_spec{
+        pf::EventId{"UI"}, monitoring_times, condition, pf::Monitoring::ContinuousApproximation,
+        pf::Settlement::AtHit, 0, true
+    };
+    pf::ContractPtr discrete_barrier = pf::trigger(discrete_spec, vanilla, pf::zero());
+    pf::ContractPtr continuous_barrier = pf::trigger(continuous_spec, vanilla, pf::zero());
+
+    engine::GbmModel model = make_gbm(s0, r, q, sigma, spot.value);
+    const std::uint64_t n_paths = 300'000, seed = 21;
+
+    pf::PayoffProduct discrete_product("UI_DISCRETE", discrete_barrier);
+    pf::PayoffProduct continuous_product("UI_CONTINUOUS", continuous_barrier);
+
+    pf::QValuationResult discrete_result =
+        pf::risk_neutral_price_gbm(*discrete_product.payoff_program(), model, n_paths, seed);
+    pf::QValuationResult continuous_result =
+        pf::risk_neutral_price_gbm(*continuous_product.payoff_program(), model, n_paths, seed);
+
+    double tolerance = 8.0 * (discrete_result.std_error + continuous_result.std_error);
+    EXPECT_GE(continuous_result.mean + tolerance, discrete_result.mean)
+        << "continuous=" << continuous_result.mean << " discrete=" << discrete_result.mean;
+}
+
 } // namespace

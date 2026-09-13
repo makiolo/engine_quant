@@ -353,12 +353,12 @@ void ValidationVisitor::visit(const Trigger& node) {
     const TriggerSpec& spec = node.spec();
     record_event_definition(spec.id);
     check_schedule_ascending_and_finite(spec.monitoring_times, "monitoring_times");
-    if (spec.monitoring == Monitoring::ContinuousApproximation) {
-        add_error(
-            "Monitoring::ContinuousApproximation requiere soporte de Brownian bridge (Fase 6, "
-            "PLAN_PRODUCTS.md §4.2): no soportado por el evaluador determinista de Fases 1-2"
-        );
-    }
+    // Monitoring::ContinuousApproximation es sintacticamente valido (Fase 6, Brownian bridge bajo
+    // Q): estructuralmente no hay nada que rechazar aqui. Su rechazo es responsabilidad de quien
+    // NO puede evaluarlo -- ScenarioEvaluator (el evaluador determinista de una unica ruta, que
+    // nunca aproxima continuidad) lo rechaza en tiempo de EVALUACION, igual que Exercise
+    // (ADR-P0-04); las medidas Q (measures.cpp) lo comparan contra
+    // ModelCapabilities::supports_continuous_barrier_bridge antes de simular.
 
     bool saved_cursor = cursor_active_;
     cursor_active_ = true;

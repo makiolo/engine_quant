@@ -4,6 +4,8 @@
 
 #include <gtest/gtest.h>
 
+#include <stdexcept>
+
 #include "engine/payoff/barrier_templates.hpp"
 #include "engine/payoff/scenario_evaluator.hpp"
 
@@ -157,6 +159,19 @@ TEST(BarrierTemplateTest, WindowBarrierIgnoresCrossingOutsideTheWindow) {
     path.set_fixing(ObservableId{"EQ.SPOT.AAPL"}, TimePoint{1.0}, 90.0);
     CashflowLedger ledger = evaluate(barrier, path);
     EXPECT_TRUE(ledger.empty());
+}
+
+// PLAN_PRODUCTS.md §12 Fase 6: ScenarioEvaluator (una unica ruta ya conocida, sin Monte Carlo)
+// no puede aproximar monitorizacion continua -- rechazo en tiempo de EVALUACION (ValidationVisitor
+// ya no lo trata como error estructural, ver test_validation.cpp), mismo estilo que Exercise.
+TEST(BarrierTemplateTest, ScenarioEvaluatorRejectsContinuousApproximationAtEvaluationTime) {
+    TriggerSpec spec{
+        EventId{"UI"}, quarterly_schedule(), greater_equal(current(ObservableId{"EQ.SPOT.AAPL"}), constant(120.0)),
+        Monitoring::ContinuousApproximation, Settlement::AtHit, 0, true
+    };
+    ContractPtr barrier = trigger(spec, call_underlying(), zero());
+    MarketPath path = gapped_up_path();
+    EXPECT_THROW(evaluate(barrier, path), std::logic_error);
 }
 
 } // namespace
