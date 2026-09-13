@@ -32,6 +32,17 @@ public:
         const Currency& from_currency, const Currency& to_currency, TimePoint time, const NodePath& path
     ) const;
 
+    // Copia con `curve` desplazada en paralelo por `zero_rate_bump` (tipo cero, PLAN_PRODUCTS.md
+    // §12 Fase 4 "bump-and-reval generico por observable/curva", mismo bump de zero_rate que
+    // `bump_curve`/`compute_dv01` en measure.cpp): cada entrada registrada de `curve` se
+    // reescala por exp(-zero_rate_bump * (to - from)). Curvas distintas y todos los
+    // fixings/fx_rates quedan intactos.
+    MarketPath with_curve_bump(const CurveId& curve, double zero_rate_bump) const;
+
+    // Copia con todos los fixings registrados de `observable` desplazados aditivamente por
+    // `bump` (Delta de un observable de spot/subyacente, PLAN_PRODUCTS.md §12 Fase 4).
+    MarketPath with_fixing_bump(const ObservableId& observable, double bump) const;
+
 private:
     struct FixingEntry {
         TimePoint time;

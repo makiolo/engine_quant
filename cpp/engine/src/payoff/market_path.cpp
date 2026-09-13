@@ -1,5 +1,6 @@
 #include "engine/payoff/market_path.hpp"
 
+#include <cmath>
 #include <utility>
 
 namespace engine {
@@ -67,6 +68,25 @@ double MarketPath::fx_rate(
     throw EvaluationError(
         "tipo de cambio ausente para '" + from_currency.code + "->" + to_currency.code + "'", path
     );
+}
+
+MarketPath MarketPath::with_curve_bump(const CurveId& curve, double zero_rate_bump) const {
+    MarketPath bumped = *this;
+    auto it = bumped.discount_factors_.find(curve);
+    if (it == bumped.discount_factors_.end()) return bumped;
+    for (auto& entry : it->second) {
+        double tenor = entry.to.year_fraction - entry.from.year_fraction;
+        entry.value *= std::exp(-zero_rate_bump * tenor);
+    }
+    return bumped;
+}
+
+MarketPath MarketPath::with_fixing_bump(const ObservableId& observable, double bump) const {
+    MarketPath bumped = *this;
+    auto it = bumped.fixings_.find(observable);
+    if (it == bumped.fixings_.end()) return bumped;
+    for (auto& entry : it->second) entry.value += bump;
+    return bumped;
 }
 
 void FixingStore::set(ObservableId observable, TimePoint time, double value) {
