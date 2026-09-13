@@ -66,6 +66,40 @@ mod ffi {
         n_paths: u64,
     }
 
+    /// "Forecast" bajo P de un `PayoffProgram` (PLAN_PRODUCTS.md §12 Fase 7:
+    /// `engine_core::mc::McEstimate` sobre la suma de cashflows SIN DESCONTAR -- ver el
+    /// doc-comment de `engine_core::payoff::api_p`, "P se reserva para forecast ... no existe un
+    /// numerario libre de riesgo canonico"). Misma forma que `PayoffQPriceResult`, struct
+    /// separado para que el nombre no sugiera un precio Q ni un valor descontado.
+    struct PayoffPForecastResult {
+        mean: f64,
+        std_error: f64,
+        ci_low: f64,
+        ci_high: f64,
+        n_paths: u64,
+    }
+
+    /// Equivalente bajo P de `PayoffQHitProbabilityResult` (PLAN_PRODUCTS.md §12 Fase 7:
+    /// "HitProbabilityP"), ver `engine_core::payoff::hit_probability_gbm_p`.
+    struct PayoffPHitProbabilityResult {
+        probability: f64,
+        std_error: f64,
+        ci_low: f64,
+        ci_high: f64,
+        n_paths: u64,
+    }
+
+    /// Distribucion de P&L de una estrategia bajo P (PLAN_PRODUCTS.md §12 Fase 7: "distribucion
+    /// de P&L y expected shortfall de estrategia"), ver `engine_core::payoff::PnlDistribution`
+    /// para la convencion de signo de `var`/`es` (perdidas positivas, `es >= var` siempre).
+    struct PnlDistributionResult {
+        mean: f64,
+        std_error: f64,
+        var: f64,
+        es: f64,
+        n_paths: u64,
+    }
+
     extern "Rust" {
         fn ping() -> f64;
 
@@ -439,6 +473,50 @@ mod ffi {
             n_paths: u64,
             seed: u64,
         ) -> Result<ExposureProfileResult>;
+
+        // PLAN_PRODUCTS.md §12 Fase 7: "Forecast" bajo P (GBM fisico, drift `mu`) del mismo JSON
+        // canonico engine.payoff/v1 -- ver engine_core::payoff::forecast_gbm_p. Preflight identico
+        // en espiritu al de price_payoff_gbm_q (observable no generado, n_paths=0), pero NUNCA
+        // descuenta (ver el doc-comment de engine_core::payoff::api_p).
+        fn forecast_gbm_p(
+            spec_json: String,
+            observable: String,
+            s0: f64,
+            mu: f64,
+            sigma: f64,
+            n_paths: u64,
+            seed: u64,
+        ) -> Result<PayoffPForecastResult>;
+
+        // PLAN_PRODUCTS.md §12 Fase 7: probabilidad bajo P de que `event` dispare, sobre las
+        // mismas rutas GBM fisico que usaria forecast_gbm_p -- ver
+        // engine_core::payoff::hit_probability_gbm_p.
+        fn hit_probability_gbm_p(
+            spec_json: String,
+            event: String,
+            observable: String,
+            s0: f64,
+            mu: f64,
+            sigma: f64,
+            n_paths: u64,
+            seed: u64,
+        ) -> Result<PayoffPHitProbabilityResult>;
+
+        // PLAN_PRODUCTS.md §12 Fase 7: distribucion de P&L de una estrategia bajo P (media, error
+        // estandar, VaR y Expected Shortfall al nivel `confidence`) -- ver
+        // engine_core::payoff::pnl_distribution_gbm_p. `confidence` fuera de [0,1) es un error de
+        // preflight.
+        #[allow(clippy::too_many_arguments)]
+        fn pnl_distribution_gbm_p(
+            spec_json: String,
+            observable: String,
+            s0: f64,
+            mu: f64,
+            sigma: f64,
+            n_paths: u64,
+            seed: u64,
+            confidence: f64,
+        ) -> Result<PnlDistributionResult>;
     }
 }
 
@@ -951,4 +1029,69 @@ fn payoff_exposure_profile_gbm_q(
         seed,
     )?;
     Ok(ffi::ExposureProfileResult { times: profile.times, ee: profile.ee, pfe_95: profile.pfe_95 })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn forecast_gbm_p(
+    spec_json: String,
+    observable: String,
+    s0: f64,
+    mu: f64,
+    sigma: f64,
+    n_paths: u64,
+    seed: u64,
+) -> Result<ffi::PayoffPForecastResult, String> {
+    let estimate = engine_core::payoff::forecast_gbm_p(&spec_json, &observable, s0, mu, sigma, n_paths, seed)?;
+    Ok(ffi::PayoffPForecastResult {
+        mean: estimate.mean,
+        std_error: estimate.std_error,
+        ci_low: estimate.ci_low,
+        ci_high: estimate.ci_high,
+        n_paths: estimate.n_paths,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn hit_probability_gbm_p(
+    spec_json: String,
+    event: String,
+    observable: String,
+    s0: f64,
+    mu: f64,
+    sigma: f64,
+    n_paths: u64,
+    seed: u64,
+) -> Result<ffi::PayoffPHitProbabilityResult, String> {
+    let estimate =
+        engine_core::payoff::hit_probability_gbm_p(&spec_json, &event, &observable, s0, mu, sigma, n_paths, seed)?;
+    Ok(ffi::PayoffPHitProbabilityResult {
+        probability: estimate.mean,
+        std_error: estimate.std_error,
+        ci_low: estimate.ci_low,
+        ci_high: estimate.ci_high,
+        n_paths: estimate.n_paths,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn pnl_distribution_gbm_p(
+    spec_json: String,
+    observable: String,
+    s0: f64,
+    mu: f64,
+    sigma: f64,
+    n_paths: u64,
+    seed: u64,
+    confidence: f64,
+) -> Result<ffi::PnlDistributionResult, String> {
+    let dist = engine_core::payoff::pnl_distribution_gbm_p(
+        &spec_json, &observable, s0, mu, sigma, n_paths, seed, confidence,
+    )?;
+    Ok(ffi::PnlDistributionResult {
+        mean: dist.mean,
+        std_error: dist.std_error,
+        var: dist.var,
+        es: dist.es,
+        n_paths: dist.n_paths,
+    })
 }
