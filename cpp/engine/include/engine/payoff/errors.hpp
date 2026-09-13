@@ -55,5 +55,15 @@ public:
     using PayoffError::PayoffError;
 };
 
+// Error detectado por `parse_payoff_document` (Fase 3, PLAN_PRODUCTS.md §7.2): JSON
+// sintácticamente inválido, `schema` ausente/desconocido, campo inesperado o de tipo
+// incorrecto, o límite de recursos excedido. A diferencia de `ValidationError`, el parser se
+// detiene en el primer problema -- un documento que no se pudo parsear no tiene árbol sobre el
+// que seguir agregando errores.
+class ParseError : public PayoffError {
+public:
+    using PayoffError::PayoffError;
+};
+
 } // namespace payoff
 } // namespace engine

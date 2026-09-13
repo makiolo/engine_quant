@@ -1,3 +1,20 @@
+# JSON canonico para PayoffProduct (PLAN_PRODUCTS.md Fase 3, §7.2): simdjson via FetchContent,
+# mismo patron que Corrosion (CMakeLists.txt raiz)/GoogleTest (tests/CMakeLists.txt), pinneado
+# a un tag exacto. include(FetchContent) ya esta activo desde la raiz.
+FetchContent_Declare(
+    simdjson
+    GIT_REPOSITORY https://github.com/simdjson/simdjson.git
+    GIT_TAG v4.6.11
+)
+FetchContent_MakeAvailable(simdjson)
+# El CMakeLists.txt de simdjson activa target_precompile_headers() incondicionalmente para
+# CMake >= 3.16, lo que rompe la generacion de reglas de Ninja en este arbol (error "missing
+# and no known rule to make it" sobre cmake_pch.cxx.pch) -- lo desactivamos explicitamente via
+# la propiedad de target soportada para ese fin, sin parchear su CMakeLists.txt vendorizado.
+if(TARGET simdjson)
+    set_target_properties(simdjson PROPERTIES DISABLE_PRECOMPILE_HEADERS ON)
+endif()
+
 add_library(engine STATIC
     src/engine.cpp
     src/params.cpp
@@ -21,11 +38,15 @@ add_library(engine STATIC
     src/payoff/explain_visitor.cpp
     src/payoff/barrier_templates.cpp
     src/payoff/tp_sl.cpp
+    src/payoff/json_parser.cpp
 )
 
 target_include_directories(engine PUBLIC include)
 
 target_link_libraries(engine PUBLIC engine-ffi-cxx)
+# PRIVATE: ningun header publico de engine/payoff expone tipos de simdjson::dom, solo
+# src/payoff/json_parser.cpp incluye <simdjson.h>.
+target_link_libraries(engine PRIVATE simdjson::simdjson)
 
 # API universal en C ABI (PLAN.md Fase 6, §5.5): shared library (.dll/.so) que expone
 # engine/abi.h -- consumible desde cualquier lenguaje con FFI a C (Julia, .NET, Go, ...) sin
