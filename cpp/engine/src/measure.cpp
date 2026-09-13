@@ -4,6 +4,8 @@
 #include <utility>
 
 #include "engine/engine.hpp"
+#include "engine/payoff/market_snapshot_bridge.hpp"
+#include "engine/payoff/payoff_product.hpp"
 
 namespace engine {
 
@@ -321,36 +323,54 @@ MeasureResult PresentValueMeasure::evaluate(
     const IModel&, const IProduct& product, const MarketSnapshot& market,
     const PricingContext&, const ExecutionContext&
 ) const {
-    const auto* irs_product = dynamic_cast<const IrSwapProduct*>(&product);
-    if (!irs_product) {
-        throw std::invalid_argument("PresentValueMeasure: producto no soportado: " + product.type_name());
-    }
-
     MeasureResult result;
     result.has_scalar = true;
-    result.scalar = compute_npv(market, *irs_product);
-    return result;
+
+    if (const auto* irs_product = dynamic_cast<const IrSwapProduct*>(&product)) {
+        result.scalar = compute_npv(market, *irs_product);
+        return result;
+    }
+    // Rama genérica única para cualquier `PayoffProduct` (PLAN_PRODUCTS.md §9.1/§9.5, Fase 8:
+    // "price_many mezcla IRS, FXForward y payoff custom sin ramas de producto nuevas"): un
+    // payoff nuevo con esta misma forma (schedule determinista de cashflows en una única
+    // moneda) no necesita una rama de producto propia aquí, a diferencia de `IrSwapProduct`
+    // arriba -- ver market_snapshot_bridge.hpp para el alcance exacto (una moneda, sin
+    // observables que `MarketSnapshot` no modele).
+    if (const auto* payoff_product = dynamic_cast<const payoff::PayoffProduct*>(&product)) {
+        result.scalar = payoff::present_value_from_market_snapshot(payoff_product->payoff_program()->contract, market).present_value;
+        return result;
+    }
+    throw std::invalid_argument("PresentValueMeasure: producto no soportado: " + product.type_name());
 }
 
 MeasureResult Dv01Measure::evaluate(
     const IModel&, const IProduct& product, const MarketSnapshot& market,
     const PricingContext&, const ExecutionContext&
 ) const {
-    const auto* irs_product = dynamic_cast<const IrSwapProduct*>(&product);
-    if (!irs_product) {
-        throw std::invalid_argument("Dv01Measure: producto no soportado: " + product.type_name());
-    }
-
     MeasureResult result;
-    if (bucketed_) {
-        result.times = market.pillars();
-        result.primary = dv01_bucketed_from_market(market, *irs_product, bump_);
-        result.has_scalar = false;
-    } else {
-        result.has_scalar = true;
-        result.scalar = compute_dv01(market, *irs_product, bump_);
+    if (const auto* irs_product = dynamic_cast<const IrSwapProduct*>(&product)) {
+        if (bucketed_) {
+            result.times = market.pillars();
+            result.primary = dv01_bucketed_from_market(market, *irs_product, bump_);
+            result.has_scalar = false;
+        } else {
+            result.has_scalar = true;
+            result.scalar = compute_dv01(market, *irs_product, bump_);
+        }
+        return result;
     }
-    return result;
+    // Misma rama genérica que PresentValueMeasure (ver ahí). Solo bump paralelo -- bucketed por
+    // pillar no está implementado para `PayoffProduct` en este incremento (el bridge no expone
+    // los pillars de la curva por separado), pedirlo lanza explícito en vez de ignorarlo.
+    if (const auto* payoff_product = dynamic_cast<const payoff::PayoffProduct*>(&product)) {
+        if (bucketed_) {
+            throw std::invalid_argument("Dv01Measure: bucketed=true no soportado para PayoffProduct (Fase 8)");
+        }
+        result.has_scalar = true;
+        result.scalar = payoff::bump_and_reval_from_market_snapshot(payoff_product->payoff_program()->contract, market, bump_);
+        return result;
+    }
+    throw std::invalid_argument("Dv01Measure: producto no soportado: " + product.type_name());
 }
 
 } // namespace engine

@@ -343,8 +343,17 @@ PriceResult price(
     return price(registries, product, to_measure_specs(measure_names), model, market, pricing, execution);
 }
 
-PriceBatchResult price_batch(
-    const Registries&,
+namespace {
+
+// Lote genérico, producto a producto, vía el registry de medidas (PLAN_PRODUCTS.md §9.2/§12
+// Fase 8: "price_batch deja de asumir IRS al existir el segundo producto universal"). Sin
+// vectorización -- correcto, no optimizado; agrupar/vectorizar un lote `Payoff` heterogéneo es
+// trabajo de Fase 11 (fingerprint de IR), no de esta. Usada por `price_batch` cuando el lote no
+// es homogéneamente `IrSwapProduct` (mismo criterio de homogeneidad de tipo que
+// `require_homogeneous_irs_batch`, sin exigir calendario común -- cada producto genérico trae
+// su propio AST).
+PriceBatchResult price_batch_generic(
+    const Registries& registries,
     const std::vector<const IProduct*>& products,
     const std::vector<MeasureSpec>& measures,
     const IModel& model,
@@ -352,6 +361,60 @@ PriceBatchResult price_batch(
     const PricingContext& pricing,
     const ExecutionContext& execution
 ) {
+    std::vector<ResolvedMeasure> resolved;
+    resolved.reserve(measures.size());
+    for (const MeasureSpec& spec : measures) {
+        ResolvedMeasure r = resolve_measure_name(spec.name);
+        if (!registries.measures.contains(r.registered_type)) {
+            throw std::invalid_argument("engine::price_batch: medida desconocida: '" + spec.name + "'");
+        }
+        resolved.push_back(std::move(r));
+    }
+
+    const std::string& type_name = products.front()->type_name();
+    PriceBatchResult result;
+    result.reserve(products.size());
+    for (std::size_t i = 0; i < products.size(); ++i) {
+        if (products[i]->type_name() != type_name) {
+            throw std::invalid_argument(
+                "engine::price_batch: todos los trades del lote deben ser del mismo tipo de producto ('" +
+                type_name + "' vs '" + products[i]->type_name() + "')"
+            );
+        }
+        std::unordered_map<std::string, MeasureResult> computed;
+        PriceResult row;
+        row.reserve(measures.size());
+        for (std::size_t j = 0; j < measures.size(); ++j) {
+            const std::string cache_key = resolved[j].registered_type + "#" + params_cache_key(measures[j].params);
+            if (computed.find(cache_key) == computed.end()) {
+                auto measure = registries.measures.create(resolved[j].registered_type, measures[j].params);
+                computed.emplace(cache_key, measure->evaluate(model, *products[i], market, pricing, execution));
+            }
+            row.push_back(PriceResultEntry{measures[j].name, extract_field(computed.at(cache_key), resolved[j].field)});
+        }
+        result.push_back(PriceBatchResultEntry{i, std::move(row)});
+    }
+    return result;
+}
+
+} // namespace
+
+PriceBatchResult price_batch(
+    const Registries& registries,
+    const std::vector<const IProduct*>& products,
+    const std::vector<MeasureSpec>& measures,
+    const IModel& model,
+    const MarketSnapshot& market,
+    const PricingContext& pricing,
+    const ExecutionContext& execution
+) {
+    if (products.empty()) {
+        throw std::invalid_argument("engine::price_batch: el lote no puede estar vacío");
+    }
+    if (dynamic_cast<const IrSwapProduct*>(products.front()) == nullptr) {
+        return price_batch_generic(registries, products, measures, model, market, pricing, execution);
+    }
+
     std::vector<ResolvedMeasure> resolved;
     resolved.reserve(measures.size());
     for (const MeasureSpec& spec : measures) {

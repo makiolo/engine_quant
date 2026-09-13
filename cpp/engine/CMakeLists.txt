@@ -40,6 +40,7 @@ add_library(engine STATIC
     src/payoff/irs_templates.cpp
     src/payoff/fxforward_templates.cpp
     src/payoff/specialization_visitor.cpp
+    src/payoff/market_snapshot_bridge.cpp
     src/payoff/tp_sl.cpp
     src/payoff/json_parser.cpp
     src/payoff/canonical_visitor.cpp
