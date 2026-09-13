@@ -516,7 +516,20 @@ private:
     }
 
     void visit(const Exercise&) override {
-        throw std::logic_error("Exercise no soportado hasta Fase 9 (PLAN_PRODUCTS.md §10, ADR-P0-04)");
+        // La decision de ejercicio (Longstaff-Schwartz, Fase 9, PLAN_PRODUCTS.md §10) se resuelve
+        // sobre un LOTE completo de rutas Monte Carlo, no sobre una unica ruta conocida como la
+        // que interpreta este evaluador -- por eso vive enteramente en
+        // engine::payoff::exercise_price_gbm/engine_core::payoff::price_payoff_exercise_gbm_q
+        // (Rust), nunca aqui. `ScenarioEvaluator` sigue sin poder evaluar un `Exercise` porque
+        // ninguna decision externa le llega todavia (§10: "no se permitira evaluar Exercise con
+        // ScenarioEvaluator sin una decision suministrada") -- las medidas deterministas de una
+        // unica ruta (Cashflows/ScenarioPayoff/PV, Fase 4) siguen sin soportar un contrato con
+        // ejercicio.
+        throw std::logic_error(
+            "Exercise no soportado por ScenarioEvaluator (ruta de una unica escena determinista, Fase 4): "
+            "usa engine::payoff::exercise_price_gbm para precio bajo Q via Longstaff-Schwartz (PLAN_PRODUCTS.md "
+            "§10, Fase 9)"
+        );
     }
 
     EvaluationContext& context_;

@@ -377,7 +377,15 @@ void ValidationVisitor::visit(const Trigger& node) {
 void ValidationVisitor::visit(const Exercise& node) {
     record_event_definition(node.id());
     check_schedule_ascending_and_finite(node.dates(), "dates");
+    // 'exercise_value' se evalua en cada fecha de 'dates' con esa fecha como cursor activo
+    // (ADR-P0-08): mismo motivo por el que 'Trigger::spec().condition' activa el cursor antes de
+    // descender (arriba) -- 'Current' dentro de 'exercise_value' es valido porque la politica de
+    // ejercicio (Fase 9, PLAN_PRODUCTS.md §10) siempre lo evalua con un instante concreto fijado,
+    // nunca "sin cursor" como un 'Cashflow' desnudo fuera de un 'When'/'Trigger AtHit'.
+    bool saved_cursor = cursor_active_;
+    cursor_active_ = true;
     descend_scalar(node.exercise_value(), "exercise_value");
+    cursor_active_ = saved_cursor;
     descend_contract(node.continuation(), "continuation");
 }
 

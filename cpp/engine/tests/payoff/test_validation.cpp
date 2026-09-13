@@ -153,6 +153,20 @@ TEST(ValidationVisitorTest, AllErrorsAreAggregatedNotJustFirst) {
     EXPECT_GE(errors.size(), 3u);
 }
 
+TEST(ValidationVisitorTest, ExerciseValueWithCurrentIsValidBecauseTheDecisionDateIsAlwaysTheCursor) {
+    // PLAN_PRODUCTS.md §10, Fase 9, ADR-P0-08: 'exercise_value' se evalua siempre con la fecha de
+    // decision como cursor activo (igual que 'Trigger::spec().condition'), asi que 'Current'
+    // dentro de 'exercise_value' no es el mismo error estructural que un 'Cashflow' desnudo fuera
+    // de un 'When'/'Trigger AtHit'.
+    ContractPtr bermuda_put = exercise(
+        EventId{"EX"}, {TimePoint{0.5}, TimePoint{1.0}},
+        maximum(sub(constant(100.0), current(ObservableId{"EQ.SPOT.AAPL"})), constant(0.0)),
+        when(TimePoint{1.0}, cashflow(Currency{"USD"}, constant(0.0)))
+    );
+    ValidationVisitor validator;
+    EXPECT_TRUE(validator.validate(bermuda_put).empty());
+}
+
 TEST(ValidationVisitorTest, ExceedingMaxDepthIsRejected) {
     ScalarExprPtr expr = constant(1.0);
     for (int i = 0; i < 2000; ++i) {

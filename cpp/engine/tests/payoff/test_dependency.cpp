@@ -90,6 +90,24 @@ TEST(DependencyVisitorTest, ContinuousApproximationTriggerSetsRequiresContinuous
     EXPECT_TRUE(report.requires_continuous_barrier_bridge);
 }
 
+TEST(DependencyVisitorTest, ExerciseReportsEventDatesAndRequiresEarlyExerciseRegression) {
+    // PLAN_PRODUCTS.md §10, Fase 9: las medidas Q comparan este flag contra
+    // ModelCapabilities::supports_early_exercise_regression antes de simular, igual que
+    // requires_continuous_barrier_bridge.
+    ContractPtr bermuda_put = exercise(
+        EventId{"EX"}, {TimePoint{0.5}, TimePoint{1.0}},
+        maximum(sub(constant(100.0), current(ObservableId{"EQ.SPOT.AAPL"})), constant(0.0)), zero()
+    );
+
+    DependencyVisitor visitor;
+    DependencyReport report = visitor.analyze(bermuda_put);
+
+    EXPECT_EQ(report.observables, (std::set<ObservableId>{ObservableId{"EQ.SPOT.AAPL"}}));
+    EXPECT_EQ(report.events, (std::set<EventId>{EventId{"EX"}}));
+    EXPECT_EQ(report.fixing_dates.size(), 2u);
+    EXPECT_TRUE(report.requires_early_exercise_regression);
+}
+
 TEST(DependencyVisitorTest, FxConversionReportsBothCurrencies) {
     ContractPtr node = when(
         TimePoint{1.0},

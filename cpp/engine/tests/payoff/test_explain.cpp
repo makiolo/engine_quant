@@ -50,4 +50,23 @@ TEST(ExplainVisitorTest, ExplainLedgerMentionsTimeCurrencyAndAmount) {
     EXPECT_NE(text.find("30000"), std::string::npos);
 }
 
+TEST(ExplainVisitorTest, ExplainTreeShowsExerciseStructureDatesAndValueExpression) {
+    // PLAN_PRODUCTS.md §10, Fase 9, criterio de aceptacion: "explain muestra la politica" -- a
+    // nivel de estructura del AST (fechas y como se calcula el ejercicio), no de la decision de
+    // Longstaff-Schwartz resuelta por el pricer (eso es ExercisePolicyResult, ver measures.hpp).
+    ContractPtr bermuda_put = exercise(
+        EventId{"EX"}, {TimePoint{0.5}, TimePoint{1.0}},
+        maximum(sub(constant(100.0), current(ObservableId{"EQ.SPOT.AAPL"})), constant(0.0)), zero()
+    );
+    ExplainVisitor explainer;
+    std::string text = explainer.explain_tree(bermuda_put);
+
+    EXPECT_NE(text.find("Exercise(EX"), std::string::npos);
+    EXPECT_NE(text.find("0.500000"), std::string::npos);
+    EXPECT_NE(text.find("1.000000"), std::string::npos);
+    EXPECT_NE(text.find("Max"), std::string::npos);
+    EXPECT_NE(text.find("Current(EQ.SPOT.AAPL)"), std::string::npos);
+    EXPECT_NE(text.find("continuation"), std::string::npos);
+}
+
 } // namespace

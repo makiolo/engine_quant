@@ -177,7 +177,19 @@ private:
         print_contract_child(n.on_miss(), "on_miss");
     }
     void visit(const Exercise& n) override {
-        write_line("Exercise(" + n.id().value + ")");
+        // La politica de DECISION (Longstaff-Schwartz, coeficientes de regresion por fecha) no
+        // vive en el AST -- eso es responsabilidad del pricer, resuelta por lote de rutas (Fase
+        // 9, PLAN_PRODUCTS.md §10, ver ExercisePolicyResult en measures.hpp) -- este visitor solo
+        // conoce la ESTRUCTURA del derecho: cuantas fechas declara y como se calcula el valor de
+        // ejercer en cada una.
+        std::string dates_str;
+        for (std::size_t i = 0; i < n.dates().size(); ++i) {
+            if (i > 0) dates_str += ", ";
+            dates_str += std::to_string(n.dates()[i].year_fraction);
+        }
+        write_line("Exercise(" + n.id().value + ", dates=[" + dates_str + "])");
+        write_line("exercise_value:");
+        print_scalar(n.exercise_value());
         print_contract_child(n.continuation(), "continuation");
     }
 
