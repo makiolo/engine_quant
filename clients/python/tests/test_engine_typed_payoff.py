@@ -73,10 +73,71 @@ def test_payoff_product_rejects_invalid_contract():
         assert "instante activo" in str(e)
 
 
+def test_european_call_template_matches_manual_ast():
+    templated = q.european_call("AAPL_CALL_100", "EQ.SPOT.AAPL", 100.0, 1_000.0, 1.0)
+    manual = q.PayoffProduct(id="AAPL_CALL_100", contract=_call_100())
+    assert templated.contract == manual.contract
+
+
+def test_european_put_template_builds_expected_tree():
+    put = q.european_put("AAPL_PUT_100", "EQ.SPOT.AAPL", 100.0, 1_000.0, 1.0)
+    assert put.contract.type == "when"
+    amount = put.contract.child.amount
+    assert amount.type == "mul"
+    intrinsic = amount.right
+    assert intrinsic.type == "max"
+    assert intrinsic.left.left.type == "constant" and intrinsic.left.left.value == 100.0
+    assert intrinsic.left.right.type == "fixing"
+
+
+def test_irs_template_replicates_irs_swap_cpp_template():
+    trade = q.irs("SWAP_2Y_3PCT", notional=1_000_000.0, fixed_rate=0.03, payment_times=[1.0, 2.0], accruals=[1.0, 1.0])
+    assert trade.contract.type == "both"
+    floating_leg, given_fixed_leg = trade.contract.children
+    assert floating_leg.type == "both"
+    start_flow, last_flow = floating_leg.children
+    assert start_flow.child.amount.value == 1_000_000.0
+    assert last_flow.child.amount.value == -1_000_000.0
+    assert given_fixed_leg.type == "give"
+    fixed_leg = given_fixed_leg.child
+    assert fixed_leg.type == "both"
+    assert len(fixed_leg.children) == 2
+    assert fixed_leg.children[0].child.amount.value == 1_000_000.0 * 0.03 * 1.0
+
+
+def test_irs_template_rejects_mismatched_schedule_lengths():
+    try:
+        q.irs("BAD", notional=1.0, fixed_rate=0.03, payment_times=[1.0, 2.0], accruals=[1.0])
+        assert False, "se esperaba ValueError"
+    except ValueError as e:
+        assert "igual longitud" in str(e)
+
+
+def test_fx_forward_template_matches_plan_ast():
+    trade = q.fx_forward("EURUSD_FWD", "EUR", "USD", 1_000_000.0, 1.10, 1.0)
+    assert trade.contract.type == "when"
+    foreign_flow, domestic_flow = trade.contract.child.children
+    assert foreign_flow.currency == "EUR" and foreign_flow.amount.value == 1_000_000.0
+    assert domestic_flow.currency == "USD" and domestic_flow.amount.value == -1_100_000.0
+
+
+def test_fx_forward_template_sign_flips_both_legs():
+    trade = q.fx_forward("EURUSD_FWD_SELL", "EUR", "USD", 1_000_000.0, 1.10, 1.0, sign=-1.0)
+    foreign_flow, domestic_flow = trade.contract.child.children
+    assert foreign_flow.amount.value == -1_000_000.0
+    assert domestic_flow.amount.value == 1_100_000.0
+
+
 if __name__ == "__main__":
     test_operator_sugar_builds_expected_tree()
     test_payoff_product_to_params_serializes_canonical_envelope()
     test_payoff_product_discount_factor_serializes_from_alias()
     test_payoff_product_creates_real_engine_product()
     test_payoff_product_rejects_invalid_contract()
+    test_european_call_template_matches_manual_ast()
+    test_european_put_template_builds_expected_tree()
+    test_irs_template_replicates_irs_swap_cpp_template()
+    test_irs_template_rejects_mismatched_schedule_lengths()
+    test_fx_forward_template_matches_plan_ast()
+    test_fx_forward_template_sign_flips_both_legs()
     print("OK: tests de engine_typed.payoff pasaron")

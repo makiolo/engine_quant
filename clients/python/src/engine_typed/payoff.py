@@ -598,6 +598,83 @@ class PayoffProduct(TradeSpec):
         return {"spec": json.dumps(document, separators=(",", ":"), allow_nan=False)}
 
 
+# ---------------------------------------------------------------------------------------------
+# Plantillas tipadas (PLAN_PRODUCTS.md §7.3, §9.3, §9.4, Fase 10): azucar de autoria que
+# devuelve un `PayoffProduct` completo, replicando exactamente el AST que ya generan
+# `cpp/engine/include/engine/payoff/irs_templates.hpp` y `fxforward_templates.hpp` -- mismo
+# signo de cashflows (ADR-P0-02) y misma forma de arbol, para que `SpecializationVisitor`
+# reconozca el patron igual que si se hubiera construido en C++.
+# ---------------------------------------------------------------------------------------------
+
+
+def european_call(id: str, observable: str, strike: float, notional: float, maturity: float) -> "PayoffProduct":
+    contract = when(
+        maturity,
+        cashflow("USD", notional * maximum(fixing(observable, maturity) - strike, 0)),
+    )
+    return PayoffProduct(id=id, contract=contract)
+
+
+def european_put(id: str, observable: str, strike: float, notional: float, maturity: float) -> "PayoffProduct":
+    contract = when(
+        maturity,
+        cashflow("USD", notional * maximum(strike - fixing(observable, maturity), 0)),
+    )
+    return PayoffProduct(id=id, contract=contract)
+
+
+def irs(
+    id: str,
+    notional: float,
+    fixed_rate: float,
+    payment_times: List[float],
+    accruals: List[float],
+    currency: str = "USD",
+    start: float = 0.0,
+) -> "PayoffProduct":
+    # Replica `templates::irs_swap` (irs_templates.hpp): pata flotante single-curve reemplazando
+    # el nocional en `start`/payment_times[-1] (unica forma soportada hoy, sin proyeccion de
+    # indice -- ver comentario del propio template C++), pata fija como `Give` porque el titular
+    # la paga (ADR-P0-02, "notional > 0" => posicion pagadora, "NPV = flotante - fijo").
+    if not payment_times:
+        raise ValueError("irs: payment_times no puede estar vacio")
+    if len(payment_times) != len(accruals):
+        raise ValueError("irs: payment_times y accruals deben tener igual longitud")
+
+    floating_leg = both([
+        when(start, cashflow(currency, notional)),
+        when(payment_times[-1], cashflow(currency, -notional)),
+    ])
+    fixed_leg = both([
+        when(t, cashflow(currency, notional * fixed_rate * accrual))
+        for t, accrual in zip(payment_times, accruals)
+    ])
+    contract = both([floating_leg, give(fixed_leg)])
+    return PayoffProduct(id=id, contract=contract)
+
+
+def fx_forward(
+    id: str,
+    currency_for: str,
+    currency_dom: str,
+    notional_for: float,
+    strike: float,
+    maturity: float,
+    sign: float = 1.0,
+) -> "PayoffProduct":
+    # Replica `templates::fx_forward` (fxforward_templates.hpp, §9.4): `sign=+1` equivale a
+    # `buy_foreign=true` del template C++ (se recibe `notional_for` en `currency_for` y se paga
+    # `notional_for * strike` en `currency_dom`); `sign=-1` invierte ambas patas.
+    contract = when(
+        maturity,
+        both([
+            cashflow(currency_for, sign * notional_for),
+            cashflow(currency_dom, -sign * notional_for * strike),
+        ]),
+    )
+    return PayoffProduct(id=id, contract=contract)
+
+
 # Resuelve las forward-refs de las uniones discriminadas anidadas (pydantic v2 + `from
 # __future__ import annotations`): idempotente, seguro sobre cualquier BaseModel del módulo
 # (incluida `TradeSpec`, importada, ya construida en su propio módulo).
