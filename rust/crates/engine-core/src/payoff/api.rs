@@ -187,4 +187,128 @@ mod tests {
             "first={first:?} second={second:?} tol={combined_tolerance}"
         );
     }
+
+    // PLAN_PRODUCTS.md §12 Fase 6 ("barrera discreta vectorizada bajo Q"): un up-and-in call
+    // (barrera H, strike K, ambos monitorizados en `monitoring_times`) que paga en `maturity` si
+    // el spot toca H en algun instante monitorizado, o cero si nunca lo toca.
+    fn up_and_in_call_json(barrier: f64, strike: f64, maturity: f64, monitoring_times: &[f64]) -> String {
+        let times_json = monitoring_times.iter().map(|t| t.to_string()).collect::<Vec<_>>().join(",");
+        format!(
+            r#"{{
+                "schema": "engine.payoff/v1", "id": "UI",
+                "contract": {{
+                    "type": "trigger", "id": "UI",
+                    "monitoring_times": [{times_json}],
+                    "condition": {{"type": "greater_equal",
+                        "left": {{"type": "current", "observable": "EQ.SPOT.XYZ"}},
+                        "right": {{"type": "constant", "value": {barrier}}}}},
+                    "monitoring": "discrete", "settlement": "at_scheduled_payment", "priority": 0, "latch": true,
+                    "on_hit": {{"type": "when", "time": {maturity},
+                        "child": {{"type": "cashflow", "currency": "USD",
+                            "amount": {{"type": "max",
+                                "left": {{"type": "sub",
+                                    "left": {{"type": "fixing", "observable": "EQ.SPOT.XYZ", "time": {maturity}}},
+                                    "right": {{"type": "constant", "value": {strike}}}}},
+                                "right": {{"type": "constant", "value": 0.0}}}}}}}},
+                    "on_miss": {{"type": "zero"}}
+                }}
+            }}"#
+        )
+    }
+
+    // Complemento: up-and-out (paga el mismo intrinseco solo si la barrera NUNCA se toca; cero si
+    // se toca -- "on_hit"/"on_miss" intercambiados frente a `up_and_in_call_json`, mismo barrier/
+    // strike/monitoring_times). §13.2: "un knock-in + knock-out complementarios reproducen el
+    // underlying" -- UI + UO debe reproducir exactamente la call vanilla en CADA ruta.
+    fn up_and_out_call_json(barrier: f64, strike: f64, maturity: f64, monitoring_times: &[f64]) -> String {
+        let times_json = monitoring_times.iter().map(|t| t.to_string()).collect::<Vec<_>>().join(",");
+        format!(
+            r#"{{
+                "schema": "engine.payoff/v1", "id": "UO",
+                "contract": {{
+                    "type": "trigger", "id": "UO",
+                    "monitoring_times": [{times_json}],
+                    "condition": {{"type": "greater_equal",
+                        "left": {{"type": "current", "observable": "EQ.SPOT.XYZ"}},
+                        "right": {{"type": "constant", "value": {barrier}}}}},
+                    "monitoring": "discrete", "settlement": "at_scheduled_payment", "priority": 0, "latch": true,
+                    "on_hit": {{"type": "zero"}},
+                    "on_miss": {{"type": "when", "time": {maturity},
+                        "child": {{"type": "cashflow", "currency": "USD",
+                            "amount": {{"type": "max",
+                                "left": {{"type": "sub",
+                                    "left": {{"type": "fixing", "observable": "EQ.SPOT.XYZ", "time": {maturity}}},
+                                    "right": {{"type": "constant", "value": {strike}}}}},
+                                "right": {{"type": "constant", "value": 0.0}}}}}}}}
+                }}
+            }}"#
+        )
+    }
+
+    #[test]
+    fn up_and_in_plus_up_and_out_reproduces_the_vanilla_call_price() {
+        // §13.2 ("un knock-in + knock-out complementarios reproducen el underlying"): en CADA
+        // ruta simulada para UI/UO (mismo grid de monitorizacion de 4 puntos), o bien UI paga el
+        // intrinseco y UO paga cero, o al reves -- la suma de los ledgers coincide EXACTAMENTE
+        // con el intrinseco de la call vanilla en esa misma ruta. `vanilla` se precia aqui con su
+        // propio grid natural (un unico paso, `required_times()={maturity}`): la comparacion
+        // frente a `ui.mean + uo.mean` es entonces estadistica (ambas simulaciones son GBM exacto
+        // -- sin sesgo de discretizacion -- asi que coinciden en esperanza, no path-a-path, al
+        // usar un numero de pasos distinto para cada una).
+        let _guard = crate::rng_test_lock::LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (s0, strike, barrier, r, q, sigma, maturity) = (100.0, 100.0, 120.0, 0.05, 0.0, 0.2, 1.0);
+        let monitoring_times = [0.25, 0.5, 0.75, 1.0];
+        let (n_paths, seed) = (300_000, 7);
+
+        let ui_spec = up_and_in_call_json(barrier, strike, maturity, &monitoring_times);
+        let uo_spec = up_and_out_call_json(barrier, strike, maturity, &monitoring_times);
+        let vanilla_spec = CALL_JSON_TEMPLATE
+            .replace("{maturity}", &maturity.to_string())
+            .replace("{strike}", &strike.to_string());
+
+        let ui = price_payoff_gbm_q(&ui_spec, "EQ.SPOT.XYZ", s0, r, q, sigma, n_paths, seed).unwrap();
+        let uo = price_payoff_gbm_q(&uo_spec, "EQ.SPOT.XYZ", s0, r, q, sigma, n_paths, seed + 1).unwrap();
+        let vanilla = price_payoff_gbm_q(&vanilla_spec, "EQ.SPOT.XYZ", s0, r, q, sigma, n_paths, seed + 2).unwrap();
+
+        let combined_std_error = (ui.std_error.powi(2) + uo.std_error.powi(2) + vanilla.std_error.powi(2)).sqrt();
+        let tolerance = 8.0 * combined_std_error;
+        assert!(
+            (ui.mean + uo.mean - vanilla.mean).abs() < tolerance,
+            "ui={} uo={} ui+uo={} vanilla={} tol={tolerance}",
+            ui.mean,
+            uo.mean,
+            ui.mean + uo.mean,
+            vanilla.mean
+        );
+    }
+
+    #[test]
+    fn up_and_in_price_increases_as_the_monitoring_grid_is_refined() {
+        // Mas puntos de monitorizacion == mas oportunidades de tocar la barrera == probabilidad
+        // de activacion no decreciente == precio up-and-in no decreciente (converge hacia el
+        // limite de monitorizacion continua al refinar la malla, PLAN_PRODUCTS.md §12 Fase 6,
+        // criterio de aceptacion "convergencia de barreras al refinar malla").
+        let _guard = crate::rng_test_lock::LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (s0, strike, barrier, r, q, sigma, maturity) = (100.0, 100.0, 120.0, 0.05, 0.0, 0.2, 1.0);
+        let (n_paths, seed) = (300_000, 11);
+
+        let coarse_times: Vec<f64> = vec![0.25, 0.5, 0.75, 1.0];
+        let fine_times: Vec<f64> = (1..=50).map(|i| i as f64 / 50.0).collect();
+
+        let coarse_spec = up_and_in_call_json(barrier, strike, maturity, &coarse_times);
+        let fine_spec = up_and_in_call_json(barrier, strike, maturity, &fine_times);
+
+        let coarse = price_payoff_gbm_q(&coarse_spec, "EQ.SPOT.XYZ", s0, r, q, sigma, n_paths, seed).unwrap();
+        let fine = price_payoff_gbm_q(&fine_spec, "EQ.SPOT.XYZ", s0, r, q, sigma, n_paths, seed).unwrap();
+
+        let tolerance = 8.0 * (coarse.std_error + fine.std_error);
+        assert!(
+            fine.mean + tolerance >= coarse.mean,
+            "fine={} (se={}) deberia ser >= coarse={} (se={}) menos ruido estadistico",
+            fine.mean,
+            fine.std_error,
+            coarse.mean,
+            coarse.std_error
+        );
+    }
 }

@@ -13,7 +13,9 @@
 
 use serde_json::Value;
 
-use super::ir::{CompiledPayoff, ContractOp, PredicateOp, ScalarOp, COMPILED_PAYOFF_VERSION};
+use super::ir::{
+    CompiledPayoff, ContractOp, MonitoringMode, PredicateOp, ScalarOp, SettlementMode, COMPILED_PAYOFF_VERSION,
+};
 
 /// Compila un documento `engine.payoff/v1` completo (con envoltorio `schema`/`id`/`contract`,
 /// PLAN_PRODUCTS.md §7.2) a `CompiledPayoff`. `Err` es siempre un error de preflight: nunca se
@@ -44,6 +46,7 @@ pub fn compile(spec_json: &str) -> Result<CompiledPayoff, String> {
         version: COMPILED_PAYOFF_VERSION,
         currency,
         observable_slots: compiler.observable_slots,
+        event_slots: compiler.event_slots,
         scalar_ops: compiler.scalar_ops,
         predicate_ops: compiler.predicate_ops,
         contract_ops: compiler.contract_ops,
@@ -57,6 +60,7 @@ struct Compiler {
     predicate_ops: Vec<PredicateOp>,
     contract_ops: Vec<ContractOp>,
     observable_slots: Vec<String>,
+    event_slots: Vec<String>,
     currency: Option<String>,
 }
 
@@ -67,6 +71,14 @@ impl Compiler {
         }
         self.observable_slots.push(name.to_string());
         self.observable_slots.len() - 1
+    }
+
+    fn event_slot(&mut self, name: &str) -> usize {
+        if let Some(i) = self.event_slots.iter().position(|e| e == name) {
+            return i;
+        }
+        self.event_slots.push(name.to_string());
+        self.event_slots.len() - 1
     }
 
     fn compile_scalar(&mut self, node: &Value) -> Result<usize, String> {
@@ -98,6 +110,11 @@ impl Compiler {
                 low: self.scalar_field(node, "low")?,
                 high: self.scalar_field(node, "high")?,
             },
+            "event_value" => {
+                let event = self.event_slot(str_field(node, "event")?);
+                let observable = self.observable_slot(str_field(node, "observable")?);
+                ScalarOp::EventValue { event, observable }
+            }
             other => return Err(unsupported_node("escalar", other)),
         };
         self.scalar_ops.push(op);
@@ -130,6 +147,7 @@ impl Compiler {
                 low_inclusive: bool_field(node, "low_inclusive")?,
                 high_inclusive: bool_field(node, "high_inclusive")?,
             },
+            "event_occurred" => PredicateOp::EventOccurred(self.event_slot(str_field(node, "event")?)),
             other => return Err(unsupported_node("predicado", other)),
         };
         self.predicate_ops.push(op);
@@ -171,6 +189,53 @@ impl Compiler {
                 time: num_field(node, "time")?,
                 child: self.contract_field(node, "child")?,
             },
+            "trigger" => {
+                let event = self.event_slot(str_field(node, "id")?);
+                let monitoring_times = array_field(node, "monitoring_times")?
+                    .iter()
+                    .map(|v| {
+                        v.as_f64().ok_or_else(|| {
+                            "payoff: 'monitoring_times' debe contener solo numeros".to_string()
+                        })
+                    })
+                    .collect::<Result<Vec<f64>, String>>()?;
+                let monitoring = match str_field(node, "monitoring")? {
+                    "discrete" => MonitoringMode::Discrete,
+                    "continuous_approximation" => {
+                        return Err(format!(
+                            "payoff: 'continuous_approximation' no soportado todavia en CompiledPayoff \
+                             v{COMPILED_PAYOFF_VERSION} (Brownian bridge, PLAN_PRODUCTS.md §4.2/§12 Fase 6): \
+                             usa 'discrete' con una malla de monitorizacion mas fina"
+                        ));
+                    }
+                    other => return Err(format!("payoff: 'monitoring' desconocido '{other}'")),
+                };
+                let settlement = match str_field(node, "settlement")? {
+                    "at_hit" => SettlementMode::AtHit,
+                    "at_scheduled_payment" => SettlementMode::AtScheduledPayment,
+                    other => return Err(format!("payoff: 'settlement' desconocido '{other}'")),
+                };
+                let priority = num_field(node, "priority")? as i32;
+                let latch = bool_field(node, "latch")?;
+                // 'condition'/'on_hit'/'on_miss' se compilan DESPUES de resolver 'event' (arriba)
+                // para que un 'event_occurred'/'event_value' anidado que se refiera a este mismo
+                // evento (p.ej. el propio TP/SL referenciandose por id, aunque no es el caso de
+                // TpSlSpec) resuelva al slot correcto.
+                let condition = self.predicate_field(node, "condition")?;
+                let on_hit = self.contract_field(node, "on_hit")?;
+                let on_miss = self.contract_field(node, "on_miss")?;
+                ContractOp::Trigger {
+                    event,
+                    monitoring_times,
+                    condition,
+                    monitoring,
+                    settlement,
+                    priority,
+                    latch,
+                    on_hit,
+                    on_miss,
+                }
+            }
             other => return Err(unsupported_node("contrato", other)),
         };
         self.contract_ops.push(op);
@@ -198,8 +263,9 @@ impl Compiler {
 fn unsupported_node(category: &str, node_type: &str) -> String {
     format!(
         "payoff: nodo de {category} '{node_type}' no soportado en CompiledPayoff v{COMPILED_PAYOFF_VERSION} \
-         (Fase 5, PLAN_PRODUCTS.md §12): requiere estado de eventos/ejercicio o un observable que ningun \
-         modelo Q de esta fase genera"
+         (PLAN_PRODUCTS.md §12): requiere ejercicio (Exercise, Fase 9), un agregado sobre schedule \
+         (Average/RunningMin/RunningMax) o un observable de mercado (DiscountFactor/FxConversion/Parameter/ \
+         EventTime/Before/After) que ningun modelo Q de esta fase evalua todavia"
     )
 }
 
@@ -290,27 +356,71 @@ mod tests {
 
     #[test]
     fn rejects_unsupported_node_before_evaluating_anything() {
-        let trigger_json = r#"{
+        let exercise_json = r#"{
             "schema": "engine.payoff/v1",
             "id": "x",
-            "contract": {
-                "type": "trigger",
-                "id": "KO",
-                "monitoring_times": [1.0],
-                "condition": {"type": "greater",
-                    "left": {"type": "fixing", "observable": "EQ.SPOT.AAPL", "time": 1.0},
-                    "right": {"type": "constant", "value": 100.0}},
-                "monitoring": "discrete",
-                "settlement": "at_hit",
-                "priority": 0,
-                "latch": true,
-                "on_hit": {"type": "zero"},
-                "on_miss": {"type": "zero"}
-            }
+            "contract": {"type": "exercise"}
         }"#;
-        let err = compile(trigger_json).expect_err("Trigger no deberia soportarse en Fase 5");
-        assert!(err.contains("trigger"));
-        assert!(err.contains("Fase 5"));
+        let err = compile(exercise_json).expect_err("Exercise no deberia soportarse hasta Fase 9");
+        assert!(err.contains("exercise"));
+    }
+
+    // Mismo documento que docs/schema/engine.payoff/examples/barrier.json (up-and-in AAPL,
+    // barrera 120, call 100 a T=1): confirma que el compilador acepta 'trigger' (Fase 6).
+    const BARRIER_JSON: &str = r#"{
+        "schema": "engine.payoff/v1",
+        "id": "AAPL_UP_AND_IN_CALL_100_120",
+        "contract": {
+            "type": "trigger",
+            "id": "UI",
+            "monitoring_times": [0.25, 0.5, 0.75, 1.0],
+            "condition": {
+                "type": "greater_equal",
+                "left": {"type": "current", "observable": "EQ.SPOT.AAPL"},
+                "right": {"type": "constant", "value": 120.0}
+            },
+            "monitoring": "discrete",
+            "settlement": "at_scheduled_payment",
+            "priority": 0,
+            "latch": true,
+            "on_hit": {
+                "type": "when",
+                "time": 1.0,
+                "child": {
+                    "type": "cashflow",
+                    "currency": "USD",
+                    "amount": {
+                        "type": "max",
+                        "left": {
+                            "type": "sub",
+                            "left": {"type": "fixing", "observable": "EQ.SPOT.AAPL", "time": 1.0},
+                            "right": {"type": "constant", "value": 100.0}
+                        },
+                        "right": {"type": "constant", "value": 0.0}
+                    }
+                }
+            },
+            "on_miss": {"type": "zero"}
+        }
+    }"#;
+
+    #[test]
+    fn compiles_trigger_with_event_slot_and_monitoring_times_in_required_times() {
+        let compiled = compile(BARRIER_JSON).expect("barrier.json deberia compilar (Fase 6)");
+        assert_eq!(compiled.event_slots, vec!["UI".to_string()]);
+        assert_eq!(compiled.required_times(), vec![0.25, 0.5, 0.75, 1.0]);
+        assert!(matches!(
+            compiled.contract_ops[compiled.root],
+            ContractOp::Trigger { priority: 0, latch: true, .. }
+        ));
+    }
+
+    #[test]
+    fn rejects_continuous_approximation_monitoring() {
+        let json = BARRIER_JSON.replace("\"discrete\"", "\"continuous_approximation\"");
+        let err = compile(&json).expect_err("Brownian bridge aun no implementado (Fase 6)");
+        assert!(err.contains("continuous_approximation"));
+        assert!(err.contains("Brownian bridge") || err.contains("bridge"));
     }
 
     #[test]

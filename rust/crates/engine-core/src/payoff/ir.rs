@@ -16,8 +16,8 @@
 /// anadir un opcode/nodo nuevo no la sube.
 pub const COMPILED_PAYOFF_VERSION: u32 = 1;
 
-/// Expresion escalar compilada (PLAN_PRODUCTS.md §3.2). Subconjunto sin estado: ver el
-/// doc-comment de `crate::payoff` para los nodos deliberadamente ausentes.
+/// Expresion escalar compilada (PLAN_PRODUCTS.md §3.2). Ver el doc-comment de `crate::payoff`
+/// para los nodos deliberadamente ausentes.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ScalarOp {
     Constant(f64),
@@ -40,6 +40,12 @@ pub enum ScalarOp {
     Min(usize, usize),
     Max(usize, usize),
     Clamp { value: usize, low: usize, high: usize },
+    /// Valor de `observable` capturado quando `event` disparo (PLAN_PRODUCTS.md §3.2
+    /// `EventValue`, §4.3 TP/SL: liquida con el fixing observado en el hit, no con el nivel
+    /// exacto del stop). `event` indexa `CompiledPayoff::event_slots`. Error de evaluacion (no de
+    /// compilacion) si el evento no ha ocurrido en la ruta o no capturo ese observable -- ver
+    /// `eval::eval_scalar`.
+    EventValue { event: usize, observable: usize },
 }
 
 /// Predicado compilado (PLAN_PRODUCTS.md §3.3).
@@ -56,6 +62,28 @@ pub enum PredicateOp {
     Any(Vec<usize>),
     Not(usize),
     Between { value: usize, low: usize, high: usize, low_inclusive: bool, high_inclusive: bool },
+    /// Consulta el estado persistente de una ruta (§3.3 `EventOccurred`): `event` indexa
+    /// `CompiledPayoff::event_slots`. Usado por TP/SL para la guarda de exclusion mutua
+    /// "primer hit gana" (ADR-P0-08, ultimo parrafo): `Not(EventOccurred(la_otra_regla))`.
+    EventOccurred(usize),
+}
+
+/// Monitorizacion de un `Trigger` compilado (§4.2). Solo `Discrete` se evalua hoy --
+/// `ContinuousApproximation` (Brownian bridge) requiere que el modelo declare soporte
+/// (`ModelCapabilities::supports_continuous_barrier_bridge`, Fase 6) y `compile::compile` lo
+/// rechaza en preflight hasta que ese soporte exista.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MonitoringMode {
+    Discrete,
+    ContinuousApproximation,
+}
+
+/// Cuando se paga el `Cashflow` "desnudo" de `on_hit`/`on_miss` (§4.1, ADR-P0-10): en el
+/// instante del primer hit, o en la fecha ya programada por el propio subarbol.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettlementMode {
+    AtHit,
+    AtScheduledPayment,
 }
 
 /// Contrato compilado (PLAN_PRODUCTS.md §3.4).
@@ -72,6 +100,22 @@ pub enum ContractOp {
     If { condition: usize, if_true: usize, if_false: usize },
     /// Fija el "instante activo" (cursor de ADR-P0-08) para `child`.
     When { time: f64, child: usize },
+    /// Evento path-dependent persistente (§4.1, §4.2 barreras, §4.3 TP/SL). `event` indexa
+    /// `CompiledPayoff::event_slots`. El desempate de dos triggers simultaneos usa `priority` y,
+    /// a igualdad, el orden lexicografico de `event_slots[event]` (ADR-P0-03) -- ver
+    /// `eval::resolve_trigger_states`, que replica exactamente la resolucion de
+    /// `ScenarioEvaluator` en C++ (`cpp/engine/src/payoff/scenario_evaluator.cpp`).
+    Trigger {
+        event: usize,
+        monitoring_times: Vec<f64>,
+        condition: usize,
+        monitoring: MonitoringMode,
+        settlement: SettlementMode,
+        priority: i32,
+        latch: bool,
+        on_hit: usize,
+        on_miss: usize,
+    },
 }
 
 /// IR plana completa de un `PayoffProgram` (PLAN_PRODUCTS.md §8). Inmutable una vez compilada;
@@ -86,6 +130,10 @@ pub struct CompiledPayoff {
     /// modelo GBM genera un unico subyacente), pero el slot es un `Vec` desde el principio para
     /// no repetir este tipo cuando un modelo multi-activo exista.
     pub observable_slots: Vec<String>,
+    /// Nombres canonicos de `EventId` (p.ej. `"UI"`, `"TAKE_PROFIT"`), indexados por
+    /// `ContractOp::Trigger::event`/`ScalarOp::EventValue`/`PredicateOp::EventOccurred`. Vacio si
+    /// el programa no tiene ningun `Trigger`.
+    pub event_slots: Vec<String>,
     pub scalar_ops: Vec<ScalarOp>,
     pub predicate_ops: Vec<PredicateOp>,
     pub contract_ops: Vec<ContractOp>,
@@ -95,11 +143,13 @@ pub struct CompiledPayoff {
 
 impl CompiledPayoff {
     /// Todos los instantes en los que un modelo debe generar el (unico) observable para poder
-    /// interpretar este programa: los `Fixing` explicitos y los `When` que fijan el "instante
-    /// activo" que `Current` puede leer (ADR-P0-08) -- union deduplicada y ordenada ascendente.
-    /// Quien simula (p.ej. `models::gbm::Gbm::simulate_at_times`) usa exactamente este conjunto,
-    /// nunca una rejilla propia: asi `eval::ObservablePath::value_at` siempre encuentra el
-    /// tiempo exacto que le pida el interprete.
+    /// interpretar este programa: los `Fixing` explicitos, los `When` que fijan el "instante
+    /// activo" que `Current` puede leer (ADR-P0-08), y los `monitoring_times` de todo `Trigger`
+    /// (§4.1: el estado de un evento se resuelve en la union ordenada de fechas de monitorizacion
+    /// de todos los triggers del arbol) -- union deduplicada y ordenada ascendente. Quien simula
+    /// (p.ej. `models::gbm::Gbm::simulate_at_times`) usa exactamente este conjunto, nunca una
+    /// rejilla propia: asi `eval::ObservablePath::value_at` siempre encuentra el tiempo exacto
+    /// que le pida el interprete.
     pub fn required_times(&self) -> Vec<f64> {
         let mut times: Vec<f64> = self
             .scalar_ops
@@ -109,10 +159,13 @@ impl CompiledPayoff {
                 _ => None,
             })
             .collect();
-        times.extend(self.contract_ops.iter().filter_map(|op| match op {
-            ContractOp::When { time, .. } => Some(*time),
-            _ => None,
-        }));
+        for op in &self.contract_ops {
+            match op {
+                ContractOp::When { time, .. } => times.push(*time),
+                ContractOp::Trigger { monitoring_times, .. } => times.extend(monitoring_times.iter().copied()),
+                _ => {}
+            }
+        }
         times.sort_by(|a, b| a.partial_cmp(b).expect("payoff: tiempo no finito en CompiledPayoff"));
         times.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
         times
