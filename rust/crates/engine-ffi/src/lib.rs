@@ -40,6 +40,17 @@ mod ffi {
         converged: bool,
     }
 
+    /// Precio bajo Q de un `PayoffProgram` (PLAN_PRODUCTS.md §12 Fase 5:
+    /// `engine_core::mc::McEstimate`) -- media, error estandar e intervalo de confianza del
+    /// estimador Monte Carlo, ver `engine_core::payoff::price_payoff_gbm_q`.
+    struct PayoffQPriceResult {
+        mean: f64,
+        std_error: f64,
+        ci_low: f64,
+        ci_high: f64,
+        n_paths: u64,
+    }
+
     extern "Rust" {
         fn ping() -> f64;
 
@@ -360,6 +371,25 @@ mod ffi {
         // hull_white_zero_coupon_bond, usado por engine::Curve::synthetic_from_hull_white_2f
         // en C++ (PLAN.md §7.20) para fabricar una curva sin datos reales.
         fn hull_white_2f_zero_coupon_bond(a: f64, b: f64, sigma: f64, eta: f64, rho: f64, r0: f64, maturity: f64) -> f64;
+
+        // PLAN_PRODUCTS.md §12 Fase 5: precio bajo Q (GBM) de un PayoffProgram serializado como
+        // JSON canonico engine.payoff/v1 (el mismo que produce CanonicalVisitor::to_json en
+        // C++/engine_typed.payoff en Python) -- ver engine_core::payoff, que compila/evalua el
+        // IR enteramente en Rust; solo el resultado final cruza esta frontera. A diferencia de
+        // toda funcion de arriba, esta SI puede fallar (preflight de "observable no generado" u
+        // otro error de compilacion del JSON) -- `Result<T>` hace que un `Err(String)` del lado
+        // Rust cruce como una excepcion de C++ en el punto de la llamada (ver cpp/engine/src/
+        // payoff/measures.cpp, que la captura y la reexpone como ValidationError/EvaluationError).
+        fn price_payoff_gbm_q(
+            spec_json: String,
+            observable: String,
+            s0: f64,
+            r: f64,
+            q: f64,
+            sigma: f64,
+            n_paths: u64,
+            seed: u64,
+        ) -> Result<PayoffQPriceResult>;
     }
 }
 
@@ -801,4 +831,26 @@ fn calibrate_hull_white_2f(
 
 fn hull_white_2f_zero_coupon_bond(a: f64, b: f64, sigma: f64, eta: f64, rho: f64, r0: f64, maturity: f64) -> f64 {
     engine_core::smoke::hull_white_2f_zero_coupon_bond(a, b, sigma, eta, rho, r0, maturity)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn price_payoff_gbm_q(
+    spec_json: String,
+    observable: String,
+    s0: f64,
+    r: f64,
+    q: f64,
+    sigma: f64,
+    n_paths: u64,
+    seed: u64,
+) -> Result<ffi::PayoffQPriceResult, String> {
+    let estimate =
+        engine_core::payoff::price_payoff_gbm_q(&spec_json, &observable, s0, r, q, sigma, n_paths, seed)?;
+    Ok(ffi::PayoffQPriceResult {
+        mean: estimate.mean,
+        std_error: estimate.std_error,
+        ci_low: estimate.ci_low,
+        ci_high: estimate.ci_high,
+        n_paths: estimate.n_paths,
+    })
 }
