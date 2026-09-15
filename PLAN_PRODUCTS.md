@@ -741,34 +741,51 @@ FXForward y payoff custom sin ramas de producto nuevas.
 **Aceptación**: benchmark publicado, igualdad CPU/GPU y ninguna especialización cambia el
 resultado más allá de tolerancia declarada.
 
-**Estado (avance de esta sesión, para retomar)**:
+**Estado (cerrado)**:
 
 - Hecho: dedup por `canonical_hash` entre productos distintos de `price_batch_generic`
   (`cpp/engine/src/price.cpp`) -- "grouping por fingerprint" para el lote genérico.
 - Hecho: CSE en `compile::Compiler` (Rust, `payoff/compile.rs`/`ir.rs`) -- deduplica
   `ScalarOp`/`PredicateOp`/`ContractOp` estructuralmente idénticos por escaneo lineal.
+- Hecho: "buffers compactos" -- decisión de cierre documentada en el doc-comment de `payoff/ir.rs`:
+  `scalar_ops`/`predicate_ops`/`contract_ops` (planos por índice, deduplicados por CSE) YA SON el
+  buffer compacto que pedía esta fase; un layout struct-of-arrays adicional por variante de opcode
+  solo pagaría su complejidad con un intérprete que vectorice nodo a nodo, y el modelo de ejecución
+  actual vectoriza en la dimensión de rutas Monte Carlo, no de nodos del IR -- reestructurar el IR
+  sin cambiar también el intérprete no aportaría vectorización real.
 - Hecho: `payoff::api` (Q) genérico sobre `Backend` (`price_payoff_gbm_q`,
   `hit_probability_gbm_q`, `payoff_exposure_profile_gbm_q`, `price_payoff_exercise_gbm_q`),
   mismo patrón que `crate::api::irs_hull_white_exposure_profile`; benchmark
   `payoff_gpu_vs_cpu_bench.rs` y test diferencial CPU/GPU (`--features gpu`). La interfaz cxx
-  hacia C++ no cambió (`engine-ffi` sigue pasando `"cpu"` fijo) -- estas cuatro funciones siguen
+  hacia C++ no cambió (`engine-ffi` sigue pasando `"cpu"` fijo) -- estas funciones siguen
   sin estar registradas en `Registry<IMeasure>` ni alcanzables desde C++/Python/Excel con
   selección de backend real; eso queda pendiente si algún día hace falta GPU de verdad desde
   fuera de Rust. Nota de entorno: en esta máquina, `--features gpu` compila pero el kernel wgpu
   falla en runtime con `.log()`/`.exp()` (los usa `Gbm`, Hull-White no) -- parece limitación del
   driver/entorno, no un bug introducido aquí; revisar antes de depender de GPU real para payoff.
-- Pendiente (sin empezar): **AAD con fallback a bump-and-reval** para sensibilidades del pricer
-  Monte Carlo GBM de payoff (hoy `payoff::api` no tiene ningún backend diferenciable -- todo el
-  intérprete pathwise es `f64` puro; el AAD que ya existe en el repo, ver
-  `rust/crates/engine-core/tests/aad_vs_bump_reval.rs`, es solo para IRS/Hull-White, no para
-  `CompiledPayoff`).
-- Pendiente (sin empezar): **solver de hedge** (§11): sin Eigen/BLAS/LAPACK en el repo hoy: decidir
-  entre añadir esa dependencia o escribir un solver de mínimos cuadrados propio (ecuaciones
-  normales; los universos de cobertura previstos son pequeños) antes de diseñar la API de
-  síntesis de cobertura sobre una rejilla de escenarios.
-- No cerrado: "buffers compactos" del segundo bullet no se ha abordado explícitamente todavía
-  (el IR ya es plano por índice desde Fase 5; falta valorar si hace falta algo más compacto tras
-  el CSE de esta sesión).
+- Hecho: **AAD con fallback a bump-and-reval** para sensibilidades del pricer Monte Carlo GBM de
+  payoff (`payoff/dual.rs` + `payoff/sensitivity.rs`, expuesto como `payoff::api::
+  payoff_sensitivity_gbm_q`). Método pathwise (Broadie-Glasserman): se recupera el browniano
+  realizado de la ruta `f64` ya simulada y se recalcula `S_t` con un número dual respecto de
+  `s0`/`r`/`q`/`sigma`, propagado por el árbol de `ScalarOp` -- derivada exacta por ruta, sin
+  envolver el intérprete en tensores de Burn. La ramificación discreta (`If`/`Trigger`/`Exercise`)
+  se decide una vez sobre la ruta `f64` y se mantiene fija (justificación estándar del método
+  pathwise). Para contratos con `ContractOp::Exercise` (donde re-decidir Longstaff-Schwartz bajo
+  el parámetro perturbado sí cambia la política completa) cae automáticamente al fallback
+  bump-and-reval con números aleatorios comunes que preveía este plan. Como efecto colateral se
+  corrigió un bug preexistente en los fixtures de test de Fase 9 (`bermuda_contract_json`/
+  `european_vanilla_json` en `payoff/api.rs` combinaban strike/spot con `max(a,b)` en vez de
+  `max(a-b,0)`, un payoff que no era un put/call real) que las comparaciones relativas ya
+  existentes no detectaban.
+- Hecho: **solver de hedge** (§11, `payoff/hedge.rs`): mínimos cuadrados regularizados por
+  ecuaciones normales + Cholesky escritos a mano en `f64` puro (decisión tomada: sin Eigen/BLAS/
+  LAPACK, universos de cobertura pequeños), con `ridge` para instrumentos colineales.
+  `synthesize_hedge_gbm_q` evalúa el target y el universo de instrumentos sobre una única rejilla
+  compartida de escenarios GBM/Q y reporta pesos, residual por escenario (media/desviación/máximo)
+  y coste si se dan precios -- nunca promete neutralización exacta sin comprobar rango (§11, punto
+  5). Fuera de alcance deliberado (documentado, no oculto): Greeks residuales, riesgo de
+  base/correlación/volatilidad explícito, liquidez y restricciones LP/QP -- `ridge` es la única
+  regularización de esta fase.
 
 ## 13. Estrategia de pruebas
 

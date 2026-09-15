@@ -22,6 +22,21 @@
 //! padres lo referencien. No hay orden topologico explicito mas alla del que ya impone construir
 //! cada `Vec` en post-orden durante la compilacion (§8 punto 5): sigue siendo asi con CSE, ya que
 //! `intern_*` solo se llama con nodos cuyos hijos (subindices) ya se compilaron/internaron antes.
+//!
+//! **"Buffers compactos" (§12 Fase 11, decision de cierre)**: `scalar_ops`/`predicate_ops`/
+//! `contract_ops` YA SON el buffer compacto que pedia esa fase -- un `Vec<enum>` por indice
+//! entero, deduplicado por CSE, sin punteros ni `Box` recursivos. Se evaluo deliberadamente NO ir
+//! mas alla, hacia un layout struct-of-arrays por variante de opcode (columnas separadas de
+//! `f64`/`usize` por cada campo de cada variante, pensado para vectorizar la EVALUACION de muchos
+//! nodos a la vez): ese layout solo paga su complejidad si el interprete recorre el arbol de forma
+//! vectorizada nodo a nodo, y el modelo de ejecucion actual (`eval::eval_scalar`/`eval_contract`,
+//! `payoff::sensitivity::eval_scalar_dual`/`eval_contract_dual`) es recursivo sobre UN arbol por
+//! ruta -- la vectorizacion real de esta fase ocurre en la dimension de RUTAS Monte Carlo (columnas
+//! `Vec<f64>` de `simulate_gbm_columns`/`simulate_gbm_columns_at` en `payoff::api`/`payoff::hedge`,
+//! generadas por el backend de Burn), no en la dimension de nodos del IR. Reestructurar el IR a
+//! SoA sin cambiar tambien el interprete a un recorrido vectorizado por nodo no aportaria ninguna
+//! vectorizacion adicional, solo complejidad -- se documenta esta decision aqui en vez de dejarla
+//! implicita, siguiendo el mismo criterio que el resto de "Estado" de Fase 11 en PLAN_PRODUCTS.md.
 
 /// Version del formato `CompiledPayoff`. Sube solo si cambia el significado de un opcode ya
 /// publicado (misma regla que `engine_abi_version()` en `cpp/engine/include/engine/abi.h`);
