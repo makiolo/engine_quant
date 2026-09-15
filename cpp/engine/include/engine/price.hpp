@@ -79,12 +79,14 @@ PriceResult price(
 // único tipo de producto real (`IrSwapProduct`) hoy, "agrupar por tipo" es un único grupo por
 // construcción; el resto de la validación (calendario) sí es necesaria ya.
 //
-// A diferencia de `price()`, el lote sigue limitado a las medidas que conoce
-// `evaluate_batch_registered_measure` en `price.cpp` ("PV"/"DV01"/"UnilateralCVA"/
-// "ExposureProfile", más los alias "ExpectedExposure"/"PFE95") -- con un único producto real
-// no hay genericidad real que ganar todavía generalizando el despacho de lote al registry
-// (mismo argumento que ya justificó no generalizar la C ABI de calibración hasta el segundo
-// calibrador, PLAN.md §7.18).
+// "PV"/"DV01"/"UnilateralCVA"/"ExposureProfile" (más los alias "ExpectedExposure"/"PFE95") usan
+// una ruta de lote VECTORIZADA (`evaluate_batch_registered_measure` en `price.cpp`, un único
+// `compute_*_batch` para todo el lote). Cualquier otra medida registrada en
+// `Registry<IMeasure>` -- p.ej. "Greek" (PLAN_GREEKS.md §11 Fase 8) -- sigue siendo válida aquí:
+// cae en un fallback genérico que evalúa esa medida producto a producto (sin vectorizar, mismo
+// principio que `price_batch_generic` para lotes de `PayoffProduct`) en vez de lanzar. Lanza
+// `std::invalid_argument` únicamente si el nombre no resuelve a ninguna medida conocida en
+// absoluto (ni la lista vectorizada ni `registries.measures`).
 struct PriceBatchResultEntry {
     std::size_t trade_index;
     PriceResult measures;

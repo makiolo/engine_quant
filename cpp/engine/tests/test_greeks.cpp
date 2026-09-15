@@ -1693,3 +1693,145 @@ TEST(GreeksFase7Test, GreekMeasureReachesHullWhiteModelNpvAadThroughEnginePrice)
     ASSERT_TRUE(result[0].result.has_scalar);
     EXPECT_NE(result[0].result.scalar, 0.0);
 }
+
+// PLAN_GREEKS.md §11 Fase 8 (lote): "Greek" no tiene ruta vectorizada dedicada en price.cpp
+// (`known_batch_registered_types()` sigue siendo solo {"PV","DV01","UnilateralCVA",
+// "ExposureProfile"}), pero desde esta fase ya no lanza dentro de un lote de `IrSwapProduct` --
+// cae en un fallback genérico producto a producto (`Registry<IMeasure>::create(...)->evaluate`)
+// dentro de `price_batch`. Se verifica trade a trade contra `price()` (que ya delega en
+// `compute_greek` para "Greek"), mismo patrón que `PriceBatch.MatchesALoopOfScalarCallsPerTrade`
+// en test_registry.cpp.
+TEST(GreeksFase8Test, PriceBatchOfIrsMixesPvDv01AndGreekMatchingALoopOfScalarCalls) {
+    Registries registries;
+    register_builtins(registries);
+
+    engine::HullWhite1FModel model = make_hull_white();
+    engine::IrSwapProduct product_a = make_irs(1'000'000.0, 0.02);
+    engine::IrSwapProduct product_b = make_irs(2'500'000.0, 0.015);
+    MarketSnapshot market = upward_sloping_market();
+    PricingContext pricing = pricing_context(1'000, 7);
+    ExecutionContext execution = cpu_execution();
+
+    std::vector<const engine::IProduct*> products{&product_a, &product_b};
+    std::vector<engine::MeasureSpec> measures = {
+        {"PV", {}},
+        {"DV01", {}},
+        {"Greek", Params{{"metric", std::string("PV")}, {"risk_factor", std::string("curve.parallel")}}},
+        {"Greek",
+         Params{
+             {"metric", std::string("HullWhiteModelNpv")}, {"risk_factor", std::string("model.a")},
+             {"method", std::string("aad")}
+         }},
+    };
+
+    engine::PriceBatchResult batch = engine::price_batch(registries, products, measures, model, market, pricing, execution);
+    ASSERT_EQ(batch.size(), products.size());
+
+    for (std::size_t i = 0; i < products.size(); ++i) {
+        EXPECT_EQ(batch[i].trade_index, i);
+        engine::PriceResult scalar = engine::price(registries, *products[i], measures, model, market, pricing, execution);
+        ASSERT_EQ(batch[i].measures.size(), scalar.size());
+        for (std::size_t m = 0; m < measures.size(); ++m) {
+            ASSERT_TRUE(batch[i].measures[m].result.has_scalar) << "trade " << i << " medida " << m;
+            ASSERT_TRUE(scalar[m].result.has_scalar) << "trade " << i << " medida " << m;
+            EXPECT_NEAR(batch[i].measures[m].result.scalar, scalar[m].result.scalar, 1e-6)
+                << "trade " << i << " medida " << m;
+        }
+    }
+    // Sanity: los dos "Greek" realmente calcularon algo (no degeneraron a 0 por accidente).
+    EXPECT_NE(batch[0].measures[2].result.scalar, 0.0);
+    EXPECT_NE(batch[0].measures[3].result.scalar, 0.0);
+}
+
+// Antes de Fase 8, price_many delegaba en price_batch para cada grupo de IrSwapProduct del mismo
+// calendario y ESE price_batch lanzaba std::invalid_argument("medida desconocida o no soportada
+// en lote: 'Greek'") en cuanto una spec no estaba en el conjunto cerrado de 4 medidas
+// vectorizadas -- por eso "price_many mezcla PV/DV01/Greek" no funcionaba en absoluto sobre IRS.
+// Este test incluye ademas dos calendarios distintos (dos grupos) para ejercitar el fallback
+// dentro de cada grupo, no solo dentro de un unico price_batch.
+TEST(GreeksFase8Test, PriceManyGroupsIrsTradesAndAllowsGreekAcrossDifferentCalendars) {
+    Registries registries;
+    register_builtins(registries);
+
+    engine::HullWhite1FModel model = make_hull_white();
+    engine::IrSwapProduct product_a = make_irs(1'000'000.0, 0.02);  // calendario 1/2/3
+    engine::IrSwapProduct product_b = make_irs(2'500'000.0, 0.015); // mismo calendario que a
+    engine::IrSwapProduct product_c(Params{
+        {"notional", 500'000.0},
+        {"fixed_rate", 0.025},
+        {"payment_times", std::vector<double>{0.5, 1.0}},
+        {"accruals", std::vector<double>{0.5, 0.5}},
+    }); // calendario distinto -> grupo propio dentro de price_many
+
+    MarketSnapshot market = upward_sloping_market();
+    PricingContext pricing = pricing_context(1'000, 7);
+    ExecutionContext execution = cpu_execution();
+
+    std::vector<const engine::IProduct*> products{&product_a, &product_b, &product_c};
+    std::vector<engine::MeasureSpec> measures = {
+        {"PV", {}},
+        {"Greek", Params{{"metric", std::string("PV")}, {"risk_factor", std::string("curve.parallel")}}},
+    };
+
+    engine::PriceBatchResult many = engine::price_many(registries, products, measures, model, market, pricing, execution);
+    ASSERT_EQ(many.size(), products.size());
+
+    for (std::size_t i = 0; i < products.size(); ++i) {
+        EXPECT_EQ(many[i].trade_index, i);
+        engine::PriceResult scalar = engine::price(registries, *products[i], measures, model, market, pricing, execution);
+        for (std::size_t m = 0; m < measures.size(); ++m) {
+            ASSERT_TRUE(many[i].measures[m].result.has_scalar);
+            EXPECT_NEAR(many[i].measures[m].result.scalar, scalar[m].result.scalar, 1e-6) << "trade " << i << " medida " << m;
+        }
+    }
+}
+
+// Documenta (y protege de regresion) que un lote de PayoffProduct YA permitia mezclar "Greek" con
+// "PayoffPriceQ" antes de Fase 8 -- price_batch_generic despacha cualquier medida registrada
+// producto a producto con dedup por fingerprint (canonical_hash), sin la lista cerrada que sí
+// tenia (y ya no tiene) el camino de IrSwapProduct. product_a/product_b comparten AST exacto
+// (mismo id, mismo contrato) -> mismo canonical_hash -> el fingerprint cache de
+// price_batch_generic reutiliza el resultado completo para el segundo producto, byte a byte.
+TEST(GreeksFase8Test, PriceBatchOfPayoffProductsAlreadyAllowedGreekWithPayoffPriceQBeforeFase8) {
+    Registries registries;
+    register_builtins(registries);
+    const pf::ObservableId spot{"EQ.SPOT.XYZ"};
+    engine::GbmModel model = make_gbm_q(100.0, 0.05, 0.0, 0.2, "EQ.SPOT.XYZ");
+    MarketSnapshot market = flat_market();
+    PricingContext pricing = pricing_context(50'000, 7);
+    ExecutionContext execution = cpu_execution();
+
+    pf::PayoffProduct product_a("CALL", european_call(spot, 100.0, 1.0));
+    pf::PayoffProduct product_b("CALL", european_call(spot, 100.0, 1.0));
+
+    std::vector<const engine::IProduct*> products{&product_a, &product_b};
+    std::vector<engine::MeasureSpec> measures = {
+        {"PayoffPriceQ", {}},
+        {"Greek", Params{{"metric", std::string("PayoffPriceQ")}, {"risk_factor", std::string("model.spot")}}},
+    };
+
+    engine::PriceBatchResult batch = engine::price_batch(registries, products, measures, model, market, pricing, execution);
+    ASSERT_EQ(batch.size(), 2u);
+    EXPECT_EQ(batch[0].measures[0].result.scalar, batch[1].measures[0].result.scalar);
+    EXPECT_EQ(batch[0].measures[1].result.scalar, batch[1].measures[1].result.scalar);
+    EXPECT_NE(batch[0].measures[1].result.scalar, 0.0);
+}
+
+// Non-regresion explicita: un nombre que no resuelve a NINGUNA medida (ni vectorizada ni
+// registrada) sigue rechazandose dentro de un lote de IrSwapProduct -- el fallback generico de
+// Fase 8 amplia lo que se acepta, no lo desactiva.
+TEST(GreeksFase8Test, PriceBatchStillRejectsATrulyUnknownMeasureName) {
+    Registries registries;
+    register_builtins(registries);
+    engine::HullWhite1FModel model = make_hull_white();
+    engine::IrSwapProduct product = make_irs(1'000'000.0, 0.02);
+    std::vector<const engine::IProduct*> products{&product};
+
+    EXPECT_THROW(
+        engine::price_batch(
+            registries, products, std::vector<std::string>{"NoSuchMeasure"}, model, upward_sloping_market(),
+            pricing_context(1'000, 7), cpu_execution()
+        ),
+        std::invalid_argument
+    );
+}

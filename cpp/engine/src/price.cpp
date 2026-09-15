@@ -153,21 +153,15 @@ std::vector<const IrSwapProduct*> require_homogeneous_irs_batch(const std::vecto
     return irs_products;
 }
 
-// A diferencia de `price()`, el lote sigue limitado a las medidas que sabe evaluar
-// `evaluate_batch_registered_measure` (ver comentario de `price_batch` en price.hpp) -- valida
-// contra este conjunto cerrado en vez de contra `registries.measures` (que sí acepta medidas
-// sin equivalente de lote todavía).
+// Medidas con ruta de lote VECTORIZADA dedicada (`evaluate_batch_registered_measure`, ver su
+// comentario más abajo) -- cualquier otra medida registrada (p.ej. "Greek", PLAN_GREEKS.md §11
+// Fase 8) sigue siendo válida en `price_batch`/`price_many` para un lote de `IrSwapProduct`,
+// pero se evalúa producto a producto en vez de vectorizada (ver el fallback genérico dentro de
+// `price_batch`) -- ya no es un conjunto cerrado que rechaza todo lo demás, es solo la lista de
+// lo que tiene atajo rápido.
 const std::unordered_set<std::string>& known_batch_registered_types() {
     static const std::unordered_set<std::string> known = {"PV", "DV01", "UnilateralCVA", "ExposureProfile"};
     return known;
-}
-
-ResolvedMeasure resolve_batch_measure_name(const std::string& name) {
-    ResolvedMeasure resolved = resolve_measure_name(name);
-    if (known_batch_registered_types().find(resolved.registered_type) == known_batch_registered_types().end()) {
-        throw std::invalid_argument("engine::price_batch: medida desconocida o no soportada en lote: '" + name + "'");
-    }
-    return resolved;
 }
 
 // Evalúa una medida registrada subyacente (PV/DV01/ExposureProfile/UnilateralCVA) sobre el
@@ -455,23 +449,46 @@ PriceBatchResult price_batch(
     std::vector<ResolvedMeasure> resolved;
     resolved.reserve(measures.size());
     for (const MeasureSpec& spec : measures) {
-        resolved.push_back(resolve_batch_measure_name(spec.name));
+        ResolvedMeasure r = resolve_measure_name(spec.name);
+        if (known_batch_registered_types().find(r.registered_type) == known_batch_registered_types().end() &&
+            !registries.measures.contains(r.registered_type)) {
+            throw std::invalid_argument("engine::price_batch: medida desconocida o no soportada en lote: '" + spec.name + "'");
+        }
+        resolved.push_back(std::move(r));
     }
 
     std::vector<const IrSwapProduct*> irs_products = require_homogeneous_irs_batch(products);
 
     // Evalúa cada (medida registrada, configuración) subyacente una única vez para TODO el
-    // lote, igual que `price()` la evalúa una única vez por trade.
+    // lote, igual que `price()` la evalúa una única vez por trade. Las 4 medidas de
+    // `known_batch_registered_types()` usan la ruta vectorizada de siempre
+    // (`evaluate_batch_registered_measure`); cualquier otra medida registrada (p.ej. "Greek",
+    // PLAN_GREEKS.md §11 Fase 8 -- una Greek de un `IrSwapProduct` no tiene forma vectorizada
+    // dedicada, cada trade puede pedir un `RiskFactor`/modelo distinto) cae en un fallback
+    // genérico producto a producto vía `Registry<IMeasure>` -- mismo principio que
+    // `price_batch_generic` (dedup por `cache_key`, aquí sin fingerprint entre productos porque
+    // `IrSwapProduct` no tiene `payoff_program()` y trades distintos del lote típicamente NO son
+    // el mismo cálculo, a diferencia de un AST de payoff repetido).
     std::unordered_map<std::string, std::vector<MeasureResult>> computed;
     for (std::size_t i = 0; i < measures.size(); ++i) {
         const std::string cache_key = resolved[i].registered_type + "#" + params_cache_key(measures[i].params);
-        if (computed.find(cache_key) == computed.end()) {
+        if (computed.find(cache_key) != computed.end()) continue;
+
+        if (known_batch_registered_types().find(resolved[i].registered_type) != known_batch_registered_types().end()) {
             computed.emplace(
                 cache_key,
                 evaluate_batch_registered_measure(
                     resolved[i].registered_type, measures[i].params, model, irs_products, market, pricing, execution
                 )
             );
+        } else {
+            auto measure = registries.measures.create(resolved[i].registered_type, measures[i].params);
+            std::vector<MeasureResult> results;
+            results.reserve(irs_products.size());
+            for (const IrSwapProduct* irs : irs_products) {
+                results.push_back(measure->evaluate(model, *irs, market, pricing, execution));
+            }
+            computed.emplace(cache_key, std::move(results));
         }
     }
 
