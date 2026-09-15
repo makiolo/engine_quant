@@ -76,8 +76,22 @@ struct GreekRequest {
 // ("PayoffPriceQ" -> RiskNeutralQ, "PayoffForecastP" -> PhysicalP, cualquier otro nombre ->
 // DeterministicScenario) y `std_error` queda siempre ausente hasta que una fase posterior
 // propague esa información a través de `MeasureResult`.
+//
+// Fase 2 (PLAN_GREEKS.md §11): ya no asume que la métrica base sea puramente escalar --
+// `MeasureResult` puede llevar `has_scalar`/`scalar` (una probabilidad de hit, la media de una
+// distribución de P&L), un perfil temporal `times`/`primary`/`secondary` (un perfil de
+// exposición: EE/PFE95 en cada `exposure_time`), o ambos a la vez (`PayoffPnlDistributionP`:
+// `scalar` es la media, `primary=[var]`/`secondary=[es]`). `compute_greek` diferencia CADA
+// componente presente, punto a punto, con el mismo bump/números aleatorios comunes -- nunca
+// obliga al llamante a pedir la Greek de "la media" cuando lo que quiere es la de "el VaR": ambas
+// salen del mismo `GreekResult`, `value` (si `has_scalar`) y `primary`/`secondary` (si la métrica
+// produce perfil), mismo `times` que la propia métrica base.
 struct GreekResult {
+    bool has_scalar = false;
     double value = 0.0;
+    std::vector<double> times;
+    std::vector<double> primary;
+    std::vector<double> secondary;
     std::optional<double> std_error;
     GreekOrder order;
     RiskFactor risk_factor;
@@ -95,8 +109,12 @@ struct GreekResult {
 //
 // Fase 1: únicamente `request.order.order == 1` sin `cross_factor`,
 // `request.risk_factor.kind == RiskFactorKind::ModelParameter`, `request.method` en
-// {Auto, BumpAndReval}, y una medida cuyo `MeasureResult::has_scalar` sea `true`. Cualquier otra
-// combinación lanza std::invalid_argument con el motivo exacto -- nunca aproxima en silencio.
+// {Auto, BumpAndReval}. Fase 2 levanta la restricción "solo métricas con `has_scalar=true`":
+// `up`/`down` deben tener la MISMA forma (mismo `has_scalar`, mismo número de puntos en
+// `times`/`primary`/`secondary`) -- una discrepancia de forma entre las dos evaluaciones
+// bumpeadas es un error explícito (indicaría que `metric_params` cambia el tamaño del perfil de
+// forma no determinista, lo que no debería ocurrir nunca). Cualquier otra combinación lanza
+// std::invalid_argument con el motivo exacto -- nunca aproxima en silencio.
 GreekResult compute_greek(
     const Registries& registries, const GreekRequest& request, const IModel& model,
     const IProduct& product, const MarketSnapshot& market, const PricingContext& pricing,
@@ -133,11 +151,15 @@ GreeksReport compute_all_greeks(
 // `Registries` capturada en su construcción (ver el registro con `register_factory` en
 // bootstrap.cpp en vez de `register_type`, que solo pasa un `Params`).
 //
-// Convención de prefijo `metric.*` (PLAN_GREEKS.md §8.2): `Params` es un bag plano sin
-// anidamiento, así que la configuración propia de la métrica interior (p.ej. "event" de
-// PayoffHitProbabilityQ) se pasa como "metric.event" -- se reenvía sin el prefijo como el
-// `Params` propio de esa medida. Azúcar de nombres sobre el mismo bag plano, no un `Params`
-// anidado real.
+// Convención de prefijo `metric.*` (PLAN_GREEKS.md §8.2, cableada ya en Fase 1, cubierta por
+// tests explícitos desde Fase 2): `Params` es un bag plano sin anidamiento, así que la
+// configuración propia de la métrica interior ("event" de PayoffHitProbabilityQ/P,
+// "exposure_times" de PayoffExposureProfileQ, "confidence" de PayoffPnlDistributionP) se pasa
+// como "metric.event"/"metric.exposure_times"/"metric.confidence" -- se reenvía sin el prefijo
+// como el `Params` propio de esa medida. Azúcar de nombres sobre el mismo bag plano, no un
+// `Params` anidado real. `evaluate` aplana el `GreekResult` (Fase 2: puede llevar `has_scalar`,
+// perfil `times`/`primary`/`secondary`, o ambos) a la misma forma de `MeasureResult` sin perder
+// ningún componente.
 class GreekMeasure : public IMeasure {
 public:
     GreekMeasure(const Params& params, const Registries& registries);

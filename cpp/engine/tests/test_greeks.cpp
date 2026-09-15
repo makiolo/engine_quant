@@ -5,6 +5,16 @@
 // `PayoffSensitivityQ` existente y con Black-Scholes cerrado; `bump_used`/`method_used` correctos
 // en `GreekResult`; `compute_all_greeks("PayoffPriceQ", ..., Gbm)` devuelve exactamente
 // {spot, rate, dividend_yield, volatility}, ninguno en `skipped`.
+//
+// Fase 2 de PLAN_GREEKS.md (`GreeksFase2Test` más abajo): extiende `compute_greek`/`GreekMeasure`
+// a métricas CON parámetros propios reenviados vía el prefijo `metric.*` ("event" de
+// `PayoffHitProbabilityQ`, "exposure_times" de `PayoffExposureProfileQ`, "confidence" de
+// `PayoffPnlDistributionP`) y a métricas cuyo `MeasureResult` no es puramente escalar (perfil
+// `times`/`primary`/`secondary`, o escalar+perfil a la vez como `PayoffPnlDistributionP`).
+// Criterio de aceptación explícito: sensibilidad de una probabilidad de hit a la volatilidad, de
+// un VaR/ES a `mu`, y de un perfil de exposición a `sigma`, las tres vía "Greek" sin código nuevo
+// por combinación -- verificadas contra un oráculo de bump-and-reval manual construido con el
+// mismo `bump_override` (números aleatorios comunes: mismo seed/n_paths en ambas evaluaciones).
 
 #include <gtest/gtest.h>
 
@@ -18,7 +28,9 @@
 #include "engine/bootstrap.hpp"
 #include "engine/greeks.hpp"
 #include "engine/model.hpp"
+#include "engine/payoff/barrier_templates.hpp"
 #include "engine/payoff/expression.hpp"
+#include "engine/payoff/measures.hpp"
 #include "engine/payoff/payoff_product.hpp"
 #include "engine/price.hpp"
 #include "engine/product.hpp"
@@ -88,6 +100,14 @@ GreekRequest payoff_price_q_request(const std::string& risk_factor_name) {
     request.order = GreekOrder{1, std::nullopt};
     request.method = GreekMethod::Auto;
     return request;
+}
+
+// Contrato up-and-in usado por los tests de Fase 2 de PayoffHitProbabilityQ (mismo patrón que
+// test_registry_wiring_payoff_measures.cpp).
+pf::ContractPtr up_and_in_call(
+    const pf::ObservableId& spot, double barrier, double strike, double maturity, const std::vector<pf::TimePoint>& monitoring_times
+) {
+    return pf::templates::up_and_in(pf::EventId{"UI"}, spot, barrier, monitoring_times, european_call(spot, strike, maturity));
 }
 
 class FakeProduct : public engine::IProduct {
@@ -408,4 +428,200 @@ TEST(GreeksFase1Test, ParseRiskFactorRoundTripsThroughToString) {
     EXPECT_THROW(engine::greeks::parse_risk_factor("bogus"), std::invalid_argument);
     EXPECT_THROW(engine::greeks::parse_risk_factor("model."), std::invalid_argument);
     EXPECT_THROW(engine::greeks::parse_risk_factor("curve.unknown"), std::invalid_argument);
+}
+
+// --- Fase 2: convención de prefijo `metric.*` para métricas con parámetros propios ------------
+
+TEST(GreeksFase2Test, HitProbabilityQVegaMatchesManualBumpAndReval) {
+    Registries registries;
+    register_builtins(registries);
+    const pf::ObservableId spot{"EQ.SPOT.XYZ"};
+    const double s0 = 100.0, barrier = 120.0, strike = 100.0, r = 0.05, q = 0.0, sigma = 0.2, maturity = 1.0;
+    const std::vector<pf::TimePoint> monitoring_times{tp(0.25), tp(0.5), tp(0.75), tp(maturity)};
+    const double h = 0.02;
+
+    pf::PayoffProduct product("UI", up_and_in_call(spot, barrier, strike, maturity, monitoring_times));
+    engine::GbmModel model = make_gbm_q(s0, r, q, sigma, spot.value);
+
+    GreekRequest request;
+    request.metric_name = "PayoffHitProbabilityQ";
+    request.metric_params = Params{{"event", std::string("UI")}};
+    request.risk_factor = RiskFactor{RiskFactorKind::ModelParameter, "model", "volatility", std::nullopt};
+    request.order = GreekOrder{1, std::nullopt};
+    request.method = GreekMethod::Auto;
+    request.bump_override = h;
+
+    engine::greeks::GreekResult via_greek =
+        engine::greeks::compute_greek(registries, request, model, product, flat_market(), pricing_context(50'000, 13), cpu_execution());
+
+    auto hit_probability = registries.measures.create("PayoffHitProbabilityQ", Params{{"event", std::string("UI")}});
+    engine::GbmModel model_up = make_gbm_q(s0, r, q, sigma + h, spot.value);
+    engine::GbmModel model_down = make_gbm_q(s0, r, q, sigma - h, spot.value);
+    engine::MeasureResult up = hit_probability->evaluate(model_up, product, flat_market(), pricing_context(50'000, 13), cpu_execution());
+    engine::MeasureResult down =
+        hit_probability->evaluate(model_down, product, flat_market(), pricing_context(50'000, 13), cpu_execution());
+    double manual = (up.scalar - down.scalar) / (2.0 * h);
+
+    EXPECT_TRUE(via_greek.has_scalar);
+    EXPECT_TRUE(via_greek.times.empty());
+    EXPECT_TRUE(via_greek.primary.empty());
+    EXPECT_TRUE(via_greek.secondary.empty());
+    EXPECT_NEAR(via_greek.value, manual, 1e-9) << "Greek=" << via_greek.value << " manual=" << manual;
+    EXPECT_GT(via_greek.value, 0.0); // mas volatilidad -> mas probabilidad de tocar una barrera al alza
+}
+
+TEST(GreeksFase2Test, PnlDistributionPGreeksOfMeanVarEsToMuMatchManualBumpAndReval) {
+    Registries registries;
+    register_builtins(registries);
+    const pf::ObservableId spot{"EQ.SPOT.XYZ"};
+    const double s0 = 100.0, mu = 0.05, sigma = 0.2, maturity = 1.0;
+    const double h = 0.01;
+
+    pf::PayoffProduct product(
+        "LONG_SPOT", pf::when(tp(maturity), pf::cashflow(pf::Currency{"USD"}, pf::sub(pf::fixing(spot, tp(maturity)), pf::constant(s0))))
+    );
+    engine::GbmPModel model = make_gbm_p(s0, mu, sigma, spot.value);
+
+    GreekRequest request;
+    request.metric_name = "PayoffPnlDistributionP";
+    request.metric_params = Params{{"confidence", 0.95}};
+    request.risk_factor = RiskFactor{RiskFactorKind::ModelParameter, "model", "mu", std::nullopt};
+    request.order = GreekOrder{1, std::nullopt};
+    request.method = GreekMethod::Auto;
+    request.bump_override = h;
+
+    engine::greeks::GreekResult via_greek =
+        engine::greeks::compute_greek(registries, request, model, product, flat_market(), pricing_context(50'000, 11), cpu_execution());
+
+    auto pnl = registries.measures.create("PayoffPnlDistributionP", Params{{"confidence", 0.95}});
+    engine::GbmPModel model_up = make_gbm_p(s0, mu + h, sigma, spot.value);
+    engine::GbmPModel model_down = make_gbm_p(s0, mu - h, sigma, spot.value);
+    engine::MeasureResult up = pnl->evaluate(model_up, product, flat_market(), pricing_context(50'000, 11), cpu_execution());
+    engine::MeasureResult down = pnl->evaluate(model_down, product, flat_market(), pricing_context(50'000, 11), cpu_execution());
+
+    ASSERT_TRUE(via_greek.has_scalar);
+    ASSERT_EQ(via_greek.primary.size(), 1u);
+    ASSERT_EQ(via_greek.secondary.size(), 1u);
+    double manual_mean = (up.scalar - down.scalar) / (2.0 * h);
+    double manual_var = (up.primary[0] - down.primary[0]) / (2.0 * h);
+    double manual_es = (up.secondary[0] - down.secondary[0]) / (2.0 * h);
+    EXPECT_NEAR(via_greek.value, manual_mean, 1e-9) << "mean: Greek=" << via_greek.value << " manual=" << manual_mean;
+    EXPECT_NEAR(via_greek.primary[0], manual_var, 1e-9) << "var: Greek=" << via_greek.primary[0] << " manual=" << manual_var;
+    EXPECT_NEAR(via_greek.secondary[0], manual_es, 1e-9) << "es: Greek=" << via_greek.secondary[0] << " manual=" << manual_es;
+}
+
+TEST(GreeksFase2Test, ExposureProfileQGreekIsAPerPointDeltaWithNoScalar) {
+    Registries registries;
+    register_builtins(registries);
+    const pf::ObservableId spot{"EQ.SPOT.XYZ"};
+    const double s0 = 100.0, strike = 100.0, r = 0.05, q = 0.0, sigma = 0.2, maturity = 1.0;
+    const std::vector<double> exposure_times{0.5, maturity};
+    const double h = 0.02;
+
+    pf::PayoffProduct product("CALL", european_call(spot, strike, maturity));
+    engine::GbmModel model = make_gbm_q(s0, r, q, sigma, spot.value);
+
+    GreekRequest request;
+    request.metric_name = "PayoffExposureProfileQ";
+    request.metric_params = Params{{"exposure_times", exposure_times}};
+    request.risk_factor = RiskFactor{RiskFactorKind::ModelParameter, "model", "volatility", std::nullopt};
+    request.order = GreekOrder{1, std::nullopt};
+    request.method = GreekMethod::Auto;
+    request.bump_override = h;
+
+    engine::greeks::GreekResult via_greek =
+        engine::greeks::compute_greek(registries, request, model, product, flat_market(), pricing_context(50'000, 5), cpu_execution());
+
+    auto exposure = registries.measures.create("PayoffExposureProfileQ", Params{{"exposure_times", exposure_times}});
+    engine::GbmModel model_up = make_gbm_q(s0, r, q, sigma + h, spot.value);
+    engine::GbmModel model_down = make_gbm_q(s0, r, q, sigma - h, spot.value);
+    engine::MeasureResult up = exposure->evaluate(model_up, product, flat_market(), pricing_context(50'000, 5), cpu_execution());
+    engine::MeasureResult down = exposure->evaluate(model_down, product, flat_market(), pricing_context(50'000, 5), cpu_execution());
+
+    EXPECT_FALSE(via_greek.has_scalar);
+    ASSERT_EQ(via_greek.times, exposure_times);
+    ASSERT_EQ(via_greek.primary.size(), exposure_times.size());
+    ASSERT_EQ(via_greek.secondary.size(), exposure_times.size());
+    for (std::size_t i = 0; i < exposure_times.size(); ++i) {
+        double manual_ee = (up.primary[i] - down.primary[i]) / (2.0 * h);
+        double manual_pfe = (up.secondary[i] - down.secondary[i]) / (2.0 * h);
+        EXPECT_NEAR(via_greek.primary[i], manual_ee, 1e-9) << "EE[" << i << "]";
+        EXPECT_NEAR(via_greek.secondary[i], manual_pfe, 1e-9) << "PFE95[" << i << "]";
+    }
+}
+
+TEST(GreeksFase2Test, GreekMeasureForwardsMetricEventThroughEnginePrice) {
+    Registries registries;
+    register_builtins(registries);
+    const pf::ObservableId spot{"EQ.SPOT.XYZ"};
+    const double s0 = 100.0, barrier = 120.0, strike = 100.0, r = 0.05, q = 0.0, sigma = 0.2, maturity = 1.0;
+    const std::vector<pf::TimePoint> monitoring_times{tp(0.25), tp(0.5), tp(0.75), tp(maturity)};
+
+    pf::PayoffProduct product("UI", up_and_in_call(spot, barrier, strike, maturity, monitoring_times));
+    engine::GbmModel model = make_gbm_q(s0, r, q, sigma, spot.value);
+
+    engine::PriceResult result = engine::price(
+        registries, product,
+        std::vector<engine::MeasureSpec>{
+            {"Greek", Params{
+                          {"metric", std::string("PayoffHitProbabilityQ")}, {"metric.event", std::string("UI")},
+                          {"risk_factor", std::string("model.volatility")}
+                      }}
+        },
+        model, flat_market(), pricing_context(30'000, 13), cpu_execution()
+    );
+
+    ASSERT_EQ(result.size(), 1u);
+    ASSERT_TRUE(result[0].result.has_scalar);
+    EXPECT_TRUE(std::isfinite(result[0].result.scalar));
+}
+
+TEST(GreeksFase2Test, GreekMeasureForwardsMetricExposureTimesThroughEnginePrice) {
+    Registries registries;
+    register_builtins(registries);
+    const pf::ObservableId spot{"EQ.SPOT.XYZ"};
+    const double s0 = 100.0, strike = 100.0, r = 0.05, q = 0.0, sigma = 0.2, maturity = 1.0;
+
+    pf::PayoffProduct product("CALL", european_call(spot, strike, maturity));
+    engine::GbmModel model = make_gbm_q(s0, r, q, sigma, spot.value);
+
+    engine::PriceResult result = engine::price(
+        registries, product,
+        std::vector<engine::MeasureSpec>{
+            {"Greek", Params{
+                          {"metric", std::string("PayoffExposureProfileQ")},
+                          {"metric.exposure_times", std::vector<double>{0.5, maturity}},
+                          {"risk_factor", std::string("model.spot")}
+                      }}
+        },
+        model, flat_market(), pricing_context(30'000, 5), cpu_execution()
+    );
+
+    ASSERT_EQ(result.size(), 1u);
+    EXPECT_FALSE(result[0].result.has_scalar);
+    ASSERT_EQ(result[0].result.times.size(), 2u);
+    ASSERT_EQ(result[0].result.primary.size(), 2u);
+    ASSERT_EQ(result[0].result.secondary.size(), 2u);
+}
+
+TEST(GreeksFase2Test, GreekMeasureRejectsWhenTheInnerMetricIsMissingAMandatoryParam) {
+    Registries registries;
+    register_builtins(registries);
+    const pf::ObservableId spot{"EQ.SPOT.XYZ"};
+    const double s0 = 100.0, barrier = 120.0, strike = 100.0, r = 0.05, q = 0.0, sigma = 0.2, maturity = 1.0;
+    const std::vector<pf::TimePoint> monitoring_times{tp(0.25), tp(0.5), tp(0.75), tp(maturity)};
+
+    pf::PayoffProduct product("UI", up_and_in_call(spot, barrier, strike, maturity, monitoring_times));
+    engine::GbmModel model = make_gbm_q(s0, r, q, sigma, spot.value);
+
+    // "event" no se reenvia (falta "metric.event") -- PayoffHitProbabilityQMeasure lo exige
+    // (`get_string` sin default) y lanza `std::out_of_range` al construirse dentro de
+    // compute_greek; nunca degrada a un resultado silencioso.
+    auto measure = registries.measures.create(
+        "Greek", Params{{"metric", std::string("PayoffHitProbabilityQ")}, {"risk_factor", std::string("model.volatility")}}
+    );
+
+    EXPECT_THROW(
+        measure->evaluate(model, product, flat_market(), pricing_context(1'000, 7), cpu_execution()), std::out_of_range
+    );
 }

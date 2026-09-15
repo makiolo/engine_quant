@@ -59,11 +59,13 @@ def test_register_builtins_populates_all_registries():
     # Las ocho medidas "Payoff*Q"/"Payoff*P" (PLAN_PRODUCTS.md §12 Fase 5-7 y 11) son el cableado
     # de las funciones Monte Carlo GBM de payoff a Registry<IMeasure>/Engine.price;
     # "PayoffSensitivityQ" se sumo en Fase 11 (item pendiente "cablear
-    # payoff::api::payoff_sensitivity_gbm_q ... al bridge cxx").
+    # payoff::api::payoff_sensitivity_gbm_q ... al bridge cxx"). "Greek" se sumo en
+    # PLAN_GREEKS.md Fase 1 (motor de bump-and-reval generico, engine/greeks.hpp/.cpp).
     assert set(eng.list_measures()) == {
         "PV", "DV01", "ExposureProfile", "ExpectedExposure", "PFE95", "UnilateralCVA",
         "PayoffPriceQ", "PayoffExerciseQ", "PayoffHitProbabilityQ", "PayoffExposureProfileQ",
         "PayoffForecastP", "PayoffHitProbabilityP", "PayoffPnlDistributionP", "PayoffSensitivityQ",
+        "Greek",
     }
 
 

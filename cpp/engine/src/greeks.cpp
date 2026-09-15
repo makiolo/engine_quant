@@ -223,15 +223,43 @@ GreekResult compute_greek(
 
     MeasureResult up = metric->evaluate(*model_up, product, market, pricing, execution);
     MeasureResult down = metric->evaluate(*model_down, product, market, pricing, execution);
-    if (!up.has_scalar || !down.has_scalar) {
+
+    // Fase 2 (PLAN_GREEKS.md §11): ya no se exige `has_scalar`; se exige que `up`/`down` tengan
+    // LA MISMA forma -- ambas evaluaciones son la misma medida con el mismo `metric_params`, solo
+    // el modelo cambia, así que un desajuste de forma es un error de la propia medida (perfil que
+    // cambia de tamaño con el parametro bumpeado), no algo que este motor deba tolerar en
+    // silencio.
+    if (up.has_scalar != down.has_scalar) {
         throw std::invalid_argument(
             "compute_greek: la medida '" + request.metric_name +
-            "' no produce un resultado escalar; Fase 1 todavia no soporta Greeks de perfiles temporales"
+            "' devolvio formas incompatibles (has_scalar difiere) entre la evaluacion +h y -h"
+        );
+    }
+    if (up.times.size() != down.times.size() || up.primary.size() != down.primary.size() ||
+        up.secondary.size() != down.secondary.size()) {
+        throw std::invalid_argument(
+            "compute_greek: la medida '" + request.metric_name +
+            "' devolvio perfiles de tamanos distintos entre la evaluacion +h y -h"
+        );
+    }
+    if (!up.has_scalar && up.times.empty() && up.primary.empty() && up.secondary.empty()) {
+        throw std::invalid_argument(
+            "compute_greek: la medida '" + request.metric_name + "' no produce ningun resultado (ni escalar ni perfil)"
         );
     }
 
     GreekResult result;
-    result.value = (up.scalar - down.scalar) / (2.0 * h);
+    result.has_scalar = up.has_scalar;
+    if (up.has_scalar) result.value = (up.scalar - down.scalar) / (2.0 * h);
+    result.times = up.times; // mismo eje temporal que la metrica base (no depende del parametro bumpeado)
+    result.primary.reserve(up.primary.size());
+    for (std::size_t i = 0; i < up.primary.size(); ++i) {
+        result.primary.push_back((up.primary[i] - down.primary[i]) / (2.0 * h));
+    }
+    result.secondary.reserve(up.secondary.size());
+    for (std::size_t i = 0; i < up.secondary.size(); ++i) {
+        result.secondary.push_back((up.secondary[i] - down.secondary[i]) / (2.0 * h));
+    }
     result.order = request.order;
     result.risk_factor = request.risk_factor;
     result.method_used = GreekMethod::BumpAndReval;
@@ -311,8 +339,11 @@ MeasureResult GreekMeasure::evaluate(
 ) const {
     greeks::GreekResult out = greeks::compute_greek(registries_, request_, model, product, market, pricing, execution);
     MeasureResult result;
-    result.has_scalar = true;
+    result.has_scalar = out.has_scalar;
     result.scalar = out.value;
+    result.times = out.times;
+    result.primary = out.primary;
+    result.secondary = out.secondary;
     return result;
 }
 
