@@ -776,10 +776,10 @@ resultado más allá de tolerancia declarada.
   `price_batch_generic`, genérico sobre `Registry<IMeasure>` desde Fase 8) -- verificado end to
   end con un smoke test de Python (`Engine.price(...)` con `"PayoffPriceQ"`) además de los tests
   de C++. Nombres nuevos y explícitos, no ramas adicionales dentro de "PV"/"ExposureProfile": ver
-  el doc-comment de `measure.hpp` para la justificación. Sigue pendiente: cablear
-  `payoff::api::payoff_sensitivity_gbm_q` (Fase 11, sensibilidades pathwise) y
-  `payoff::hedge::synthesize_hedge_gbm_q` (síntesis de cobertura) -- ninguna de las dos cruza
-  todavía el bridge cxx, son Rust-only.
+  el doc-comment de `measure.hpp` para la justificación. (Actualización posterior: las dos
+  funciones que en ese momento seguían siendo Rust-only -- `payoff_sensitivity_gbm_q`/
+  `synthesize_hedge_gbm_q` -- ya cruzan el bridge cxx; ver el bloque "cablear
+  payoff_sensitivity_gbm_q/synthesize_hedge_gbm_q al bridge cxx" más abajo.)
 - Hecho: **AAD con fallback a bump-and-reval** para sensibilidades del pricer Monte Carlo GBM de
   payoff (`payoff/dual.rs` + `payoff/sensitivity.rs`, expuesto como `payoff::api::
   payoff_sensitivity_gbm_q`). Método pathwise (Broadie-Glasserman): se recupera el browniano
@@ -800,9 +800,73 @@ resultado más allá de tolerancia declarada.
   `synthesize_hedge_gbm_q` evalúa el target y el universo de instrumentos sobre una única rejilla
   compartida de escenarios GBM/Q y reporta pesos, residual por escenario (media/desviación/máximo)
   y coste si se dan precios -- nunca promete neutralización exacta sin comprobar rango (§11, punto
-  5). Fuera de alcance deliberado (documentado, no oculto): Greeks residuales, riesgo de
-  base/correlación/volatilidad explícito, liquidez y restricciones LP/QP -- `ridge` es la única
-  regularización de esta fase.
+  5). (Extendido en la sesión siguiente -- ver el bloque de abajo -- con Greeks residuales,
+  liquidez y restricciones de caja; riesgo de base/correlación multi-activo sigue fuera de
+  alcance, ahora por una razón arquitectónica concreta, no solo por decisión de fase.)
+- Hecho: **cablear `payoff_sensitivity_gbm_q`/`synthesize_hedge_gbm_q` al bridge cxx** (sesión
+  posterior, cierra los dos puntos que el bloque de "cableado a `Registry<IMeasure>`" de arriba
+  dejaba explícitamente pendientes) más la extensión del solver de hedge con Greeks residuales,
+  liquidez y restricciones de caja (§11, puntos que el bloque de "solver de hedge" de arriba
+  dejaba fuera de alcance):
+  - `engine-ffi`: dos funciones nuevas en el bridge cxx (`payoff_sensitivity_gbm_q`,
+    `synthesize_hedge_gbm_q`) con sus structs `PayoffSensitivityResult`/`HedgeSynthesisResult`.
+    cxx no tiene `Option<T>` nativo para argumentos/campos primitivos de una función o struct
+    compartida, así que la frontera usa sentinelas documentados en vez de inventar una
+    codificación nueva: `instrument_prices`/`lower_bounds`/`upper_bounds` vacíos = ausentes,
+    `max_gross_notional < 0.0` = sin límite, y en el resultado un par explícito `has_*`/valor por
+    cada campo `Option` de `HedgeResult` (nunca un sentinel `NaN` que pueda propagarse sin que se
+    note si alguien olvida comprobarlo).
+  - `engine/payoff/measures.hpp`/`.cpp`: `payoff_sensitivity_gbm(program, model, greek, n_paths,
+    seed)` (mismo preflight de capacidades que el resto de medidas GBM del archivo) y
+    `synthesize_hedge_gbm(target, instruments, model, instrument_prices, ridge, constraints,
+    compute_residual_greeks, n_paths, seed)`. `synthesize_hedge_gbm` se expone como **función
+    libre, deliberadamente NO como `IMeasure`**: necesita un target *y* un universo de N
+    instrumentos a la vez, y forzarlo dentro de `IMeasure::evaluate(model, product, market,
+    pricing, execution)` (un único `product`) exigiría transportar el universo completo dentro de
+    un `Params` plano, perdiendo la tipificación de `PayoffProgram`/`GbmModel` -- mismo criterio
+    de "no forzar una abstracción que no encaja" que ya aplicó §0.1 al AST.
+  - `payoff_sensitivity_gbm` sí se registró además como octava `IMeasure` (`PayoffSensitivityQMeasure`,
+    `"PayoffSensitivityQ"` en `bootstrap.cpp`) -- encaja sin fricción en la forma existente (un
+    único producto+modelo, `greek` como `Params{{"greek", ...}}`, mismo patrón que `event` en
+    `PayoffHitProbabilityQMeasure`), así que sí queda alcanzable por nombre desde
+    `Engine.price(...)`/Python/Excel/C ABI sin ningún cambio adicional en esas capas.
+  - **Greeks residuales** (`payoff::hedge::HedgeResidualGreeks`, campo opcional
+    `HedgeResult::residual_greeks`): sensibilidad de la cartera cubierta (`target + sum_i
+    weights[i] * instrumento_i`, con los pesos YA RESUELTOS -- no se reoptimizan bajo el
+    parámetro bumpeado) a los cuatro parámetros de `Gbm`, por bump-and-reval con números
+    aleatorios comunes sobre el PORTFOLIO agregado (no el método pathwise `Dual` de
+    `sensitivity.rs`, que diferencia un único `CompiledPayoff` a la vez -- diferenciar una
+    combinación lineal de varios payoffs con ese método exigiría evaluar cada instrumento por
+    separado de todas formas, así que bump-and-reval sobre la cantidad agregada es más simple y
+    reutiliza `evaluate_hedge_scenario` tal cual).
+  - **Restricciones de caja** (`payoff::hedge::HedgeConstraints::bounds`, uno por instrumento):
+    gradiente proyectado con paso fijo (cota de Lipschitz de Frobenius), no un solver QP genérico
+    (simplex/active-set/interior-point) -- el objetivo es convexo (fuertemente convexo si
+    `ridge>0`) y la proyección sobre una caja es un `clamp` por coordenada, así que basta para los
+    universos de cobertura pequeños que motiva este módulo. Cubre "posiciones mínimas/máximas"
+    (§11); deliberadamente NO cubre restricciones lineales generales ni variables
+    enteras/combinatoria -- eso sigue fuera de alcance.
+  - **Liquidez** (`HedgeConstraints::max_gross_notional`): escalado UNIFORME de los pesos tras
+    resolver si `sum(|weights[i]| * instrument_prices[i])` excede el límite -- no una
+    reoptimización sujeta a esa restricción. Si el escalado rompe algún `bounds`, se devuelve
+    `Err` explícito (conflicto de restricciones genuino) en vez de violar uno de los dos límites
+    en silencio.
+  - **Riesgo de base/correlación/volatilidad explícito**: la parte de "volatilidad explícita"
+    queda cubierta por la Vega residual (parte de Greeks residuales, arriba). El riesgo de
+    base/correlación multi-activo sigue fuera de alcance, pero ya no por decisión de esta fase:
+    este módulo (igual que `payoff::api`) exige un único observable compartido por el target y
+    todos los instrumentos (`check_single_observable`) porque el único modelo disponible, `Gbm`,
+    es de un solo activo -- "riesgo de base" solo tiene sentido con varios activos
+    correlacionados, lo que requeriría un modelo multi-activo nuevo, no una extensión de este
+    solver. Documentado en el doc-comment de `payoff/hedge.rs`.
+  - Tests: 12 tests nuevos en `payoff/hedge.rs` (bounds/liquidez/conflicto de restricciones/
+    Greeks residuales) más los 176 preexistentes del workspace Rust en verde; en C++, ocho tests
+    nuevos (`test_gbm_sensitivity_and_hedge.cpp`) más tres wiring tests de `PayoffSensitivityQ`
+    en `test_registry_wiring_payoff_measures.cpp` -- suite completa de `engine_tests` (303 tests)
+    en verde. No se tocaron bindings de Python/Excel/C ABI: `PayoffSensitivityQ` ya es alcanzable
+    ahí por ser una `IMeasure` registrada (mismo argumento que las siete medidas anteriores);
+    `synthesize_hedge_gbm` (función libre, no medida) no se expuso todavía a esas capas -- fuera
+    del alcance pedido en esta sesión.
 
 ## 13. Estrategia de pruebas
 

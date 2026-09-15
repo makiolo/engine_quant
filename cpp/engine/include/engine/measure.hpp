@@ -135,9 +135,9 @@ private:
 // --- Monte Carlo de PayoffProduct bajo Q/P, cableado a Registry<IMeasure>/Engine.price ------
 // (PLAN_PRODUCTS.md §12: las funciones libres de `engine/payoff/measures.hpp`
 // -- `risk_neutral_price_gbm`/`exercise_price_gbm`/`hit_probability_gbm`/
-// `payoff_exposure_profile_gbm`/`forecast_gbm_p`/`pnl_distribution_gbm_p` -- ya existían y ya
-// cruzaban a Rust vía el bridge cxx, pero solo eran alcanzables llamándolas directamente desde
-// C++ (tests); estas siete medidas son el único paso que faltaba para que `Engine.price(...)`
+// `payoff_exposure_profile_gbm`/`forecast_gbm_p`/`pnl_distribution_gbm_p`/`payoff_sensitivity_gbm`
+// -- ya existían y ya cruzaban a Rust vía el bridge cxx, pero solo eran alcanzables llamándolas
+// directamente desde C++ (tests); estas ocho medidas son el único paso que faltaba para que `Engine.price(...)`
 // las resuelva por nombre igual que "PV"/"DV01"/"ExposureProfile" -- y, por construcción de
 // `price()`/`price_batch`/`price_many`/`price_grid`/Python/Excel (que resuelven cualquier
 // nombre presente en `Registry<IMeasure>` sin lista cerrada aparte, salvo el `price_batch` de
@@ -278,6 +278,27 @@ public:
 
 private:
     double confidence_;
+};
+
+// Sensibilidad ("Greek") pathwise bajo Q de un `PayoffProduct` respecto de uno de los cuatro
+// parámetros de `GbmModel` (PLAN_PRODUCTS.md §12 Fase 11, item pendiente "cablear
+// payoff::api::payoff_sensitivity_gbm_q ... al bridge cxx" -- ver el doc-comment de esa sección
+// en `engine/payoff/measures.hpp`). `greek` (obligatorio, `Params{{"greek",
+// std::string("spot"|"rate"|"dividend_yield"|"volatility")}}`) -- mismo estilo que `event` en
+// `PayoffHitProbabilityQMeasure`. `scalar` es la derivada (puede ser negativa), no un precio.
+class PayoffSensitivityQMeasure : public IMeasure {
+public:
+    explicit PayoffSensitivityQMeasure(const Params& params) : greek_(get_string(params, "greek")) {}
+
+    std::string type_name() const override { return "PayoffSensitivityQ"; }
+
+    MeasureResult evaluate(
+        const IModel& model, const IProduct& product, const MarketSnapshot& market,
+        const PricingContext& pricing, const ExecutionContext& execution
+    ) const override;
+
+private:
+    std::string greek_;
 };
 
 // --- Lote homogéneo (PLAN.md §7.17/§7.19) ---------------------------------------------------

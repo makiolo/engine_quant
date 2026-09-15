@@ -26,6 +26,13 @@ rust::Vec<double> to_rust_vec(const std::vector<double>& v) {
     return out;
 }
 
+rust::Vec<rust::String> to_rust_string_vec(const std::vector<std::string>& v) {
+    rust::Vec<rust::String> out;
+    out.reserve(v.size());
+    for (const std::string& s : v) out.push_back(rust::String(s));
+    return out;
+}
+
 // Preflight comun a las medidas GBM de este archivo, tanto bajo Q (Fase 5/6) como bajo P
 // (Fase 7): capacidades declaradas, `required_measure` soportada, todo observable referenciado
 // generado por el modelo, y -- si el contrato usa `Monitoring::ContinuousApproximation` -- el
@@ -351,6 +358,93 @@ PnlDistributionResult pnl_distribution_gbm_p(
         out.es = result.es;
         out.n_paths = result.n_paths;
         out.measure = ProbabilityMeasure::PhysicalP;
+        return out;
+    } catch (const std::exception& e) {
+        throw EvaluationError(e.what(), NodePath::root());
+    }
+}
+
+// --- Fase 11 (items pendientes del cierre documentado en PLAN_PRODUCTS.md §12) ---------------
+
+SensitivityResult payoff_sensitivity_gbm(
+    const PayoffProgram& program, const GbmModel& model, const std::string& greek, std::uint64_t n_paths,
+    std::uint64_t seed
+) {
+    preflight_gbm_capabilities(program, model.capabilities(), ProbabilityMeasure::RiskNeutralQ);
+
+    std::string spec_json = CanonicalVisitor::to_json(program.id, program.contract);
+    try {
+        ffi::PayoffSensitivityResult result = ffi::payoff_sensitivity_gbm_q(
+            spec_json, model.observable().value, greek, model.s0(), model.r(), model.q(), model.sigma(), n_paths,
+            seed
+        );
+        SensitivityResult out;
+        out.value = result.value;
+        out.std_error = result.std_error;
+        out.ci_low = result.ci_low;
+        out.ci_high = result.ci_high;
+        out.n_paths = result.n_paths;
+        out.measure = ProbabilityMeasure::RiskNeutralQ;
+        return out;
+    } catch (const std::exception& e) {
+        throw EvaluationError(e.what(), NodePath::root());
+    }
+}
+
+HedgeResult synthesize_hedge_gbm(
+    const PayoffProgram& target, const std::vector<const PayoffProgram*>& instruments, const GbmModel& model,
+    const std::optional<std::vector<double>>& instrument_prices, double ridge, const HedgeConstraints& constraints,
+    bool compute_residual_greeks, std::uint64_t n_paths, std::uint64_t seed
+) {
+    preflight_gbm_capabilities(target, model.capabilities(), ProbabilityMeasure::RiskNeutralQ);
+    for (const PayoffProgram* instrument : instruments) {
+        preflight_gbm_capabilities(*instrument, model.capabilities(), ProbabilityMeasure::RiskNeutralQ);
+    }
+
+    std::string target_spec_json = CanonicalVisitor::to_json(target.id, target.contract);
+    std::vector<std::string> instrument_specs_json;
+    instrument_specs_json.reserve(instruments.size());
+    for (const PayoffProgram* instrument : instruments) {
+        instrument_specs_json.push_back(CanonicalVisitor::to_json(instrument->id, instrument->contract));
+    }
+
+    rust::Vec<double> prices_rust = instrument_prices.has_value() ? to_rust_vec(*instrument_prices) : rust::Vec<double>{};
+
+    rust::Vec<double> lower_bounds;
+    rust::Vec<double> upper_bounds;
+    if (!constraints.bounds.empty()) {
+        lower_bounds.reserve(constraints.bounds.size());
+        upper_bounds.reserve(constraints.bounds.size());
+        for (const auto& [lo, hi] : constraints.bounds) {
+            lower_bounds.push_back(lo);
+            upper_bounds.push_back(hi);
+        }
+    }
+    double max_gross_notional = constraints.max_gross_notional.value_or(-1.0);
+
+    try {
+        ffi::HedgeSynthesisResult result = ffi::synthesize_hedge_gbm_q(
+            target_spec_json, to_rust_string_vec(instrument_specs_json), model.observable().value, model.s0(),
+            model.r(), model.q(), model.sigma(), prices_rust, ridge, lower_bounds, upper_bounds, max_gross_notional,
+            compute_residual_greeks, n_paths, seed
+        );
+
+        HedgeResult out;
+        out.weights = std::vector<double>(result.weights.begin(), result.weights.end());
+        out.residuals = std::vector<double>(result.residuals.begin(), result.residuals.end());
+        out.residual_mean = result.residual_mean;
+        out.residual_std = result.residual_std;
+        out.residual_max_abs = result.residual_max_abs;
+        if (result.has_cost) out.cost = result.cost;
+        if (result.has_gross_notional) out.gross_notional = result.gross_notional;
+        if (result.has_residual_greeks) {
+            HedgeResidualGreeks greeks;
+            greeks.delta = result.residual_greeks_delta;
+            greeks.rho = result.residual_greeks_rho;
+            greeks.dividend_yield = result.residual_greeks_dividend_yield;
+            greeks.vega = result.residual_greeks_vega;
+            out.residual_greeks = greeks;
+        }
         return out;
     } catch (const std::exception& e) {
         throw EvaluationError(e.what(), NodePath::root());

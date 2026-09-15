@@ -550,4 +550,27 @@ MeasureResult PayoffPnlDistributionPMeasure::evaluate(
     return result;
 }
 
+MeasureResult PayoffSensitivityQMeasure::evaluate(
+    const IModel& model, const IProduct& product, const MarketSnapshot&,
+    const PricingContext& pricing, const ExecutionContext&
+) const {
+    const auto* payoff_product = dynamic_cast<const payoff::PayoffProduct*>(&product);
+    if (!payoff_product) {
+        throw std::invalid_argument("PayoffSensitivityQMeasure: producto no soportado: " + product.type_name());
+    }
+    const auto* gbm_model = dynamic_cast<const GbmModel*>(&model);
+    if (!gbm_model) {
+        throw std::invalid_argument("PayoffSensitivityQMeasure: modelo no soportado: " + model.type_name());
+    }
+
+    payoff::SensitivityResult out = payoff::payoff_sensitivity_gbm(
+        *payoff_product->payoff_program(), *gbm_model, greek_, pricing.n_paths(), pricing.seed()
+    );
+
+    MeasureResult result;
+    result.has_scalar = true;
+    result.scalar = out.value;
+    return result;
+}
+
 } // namespace engine

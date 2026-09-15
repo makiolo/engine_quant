@@ -6,7 +6,10 @@
 // este archivo confirma que las mismas siete medidas son alcanzables POR NOMBRE a traves de
 // `Registry<IMeasure>`/`engine::price(...)`, igual que "PV"/"DV01"/"ExposureProfile" para
 // IrSwapProduct, y que rechazan producto/modelo incompatibles con `std::invalid_argument`
-// (mismo criterio que el resto de medidas de measure.cpp).
+// (mismo criterio que el resto de medidas de measure.cpp). `PayoffSensitivityQ` se sumo despues
+// (Fase 11, item pendiente "cablear payoff::api::payoff_sensitivity_gbm_q ... al bridge cxx" --
+// ver test_gbm_sensitivity_and_hedge.cpp para el test directo de `payoff::payoff_sensitivity_gbm`
+// sin pasar por el registry).
 
 #include <gtest/gtest.h>
 
@@ -84,7 +87,7 @@ public:
     std::string type_name() const override { return "Fake"; }
 };
 
-TEST(PayoffMeasureWiringTest, RegisterBuiltinsRegistersTheSevenNewMeasureNames) {
+TEST(PayoffMeasureWiringTest, RegisterBuiltinsRegistersTheEightNewMeasureNames) {
     Registries registries;
     register_builtins(registries);
 
@@ -95,6 +98,39 @@ TEST(PayoffMeasureWiringTest, RegisterBuiltinsRegistersTheSevenNewMeasureNames) 
     EXPECT_TRUE(registries.measures.contains("PayoffForecastP"));
     EXPECT_TRUE(registries.measures.contains("PayoffHitProbabilityP"));
     EXPECT_TRUE(registries.measures.contains("PayoffPnlDistributionP"));
+    EXPECT_TRUE(registries.measures.contains("PayoffSensitivityQ"));
+}
+
+TEST(PayoffMeasureWiringTest, PayoffSensitivityQViaRegistryMatchesDirectCallToPayoffSensitivityGbm) {
+    Registries registries;
+    register_builtins(registries);
+    const pf::ObservableId spot{"EQ.SPOT.XYZ"};
+    const double s0 = 100.0, strike = 100.0, r = 0.05, q = 0.0, sigma = 0.2, maturity = 1.0;
+
+    pf::PayoffProduct product("CALL", european_call(spot, strike, maturity));
+    engine::GbmModel model = make_gbm_q(s0, r, q, sigma, spot.value);
+    auto measure = registries.measures.create("PayoffSensitivityQ", Params{{"greek", std::string("spot")}});
+
+    engine::MeasureResult via_registry =
+        measure->evaluate(model, product, flat_market(), pricing_context(50'000, 7), cpu_execution());
+    pf::SensitivityResult direct =
+        pf::payoff_sensitivity_gbm(*product.payoff_program(), model, "spot", 50'000, 7);
+
+    EXPECT_TRUE(via_registry.has_scalar);
+    EXPECT_DOUBLE_EQ(via_registry.scalar, direct.value);
+}
+
+TEST(PayoffMeasureWiringTest, PayoffSensitivityQRejectsAProductThatIsNotPayoffProduct) {
+    Registries registries;
+    register_builtins(registries);
+    FakeProduct fake;
+    engine::GbmModel model = make_gbm_q(100.0, 0.05, 0.0, 0.2, "EQ.SPOT.XYZ");
+    auto measure = registries.measures.create("PayoffSensitivityQ", Params{{"greek", std::string("spot")}});
+
+    EXPECT_THROW(
+        measure->evaluate(model, fake, flat_market(), pricing_context(1'000, 7), cpu_execution()),
+        std::invalid_argument
+    );
 }
 
 TEST(PayoffMeasureWiringTest, PayoffPriceQViaRegistryMatchesDirectCallToRiskNeutralPriceGbm) {

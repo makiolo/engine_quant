@@ -1,7 +1,10 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
+#include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "engine/engine.hpp" // ExposureProfile, ver payoff_exposure_profile_gbm (Fase 6)
@@ -275,6 +278,88 @@ struct PnlDistributionResult {
 PnlDistributionResult pnl_distribution_gbm_p(
     const PayoffProgram& program, const GbmPModel& model, std::uint64_t n_paths, std::uint64_t seed,
     double confidence
+);
+
+// --- Fase 11 (items pendientes del cierre documentado en PLAN_PRODUCTS.md §12): cablear
+// payoff::api::payoff_sensitivity_gbm_q y payoff::hedge::synthesize_hedge_gbm_q al bridge cxx ---
+
+// Sensibilidad ("Greek") pathwise bajo Q de un `PayoffProgram` respecto de uno de los cuatro
+// parametros de `GbmModel` ("spot"/"rate"/"dividend_yield"/"volatility"). Mismo preflight que
+// `risk_neutral_price_gbm` (dependencias vs. capacidades del modelo); `greek` fuera de esas
+// cuatro cadenas es un error de evaluacion (lo detecta Rust, ver
+// `engine_core::payoff::sensitivity::GbmGreek::parse`). Delegado sobre
+// `engine::ffi::payoff_sensitivity_gbm_q`, que a su vez decide internamente entre el metodo
+// pathwise (Dual) y el fallback bump-and-reval si el contrato contiene `Exercise` -- ver el
+// doc-comment de `engine_core::payoff::sensitivity`. `value` puede ser negativo (es una
+// derivada, no un precio), a diferencia de `QValuationResult::mean`.
+struct SensitivityResult {
+    double value = 0.0;
+    double std_error = 0.0;
+    double ci_low = 0.0;
+    double ci_high = 0.0;
+    std::uint64_t n_paths = 0;
+    ProbabilityMeasure measure = ProbabilityMeasure::RiskNeutralQ;
+};
+
+SensitivityResult payoff_sensitivity_gbm(
+    const PayoffProgram& program, const GbmModel& model, const std::string& greek, std::uint64_t n_paths,
+    std::uint64_t seed
+);
+
+// Restricciones opcionales sobre los pesos de `synthesize_hedge_gbm` (PLAN_PRODUCTS.md §12
+// Fase 11, items pendientes "liquidez" y "restricciones de tipo LP/QP (posiciones
+// minimas/maximas)"). Espejo de `engine_core::payoff::HedgeConstraints` -- ver su doc-comment en
+// Rust (`rust/crates/engine-core/src/payoff/hedge.rs`) para el alcance deliberadamente limitado
+// (caja por instrumento, no restricciones lineales generales ni enteras; liquidez por escalado
+// uniforme, no reoptimizacion).
+struct HedgeConstraints {
+    // Un `(lower, upper)` por instrumento, mismo orden que `instruments` en `synthesize_hedge_gbm`;
+    // vacio = sin restriccion de caja. `+-std::numeric_limits<double>::infinity()` es valido para
+    // "sin limite" en un solo lado.
+    std::vector<std::pair<double, double>> bounds;
+    std::optional<double> max_gross_notional;
+};
+
+// Espejo de `engine_core::payoff::HedgeResidualGreeks` (bump-and-reval, numeros aleatorios
+// comunes, pesos ya resueltos -- ver su doc-comment en Rust para el porque de no usar el metodo
+// pathwise `Dual` aqui).
+struct HedgeResidualGreeks {
+    double delta = 0.0;
+    double rho = 0.0;
+    double dividend_yield = 0.0;
+    double vega = 0.0;
+};
+
+// Espejo de `engine_core::payoff::HedgeResult` (PLAN_PRODUCTS.md §11).
+struct HedgeResult {
+    std::vector<double> weights;
+    // Uno por escenario Monte Carlo compartido: `target_pv[s] + sum_i(weights[i] * design[s][i])`.
+    std::vector<double> residuals;
+    double residual_mean = 0.0;
+    double residual_std = 0.0;
+    double residual_max_abs = 0.0;
+    std::optional<double> cost;
+    std::optional<double> gross_notional;
+    std::optional<HedgeResidualGreeks> residual_greeks;
+};
+
+// Sintetiza una cobertura bajo GBM/Q (PLAN_PRODUCTS.md §11) para `target` con el universo de
+// instrumentos `instruments`. NO es un `IMeasure`: a diferencia de toda otra medida de este
+// archivo (un unico `IProduct`), esta operacion necesita un TARGET *y* un universo de N
+// instrumentos negociables simultaneamente -- forzarla dentro de `IMeasure::evaluate(model,
+// product, market, pricing, execution)` (un unico `product`) exigiria transportar el universo
+// completo (specs JSON + precios opcionales) dentro de un `Params` piano, perdiendo la
+// tipificacion de `PayoffProgram`/`GbmModel` que ya tiene esta funcion; se expone como funcion
+// libre, igual que las demas de `engine/payoff/measures.hpp` antes de que Fase 11 cableara las
+// siete medidas de precio/riesgo a `Registry<IMeasure>` (ver el doc-comment de esa seccion en
+// `measure.hpp`).
+//
+// Mismo preflight de observable-generado-por-el-modelo que `risk_neutral_price_gbm`, aplicado al
+// target Y a cada instrumento. Delegado sobre `engine::ffi::synthesize_hedge_gbm_q`.
+HedgeResult synthesize_hedge_gbm(
+    const PayoffProgram& target, const std::vector<const PayoffProgram*>& instruments, const GbmModel& model,
+    const std::optional<std::vector<double>>& instrument_prices, double ridge, const HedgeConstraints& constraints,
+    bool compute_residual_greeks, std::uint64_t n_paths, std::uint64_t seed
 );
 
 } // namespace payoff

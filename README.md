@@ -263,15 +263,21 @@ Monte Carlo *valuation* of a `Payoff` under a Black-Scholes/GBM model — price
 hit probability (`"PayoffHitProbabilityQ"`), and exposure profile (`"PayoffExposureProfileQ"`)
 under the risk-neutral measure Q; forecast (`"PayoffForecastP"`), hit probability
 (`"PayoffHitProbabilityP"`), and P&L distribution/expected shortfall
-(`"PayoffPnlDistributionP"`) under a physical measure P — is wired into `Engine.price(...)` as
-seven named measures, alongside `"PV"`/`"DV01"` (still the deterministic ledger path for
-`Payoff`) and the `IRSwap` measures. They take a `GbmModel`/`GbmPModel` (`create_model("GBM", ...)`
-/ `create_model("GBM_P", ...)`) instead of Hull-White, and `n_paths`/`seed` come from the same
-`PricingContext` as any other Monte Carlo measure; `PayoffHitProbabilityQ`/`P` take an `"event"`
-measure param and `PayoffExposureProfileQ` an `"exposure_times"` one. Being registered measures,
-they are automatically reachable from Python, Excel, and the C ABI — no separate wiring per
-client. See [PLAN_PRODUCTS.md](PLAN_PRODUCTS.md) for the full design and phased roadmap of the
-payoff engine, including what is still Rust-only (pathwise sensitivities, hedge synthesis).
+(`"PayoffPnlDistributionP"`) under a physical measure P, and pathwise sensitivities/Greeks under Q
+(`"PayoffSensitivityQ"`, a `"spot"`/`"rate"`/`"dividend_yield"`/`"volatility"` `"greek"` param) —
+is wired into `Engine.price(...)` as eight named measures, alongside `"PV"`/`"DV01"` (still the
+deterministic ledger path for `Payoff`) and the `IRSwap` measures. They take a `GbmModel`/
+`GbmPModel` (`create_model("GBM", ...)` / `create_model("GBM_P", ...)`) instead of Hull-White, and
+`n_paths`/`seed` come from the same `PricingContext` as any other Monte Carlo measure;
+`PayoffHitProbabilityQ`/`P` take an `"event"` measure param and `PayoffExposureProfileQ` an
+`"exposure_times"` one. Being registered measures, they are automatically reachable from Python,
+Excel, and the C ABI — no separate wiring per client. Hedge synthesis
+(`engine::payoff::synthesize_hedge_gbm` in C++, resolving least-squares weights for a target
+against a universe of instruments under Q, with optional box constraints, a liquidity/gross-notional
+cap, and residual Greeks) crosses the same Rust bridge but is exposed as a plain C++ function, not
+a measure — it needs a target *and* a universe of N instruments at once, which doesn't fit
+`IMeasure`'s single-product shape — and isn't yet exposed to Python/Excel/the C ABI. See
+[PLAN_PRODUCTS.md](PLAN_PRODUCTS.md) for the full design and phased roadmap of the payoff engine.
 
 ## Calibration
 
@@ -419,11 +425,14 @@ PLAN_PRODUCTS.md           Universal payoff engine: AST, Q/P Monte Carlo, phased
 
 ## Scope and known limitations
 
-- `Engine.price(...)` currently covers `IRSwap` and the deterministic ledger measures
-  (`PV`/`DV01`, bump-and-reval) of `Payoff`. Monte Carlo Q/P valuation of a `Payoff` (barriers,
-  Asian, take-profit/stop-loss, American/Bermuda exercise, forecast, hit probability, P&L
-  distribution) is implemented and tested end-to-end in C++/Rust but not yet reachable from
-  `Engine.price(...)` or any client outside C++ — see [PLAN_PRODUCTS.md](PLAN_PRODUCTS.md).
+- `Engine.price(...)` covers `IRSwap`, the deterministic ledger measures (`PV`/`DV01`,
+  bump-and-reval) of `Payoff`, and Monte Carlo Q/P valuation of a `Payoff` (barriers, Asian,
+  take-profit/stop-loss, American/Bermuda exercise, forecast, hit probability, P&L distribution,
+  pathwise sensitivities) as eight registered measures, reachable from every client (Python,
+  Excel, C ABI), not just C++. Hedge synthesis for a `Payoff` against a universe of instruments
+  is implemented and tested end-to-end in C++/Rust but, unlike the measures above, isn't a
+  registered measure (it needs a target *and* a universe of instruments, not a single product)
+  and isn't yet reachable outside C++ — see [PLAN_PRODUCTS.md](PLAN_PRODUCTS.md).
   DVA, FVA, MVA, and KVA remain roadmap items.
 - `pricing_date` is currently metadata. Calendar generation and day-count arithmetic are
   not implemented.

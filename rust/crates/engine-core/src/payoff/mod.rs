@@ -51,7 +51,10 @@ pub use api::{
 pub use api_p::{forecast_gbm_p, hit_probability_gbm_p, pnl_distribution_gbm_p, PnlDistribution};
 pub use compile::compile;
 pub use eval::{evaluate, evaluate_with_events, evaluate_with_events_seeded, EventOutcome, ObservablePath, PathCashflow};
-pub use hedge::{solve_hedge, synthesize_hedge_gbm_q, HedgeResult};
+pub use hedge::{
+    solve_hedge, solve_hedge_with_constraints, synthesize_hedge_gbm_q, HedgeConstraints, HedgeResidualGreeks,
+    HedgeResult,
+};
 pub use ir::{
     BarrierDirection, BridgePattern, CompiledPayoff, ContractOp, MonitoringMode, PredicateOp, ScalarOp,
     SettlementMode, COMPILED_PAYOFF_VERSION,

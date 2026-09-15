@@ -130,6 +130,44 @@ mod ffi {
         dates: Vec<ExerciseDateDiagnosticResult>,
     }
 
+    /// Sensibilidad ("Greek") pathwise bajo Q de un `PayoffProgram` respecto de uno de los cuatro
+    /// parametros de `Gbm` (PLAN_PRODUCTS.md §12 Fase 11, item pendiente "cablear
+    /// payoff::api::payoff_sensitivity_gbm_q ... al bridge cxx"), ver
+    /// `engine_core::payoff::payoff_sensitivity_gbm_q`. Misma forma que `PayoffQPriceResult` pero
+    /// `value` es una derivada (puede ser negativa), no un precio -- struct separado para que el
+    /// nombre no sugiera un valor monetario absoluto.
+    struct PayoffSensitivityResult {
+        value: f64,
+        std_error: f64,
+        ci_low: f64,
+        ci_high: f64,
+        n_paths: u64,
+    }
+
+    /// Resultado de sintetizar una cobertura bajo GBM/Q (PLAN_PRODUCTS.md §11/§12 Fase 11, item
+    /// pendiente "cablear payoff::hedge::synthesize_hedge_gbm_q ... al bridge cxx"), ver
+    /// `engine_core::payoff::HedgeResult`. Los campos opcionales de `HedgeResult`
+    /// (`cost`/`gross_notional`/`residual_greeks`, todos `Option` del lado Rust) cruzan como un
+    /// par `has_*`/valor -- cxx no tiene `Option<f64>` nativo en una struct compartida, y un
+    /// sentinel NaN se prestaria a propagarse en silencio si alguien olvida comprobarlo; un `bool`
+    /// explicito no.
+    struct HedgeSynthesisResult {
+        weights: Vec<f64>,
+        residuals: Vec<f64>,
+        residual_mean: f64,
+        residual_std: f64,
+        residual_max_abs: f64,
+        has_cost: bool,
+        cost: f64,
+        has_gross_notional: bool,
+        gross_notional: f64,
+        has_residual_greeks: bool,
+        residual_greeks_delta: f64,
+        residual_greeks_rho: f64,
+        residual_greeks_dividend_yield: f64,
+        residual_greeks_vega: f64,
+    }
+
     extern "Rust" {
         fn ping() -> f64;
 
@@ -565,6 +603,52 @@ mod ffi {
             seed: u64,
             confidence: f64,
         ) -> Result<PnlDistributionResult>;
+
+        // PLAN_PRODUCTS.md §12 Fase 11 (item pendiente): sensibilidad pathwise bajo Q de un
+        // PayoffProgram respecto de "spot"/"rate"/"dividend_yield"/"volatility" -- ver
+        // engine_core::payoff::payoff_sensitivity_gbm_q, que ya decide internamente entre el
+        // metodo pathwise (Dual) y el fallback bump-and-reval si el contrato contiene Exercise
+        // (ver engine_core::payoff::sensitivity). `greek` fuera de las cuatro cadenas soportadas
+        // es un error de preflight.
+        #[allow(clippy::too_many_arguments)]
+        fn payoff_sensitivity_gbm_q(
+            spec_json: String,
+            observable: String,
+            greek: String,
+            s0: f64,
+            r: f64,
+            q: f64,
+            sigma: f64,
+            n_paths: u64,
+            seed: u64,
+        ) -> Result<PayoffSensitivityResult>;
+
+        // PLAN_PRODUCTS.md §11/§12 Fase 11 (item pendiente): sintetiza una cobertura bajo GBM/Q
+        // para target_spec_json con el universo instrument_specs_json -- ver
+        // engine_core::payoff::synthesize_hedge_gbm_q/HedgeConstraints. Convenciones de
+        // "ausente" a traves de esta frontera (cxx no tiene Option nativo para argumentos
+        // primitivos): instrument_prices vacio = sin precios; lower_bounds/upper_bounds ambos
+        // vacios = sin restriccion de caja (si no vacios, deben tener longitud
+        // instrument_specs_json.len() cada uno, con +-INFINITY para "sin limite" en un lado);
+        // max_gross_notional < 0.0 = sin limite de liquidez.
+        #[allow(clippy::too_many_arguments)]
+        fn synthesize_hedge_gbm_q(
+            target_spec_json: String,
+            instrument_specs_json: Vec<String>,
+            observable: String,
+            s0: f64,
+            r: f64,
+            q: f64,
+            sigma: f64,
+            instrument_prices: Vec<f64>,
+            ridge: f64,
+            lower_bounds: Vec<f64>,
+            upper_bounds: Vec<f64>,
+            max_gross_notional: f64,
+            compute_residual_greeks: bool,
+            n_paths: u64,
+            seed: u64,
+        ) -> Result<HedgeSynthesisResult>;
     }
 }
 
@@ -1184,5 +1268,114 @@ fn pnl_distribution_gbm_p(
         var: dist.var,
         es: dist.es,
         n_paths: dist.n_paths,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn payoff_sensitivity_gbm_q(
+    spec_json: String,
+    observable: String,
+    greek: String,
+    s0: f64,
+    r: f64,
+    q: f64,
+    sigma: f64,
+    n_paths: u64,
+    seed: u64,
+) -> Result<ffi::PayoffSensitivityResult, String> {
+    let estimate = engine_core::payoff::payoff_sensitivity_gbm_q(
+        "cpu", &spec_json, &observable, &greek, s0, r, q, sigma, n_paths, seed,
+    )?;
+    Ok(ffi::PayoffSensitivityResult {
+        value: estimate.mean,
+        std_error: estimate.std_error,
+        ci_low: estimate.ci_low,
+        ci_high: estimate.ci_high,
+        n_paths: estimate.n_paths,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn synthesize_hedge_gbm_q(
+    target_spec_json: String,
+    instrument_specs_json: Vec<String>,
+    observable: String,
+    s0: f64,
+    r: f64,
+    q: f64,
+    sigma: f64,
+    instrument_prices: Vec<f64>,
+    ridge: f64,
+    lower_bounds: Vec<f64>,
+    upper_bounds: Vec<f64>,
+    max_gross_notional: f64,
+    compute_residual_greeks: bool,
+    n_paths: u64,
+    seed: u64,
+) -> Result<ffi::HedgeSynthesisResult, String> {
+    let prices = if instrument_prices.is_empty() { None } else { Some(instrument_prices.as_slice()) };
+    let bounds = if lower_bounds.is_empty() && upper_bounds.is_empty() {
+        None
+    } else {
+        if lower_bounds.len() != upper_bounds.len() {
+            return Err(format!(
+                "hedge: lower_bounds tiene {} elementos pero upper_bounds tiene {} -- deben coincidir",
+                lower_bounds.len(),
+                upper_bounds.len()
+            ));
+        }
+        Some(lower_bounds.into_iter().zip(upper_bounds).collect::<Vec<(f64, f64)>>())
+    };
+    let constraints = engine_core::payoff::HedgeConstraints {
+        bounds,
+        max_gross_notional: if max_gross_notional >= 0.0 { Some(max_gross_notional) } else { None },
+    };
+
+    let result = engine_core::payoff::synthesize_hedge_gbm_q(
+        "cpu",
+        &target_spec_json,
+        &instrument_specs_json,
+        &observable,
+        s0,
+        r,
+        q,
+        sigma,
+        prices,
+        ridge,
+        &constraints,
+        compute_residual_greeks,
+        n_paths,
+        seed,
+    )?;
+
+    let (has_cost, cost) = match result.cost {
+        Some(c) => (true, c),
+        None => (false, 0.0),
+    };
+    let (has_gross_notional, gross_notional) = match result.gross_notional {
+        Some(g) => (true, g),
+        None => (false, 0.0),
+    };
+    let (has_residual_greeks, residual_greeks_delta, residual_greeks_rho, residual_greeks_dividend_yield, residual_greeks_vega) =
+        match result.residual_greeks {
+            Some(g) => (true, g.delta, g.rho, g.dividend_yield, g.vega),
+            None => (false, 0.0, 0.0, 0.0, 0.0),
+        };
+
+    Ok(ffi::HedgeSynthesisResult {
+        weights: result.weights,
+        residuals: result.residuals,
+        residual_mean: result.residual_mean,
+        residual_std: result.residual_std,
+        residual_max_abs: result.residual_max_abs,
+        has_cost,
+        cost,
+        has_gross_notional,
+        gross_notional,
+        has_residual_greeks,
+        residual_greeks_delta,
+        residual_greeks_rho,
+        residual_greeks_dividend_yield,
+        residual_greeks_vega,
     })
 }
