@@ -61,11 +61,14 @@ def test_register_builtins_populates_all_registries():
     # "PayoffSensitivityQ" se sumo en Fase 11 (item pendiente "cablear
     # payoff::api::payoff_sensitivity_gbm_q ... al bridge cxx"). "Greek" se sumo en
     # PLAN_GREEKS.md Fase 1 (motor de bump-and-reval generico, engine/greeks.hpp/.cpp).
+    # "HullWhiteModelNpv" se sumo en PLAN_GREEKS.md Fase 7 (NPV de Hull-White que SI depende
+    # del modelo, distinto de "PV" -- ver measure.cpp::HullWhiteModelNpvMeasure): faltaba aqui
+    # desde esa fase, corregido de paso en la Fase 9 (bindings) al notar la discrepancia.
     assert set(eng.list_measures()) == {
         "PV", "DV01", "ExposureProfile", "ExpectedExposure", "PFE95", "UnilateralCVA",
         "PayoffPriceQ", "PayoffExerciseQ", "PayoffHitProbabilityQ", "PayoffExposureProfileQ",
         "PayoffForecastP", "PayoffHitProbabilityP", "PayoffPnlDistributionP", "PayoffSensitivityQ",
-        "Greek",
+        "Greek", "HullWhiteModelNpv",
     }
 
 

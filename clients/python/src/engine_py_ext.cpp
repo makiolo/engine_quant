@@ -4,6 +4,7 @@
 #include <vector>
 
 #include <nanobind/nanobind.h>
+#include <nanobind/stl/optional.h>
 #include <nanobind/stl/string.h>
 #include <nanobind/stl/unique_ptr.h>
 #include <nanobind/stl/vector.h>
@@ -11,6 +12,7 @@
 #include "engine/price.hpp"
 #include "engine/calibrator.hpp"
 #include "engine/engine.hpp"
+#include "engine/greeks.hpp"
 #include "engine/payoff/payoff_product.hpp"
 
 namespace nb = nanobind;
@@ -177,6 +179,28 @@ public:
         return engine::price_grid(registries_, products, to_measure_specs(measures), models, markets, pricing, execution);
     }
 
+    // Barrido automatico de Greeks (PLAN_GREEKS.md §8.5/§9.1, Fase 9): enumera los RiskFactor
+    // candidatos de model/market para metric_name y calcula todos los que apliquen -- ningun
+    // codigo nuevo por factor de riesgo (mismo argumento que price() para measure_names). Una
+    // sola Greek concreta (metric/risk_factor/order/method a mano) sigue alcanzable via
+    // price(product, [("Greek", {...})], ...), esto es el barrido, no un reemplazo.
+    engine::greeks::GreeksReport all_greeks(
+        const engine::IProduct& product,
+        const std::string& metric_name,
+        const engine::IModel& model,
+        const engine::MarketSnapshot& market,
+        const engine::PricingContext& pricing,
+        const engine::ExecutionContext& execution,
+        const nb::dict& metric_params,
+        bool include_curve_buckets,
+        bool include_second_order
+    ) const {
+        return engine::greeks::compute_all_greeks(
+            registries_, metric_name, dict_to_params(metric_params), model, product, market, pricing, execution,
+            include_curve_buckets, include_second_order
+        );
+    }
+
 private:
     engine::Registries registries_;
 };
@@ -292,6 +316,46 @@ NB_MODULE(engine, m) {
         .def("__repr__", [](const engine::MeasureResult& self) {
             return "<MeasureResult times=" + std::to_string(self.times.size()) +
                    " has_scalar=" + (self.has_scalar ? std::string("True") : std::string("False")) + ">";
+        });
+
+    // --- Greeks (PLAN_GREEKS.md §8.5/§9.1, Fase 9): resultado de Engine.all_greeks -----------
+    // risk_factor/method_used/measure se exponen como texto (engine::greeks::to_string), mismo
+    // criterio de serializacion que usan la C ABI/GreekMeasure -- un cliente Python no necesita
+    // conocer los enums C++ RiskFactor/GreekMethod/ProbabilityMeasure para leer un GreekResult.
+    nb::class_<engine::greeks::GreekResult>(m, "GreekResult")
+        .def_ro("has_scalar", &engine::greeks::GreekResult::has_scalar)
+        .def_ro("value", &engine::greeks::GreekResult::value)
+        .def_ro("times", &engine::greeks::GreekResult::times)
+        .def_ro("primary", &engine::greeks::GreekResult::primary)
+        .def_ro("secondary", &engine::greeks::GreekResult::secondary)
+        .def_ro("std_error", &engine::greeks::GreekResult::std_error)
+        .def_ro("bump_used", &engine::greeks::GreekResult::bump_used)
+        .def_ro("warnings", &engine::greeks::GreekResult::warnings)
+        .def_prop_ro("order", [](const engine::greeks::GreekResult& self) { return self.order.order; })
+        .def_prop_ro(
+            "risk_factor", [](const engine::greeks::GreekResult& self) { return engine::greeks::to_string(self.risk_factor); }
+        )
+        .def_prop_ro(
+            "method_used", [](const engine::greeks::GreekResult& self) { return engine::greeks::to_string(self.method_used); }
+        )
+        .def_prop_ro(
+            "measure", [](const engine::greeks::GreekResult& self) { return engine::greeks::to_string(self.measure); }
+        )
+        .def("__repr__", [](const engine::greeks::GreekResult& self) {
+            return "<GreekResult risk_factor='" + engine::greeks::to_string(self.risk_factor) +
+                   "' value=" + std::to_string(self.value) +
+                   " method_used='" + engine::greeks::to_string(self.method_used) + "'>";
+        });
+
+    // GreeksReport::skipped (PLAN_GREEKS.md §8.5): "best effort" -- un candidato que no aplica
+    // (p.ej. credit.hazard_rate sobre una metrica sin credito) cae aqui con el motivo, nunca
+    // hace fallar el reporte entero.
+    nb::class_<engine::greeks::GreeksReport>(m, "GreeksReport")
+        .def_ro("greeks", &engine::greeks::GreeksReport::greeks)
+        .def_ro("skipped", &engine::greeks::GreeksReport::skipped)
+        .def("__repr__", [](const engine::greeks::GreeksReport& self) {
+            return "<GreeksReport greeks=" + std::to_string(self.greeks.size()) +
+                   " skipped=" + std::to_string(self.skipped.size()) + ">";
         });
 
     // --- price_batch / price_many / price_grid (PLAN.md §7.17/§7.19) ---
@@ -502,5 +566,27 @@ NB_MODULE(engine, m) {
             "Explosion de combinaciones Trades x Models x Markets (PLAN.md §7.19): por cada "
             "par (modelo, mercado), llama a price_many sobre products entero. pricing/execution "
             "son compartidos, no forman parte de la rejilla. Devuelve list[GridResult]."
+        )
+        .def(
+            "all_greeks",
+            &Engine::all_greeks,
+            nb::arg("product"),
+            nb::arg("metric_name"),
+            nb::arg("model"),
+            nb::arg("market"),
+            nb::arg("pricing"),
+            nb::arg("execution"),
+            nb::arg("metric_params") = nb::dict(),
+            nb::arg("include_curve_buckets") = false,
+            nb::arg("include_second_order") = false,
+            "Barrido automatico de Greeks (PLAN_GREEKS.md §8.5): enumera los RiskFactor "
+            "candidatos de model/market para metric_name (cada parametro de model.to_params(), "
+            "curve.parallel[/curve.pillar:i si include_curve_buckets], "
+            "credit.hazard_rate/recovery_rate, time.theta[, Gamma pura de cada parametro de "
+            "modelo si include_second_order]) y calcula todos los que apliquen -- ningun codigo "
+            "nuevo por factor de riesgo. Devuelve un GreeksReport (.greeks: list[GreekResult], "
+            ".skipped: list[str] con el motivo de cada candidato que no aplico).\n\n"
+            ">>> report = eng.all_greeks(trade, 'PayoffPriceQ', model, market, pricing, execution)\n"
+            ">>> for g in report.greeks: print(g.risk_factor, g.value, g.method_used, g.measure)"
         );
 }

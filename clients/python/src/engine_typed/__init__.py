@@ -25,7 +25,9 @@ fachada dinámica (dict/Excel/C ABI), es una fachada más sobre el mismo registr
     eng_execution = engine.ExecutionContext(execution.to_params())
 """
 
+from engine_typed import greeks
 from engine_typed.context import ExecutionContext, PricingContext
+from engine_typed.greeks import Greek
 from engine_typed.market import Market
 from engine_typed.measure import PV, DV01, ExposureProfile, Measure, UnilateralCVA
 from engine_typed.model import HullWhite1F, HullWhite2F, ModelSpec
@@ -100,6 +102,8 @@ __all__ = [
     "DV01",
     "ExposureProfile",
     "UnilateralCVA",
+    "Greek",
+    "greeks",
     "PayoffProduct",
     "ScalarExpr",
     "Predicate",
