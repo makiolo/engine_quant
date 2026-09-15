@@ -258,14 +258,20 @@ explaining a built product (`Product.explain()`) are available from Python, Exce
 (`engine_abi_validate_payoff_spec` / `engine_abi_explain_product`) — the same JSON fixture
 produces the same canonical hash and result across all three, plus C++ and Rust.
 
-Monte Carlo *valuation* of a `Payoff` under a Black-Scholes/GBM model is implemented and
-tested in C++/Rust — price, barrier hit probability, and exposure profile under the
-risk-neutral measure Q; Longstaff-Schwartz American/Bermuda exercise under Q; forecast, hit
-probability, and P&L distribution/expected shortfall under a physical measure P — but it is
-not yet wired into `Engine.price(...)` or any client outside C++. `Engine.price(...)` still
-only covers `IRSwap` and the deterministic ledger measures (`PV`/`DV01`) of `Payoff`. See
-[PLAN_PRODUCTS.md](PLAN_PRODUCTS.md) for the full design and phased roadmap of the payoff
-engine.
+Monte Carlo *valuation* of a `Payoff` under a Black-Scholes/GBM model — price
+(`"PayoffPriceQ"`), Longstaff-Schwartz American/Bermuda exercise (`"PayoffExerciseQ"`), barrier
+hit probability (`"PayoffHitProbabilityQ"`), and exposure profile (`"PayoffExposureProfileQ"`)
+under the risk-neutral measure Q; forecast (`"PayoffForecastP"`), hit probability
+(`"PayoffHitProbabilityP"`), and P&L distribution/expected shortfall
+(`"PayoffPnlDistributionP"`) under a physical measure P — is wired into `Engine.price(...)` as
+seven named measures, alongside `"PV"`/`"DV01"` (still the deterministic ledger path for
+`Payoff`) and the `IRSwap` measures. They take a `GbmModel`/`GbmPModel` (`create_model("GBM", ...)`
+/ `create_model("GBM_P", ...)`) instead of Hull-White, and `n_paths`/`seed` come from the same
+`PricingContext` as any other Monte Carlo measure; `PayoffHitProbabilityQ`/`P` take an `"event"`
+measure param and `PayoffExposureProfileQ` an `"exposure_times"` one. Being registered measures,
+they are automatically reachable from Python, Excel, and the C ABI — no separate wiring per
+client. See [PLAN_PRODUCTS.md](PLAN_PRODUCTS.md) for the full design and phased roadmap of the
+payoff engine, including what is still Rust-only (pathwise sensitivities, hedge synthesis).
 
 ## Calibration
 

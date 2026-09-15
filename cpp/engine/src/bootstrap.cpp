@@ -15,6 +15,13 @@ void register_builtins(Registries& registries) {
     registries.measures.register_type<UnilateralCvaMeasure>("UnilateralCVA");
     registries.measures.register_type<PresentValueMeasure>("PV");
     registries.measures.register_type<Dv01Measure>("DV01");
+    registries.measures.register_type<PayoffPriceQMeasure>("PayoffPriceQ");
+    registries.measures.register_type<PayoffExerciseQMeasure>("PayoffExerciseQ");
+    registries.measures.register_type<PayoffHitProbabilityQMeasure>("PayoffHitProbabilityQ");
+    registries.measures.register_type<PayoffExposureProfileQMeasure>("PayoffExposureProfileQ");
+    registries.measures.register_type<PayoffForecastPMeasure>("PayoffForecastP");
+    registries.measures.register_type<PayoffHitProbabilityPMeasure>("PayoffHitProbabilityP");
+    registries.measures.register_type<PayoffPnlDistributionPMeasure>("PayoffPnlDistributionP");
     registries.calibrators.register_type<HullWhite1FCalibrator>("HullWhite1F");
     registries.calibrators.register_type<HullWhite2FCalibrator>("HullWhite2F");
 }

@@ -5,6 +5,7 @@
 
 #include "engine/engine.hpp"
 #include "engine/payoff/market_snapshot_bridge.hpp"
+#include "engine/payoff/measures.hpp"
 #include "engine/payoff/payoff_product.hpp"
 
 namespace engine {
@@ -371,6 +372,182 @@ MeasureResult Dv01Measure::evaluate(
         return result;
     }
     throw std::invalid_argument("Dv01Measure: producto no soportado: " + product.type_name());
+}
+
+// --- Monte Carlo de PayoffProduct bajo Q/P (ver el doc-comment de measure.hpp) --------------
+
+MeasureResult PayoffPriceQMeasure::evaluate(
+    const IModel& model, const IProduct& product, const MarketSnapshot&,
+    const PricingContext& pricing, const ExecutionContext&
+) const {
+    const auto* payoff_product = dynamic_cast<const payoff::PayoffProduct*>(&product);
+    if (!payoff_product) {
+        throw std::invalid_argument("PayoffPriceQMeasure: producto no soportado: " + product.type_name());
+    }
+    const auto* gbm_model = dynamic_cast<const GbmModel*>(&model);
+    if (!gbm_model) {
+        throw std::invalid_argument("PayoffPriceQMeasure: modelo no soportado: " + model.type_name());
+    }
+
+    payoff::QValuationResult out =
+        payoff::risk_neutral_price_gbm(*payoff_product->payoff_program(), *gbm_model, pricing.n_paths(), pricing.seed());
+
+    MeasureResult result;
+    result.has_scalar = true;
+    result.scalar = out.mean;
+    return result;
+}
+
+MeasureResult PayoffExerciseQMeasure::evaluate(
+    const IModel& model, const IProduct& product, const MarketSnapshot&,
+    const PricingContext& pricing, const ExecutionContext&
+) const {
+    const auto* payoff_product = dynamic_cast<const payoff::PayoffProduct*>(&product);
+    if (!payoff_product) {
+        throw std::invalid_argument("PayoffExerciseQMeasure: producto no soportado: " + product.type_name());
+    }
+    const auto* gbm_model = dynamic_cast<const GbmModel*>(&model);
+    if (!gbm_model) {
+        throw std::invalid_argument("PayoffExerciseQMeasure: modelo no soportado: " + model.type_name());
+    }
+
+    payoff::ExercisePolicyResult out =
+        payoff::exercise_price_gbm(*payoff_product->payoff_program(), *gbm_model, pricing.n_paths(), pricing.seed());
+
+    MeasureResult result;
+    result.has_scalar = true;
+    result.scalar = out.price.mean;
+    result.times.reserve(out.dates.size());
+    result.primary.reserve(out.dates.size());
+    result.secondary.reserve(out.dates.size());
+    for (const payoff::ExerciseDateDiagnostic& diagnostic : out.dates) {
+        result.times.push_back(diagnostic.date);
+        result.primary.push_back(diagnostic.exercised_fraction);
+        result.secondary.push_back(static_cast<double>(diagnostic.n_in_the_money));
+    }
+    return result;
+}
+
+MeasureResult PayoffHitProbabilityQMeasure::evaluate(
+    const IModel& model, const IProduct& product, const MarketSnapshot&,
+    const PricingContext& pricing, const ExecutionContext&
+) const {
+    const auto* payoff_product = dynamic_cast<const payoff::PayoffProduct*>(&product);
+    if (!payoff_product) {
+        throw std::invalid_argument("PayoffHitProbabilityQMeasure: producto no soportado: " + product.type_name());
+    }
+    const auto* gbm_model = dynamic_cast<const GbmModel*>(&model);
+    if (!gbm_model) {
+        throw std::invalid_argument("PayoffHitProbabilityQMeasure: modelo no soportado: " + model.type_name());
+    }
+
+    payoff::HitProbabilityResult out = payoff::hit_probability_gbm(
+        *payoff_product->payoff_program(), *gbm_model, payoff::EventId{event_}, pricing.n_paths(), pricing.seed()
+    );
+
+    MeasureResult result;
+    result.has_scalar = true;
+    result.scalar = out.probability;
+    return result;
+}
+
+MeasureResult PayoffExposureProfileQMeasure::evaluate(
+    const IModel& model, const IProduct& product, const MarketSnapshot&,
+    const PricingContext& pricing, const ExecutionContext&
+) const {
+    const auto* payoff_product = dynamic_cast<const payoff::PayoffProduct*>(&product);
+    if (!payoff_product) {
+        throw std::invalid_argument("PayoffExposureProfileQMeasure: producto no soportado: " + product.type_name());
+    }
+    const auto* gbm_model = dynamic_cast<const GbmModel*>(&model);
+    if (!gbm_model) {
+        throw std::invalid_argument("PayoffExposureProfileQMeasure: modelo no soportado: " + model.type_name());
+    }
+
+    std::vector<payoff::TimePoint> exposure_times;
+    exposure_times.reserve(exposure_times_.size());
+    for (double t : exposure_times_) exposure_times.push_back(payoff::TimePoint{t});
+
+    ExposureProfile profile = payoff::payoff_exposure_profile_gbm(
+        *payoff_product->payoff_program(), *gbm_model, exposure_times, pricing.n_paths(), pricing.seed()
+    );
+
+    MeasureResult result;
+    result.times = std::move(profile.times);
+    result.primary = std::move(profile.ee);
+    result.secondary = std::move(profile.pfe_95);
+    result.has_scalar = false;
+    return result;
+}
+
+MeasureResult PayoffForecastPMeasure::evaluate(
+    const IModel& model, const IProduct& product, const MarketSnapshot&,
+    const PricingContext& pricing, const ExecutionContext&
+) const {
+    const auto* payoff_product = dynamic_cast<const payoff::PayoffProduct*>(&product);
+    if (!payoff_product) {
+        throw std::invalid_argument("PayoffForecastPMeasure: producto no soportado: " + product.type_name());
+    }
+    const auto* gbm_p_model = dynamic_cast<const GbmPModel*>(&model);
+    if (!gbm_p_model) {
+        throw std::invalid_argument("PayoffForecastPMeasure: modelo no soportado: " + model.type_name());
+    }
+
+    payoff::ForecastResult out =
+        payoff::forecast_gbm_p(*payoff_product->payoff_program(), *gbm_p_model, pricing.n_paths(), pricing.seed());
+
+    MeasureResult result;
+    result.has_scalar = true;
+    result.scalar = out.mean;
+    return result;
+}
+
+MeasureResult PayoffHitProbabilityPMeasure::evaluate(
+    const IModel& model, const IProduct& product, const MarketSnapshot&,
+    const PricingContext& pricing, const ExecutionContext&
+) const {
+    const auto* payoff_product = dynamic_cast<const payoff::PayoffProduct*>(&product);
+    if (!payoff_product) {
+        throw std::invalid_argument("PayoffHitProbabilityPMeasure: producto no soportado: " + product.type_name());
+    }
+    const auto* gbm_p_model = dynamic_cast<const GbmPModel*>(&model);
+    if (!gbm_p_model) {
+        throw std::invalid_argument("PayoffHitProbabilityPMeasure: modelo no soportado: " + model.type_name());
+    }
+
+    payoff::HitProbabilityResult out = payoff::hit_probability_gbm(
+        *payoff_product->payoff_program(), *gbm_p_model, payoff::EventId{event_}, pricing.n_paths(), pricing.seed()
+    );
+
+    MeasureResult result;
+    result.has_scalar = true;
+    result.scalar = out.probability;
+    return result;
+}
+
+MeasureResult PayoffPnlDistributionPMeasure::evaluate(
+    const IModel& model, const IProduct& product, const MarketSnapshot&,
+    const PricingContext& pricing, const ExecutionContext&
+) const {
+    const auto* payoff_product = dynamic_cast<const payoff::PayoffProduct*>(&product);
+    if (!payoff_product) {
+        throw std::invalid_argument("PayoffPnlDistributionPMeasure: producto no soportado: " + product.type_name());
+    }
+    const auto* gbm_p_model = dynamic_cast<const GbmPModel*>(&model);
+    if (!gbm_p_model) {
+        throw std::invalid_argument("PayoffPnlDistributionPMeasure: modelo no soportado: " + model.type_name());
+    }
+
+    payoff::PnlDistributionResult out = payoff::pnl_distribution_gbm_p(
+        *payoff_product->payoff_program(), *gbm_p_model, pricing.n_paths(), pricing.seed(), confidence_
+    );
+
+    MeasureResult result;
+    result.has_scalar = true;
+    result.scalar = out.mean;
+    result.primary = {out.var};
+    result.secondary = {out.es};
+    return result;
 }
 
 } // namespace engine

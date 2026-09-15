@@ -132,6 +132,154 @@ private:
     bool bucketed_;
 };
 
+// --- Monte Carlo de PayoffProduct bajo Q/P, cableado a Registry<IMeasure>/Engine.price ------
+// (PLAN_PRODUCTS.md §12: las funciones libres de `engine/payoff/measures.hpp`
+// -- `risk_neutral_price_gbm`/`exercise_price_gbm`/`hit_probability_gbm`/
+// `payoff_exposure_profile_gbm`/`forecast_gbm_p`/`pnl_distribution_gbm_p` -- ya existían y ya
+// cruzaban a Rust vía el bridge cxx, pero solo eran alcanzables llamándolas directamente desde
+// C++ (tests); estas siete medidas son el único paso que faltaba para que `Engine.price(...)`
+// las resuelva por nombre igual que "PV"/"DV01"/"ExposureProfile" -- y, por construcción de
+// `price()`/`price_batch`/`price_many`/`price_grid`/Python/Excel (que resuelven cualquier
+// nombre presente en `Registry<IMeasure>` sin lista cerrada aparte, salvo el `price_batch` de
+// IRS), quedan automáticamente alcanzables desde ahí también sin tocar esas capas.
+//
+// `n_paths`/`seed` salen de `PricingContext` (mismo origen que las medidas Monte Carlo de IRS,
+// `ExposureProfileMeasure`/`UnilateralCvaMeasure` arriba) -- nunca de un `Params` propio de la
+// medida, por consistencia. `ExecutionContext::backend()` NO se usa todavía: el bridge cxx de
+// payoff (`engine-ffi`) siempre ejecuta en CPU pase lo que pase (ver el doc-comment de
+// `payoff::risk_neutral_price_gbm` y la nota de Fase 11 en PLAN_PRODUCTS.md) -- limitación ya
+// documentada, no un descarte silencioso introducido aquí.
+//
+// Nombres NUEVOS y explícitos (en vez de ramas adicionales dentro de "PV"/"ExposureProfile"):
+// un Monte Carlo GBM bajo Q/P es una medida distinta de la réplica determinista de curva que ya
+// hacen "PV"/"DV01" para `PayoffProduct` (`market_snapshot_bridge.hpp`) -- mezclarlas bajo el
+// mismo nombre, despachando por tipo de modelo, sería más difícil de razonar y de descubrir
+// (`Engine.list_measures()`) que dos nombres separados.
+
+// Precio bajo Q (Monte Carlo, GBM) de un `PayoffProduct` (PLAN_PRODUCTS.md §12 Fase 5).
+// `product` debe ser `payoff::PayoffProduct`, `model` debe ser `GbmModel` -- cualquier otra
+// combinación lanza `std::invalid_argument` (mismo criterio que el resto de medidas de este
+// archivo). El preflight de dependencias-vs-capacidades vive en `risk_neutral_price_gbm`.
+class PayoffPriceQMeasure : public IMeasure {
+public:
+    explicit PayoffPriceQMeasure(const Params&) {}
+
+    std::string type_name() const override { return "PayoffPriceQ"; }
+
+    MeasureResult evaluate(
+        const IModel& model, const IProduct& product, const MarketSnapshot& market,
+        const PricingContext& pricing, const ExecutionContext& execution
+    ) const override;
+};
+
+// Precio bajo Q de un `PayoffProduct` con un derecho de `Exercise` (PLAN_PRODUCTS.md §10, Fase
+// 9), más el diagnóstico de la política de Longstaff-Schwartz exportable ("explain muestra la
+// política", criterio de aceptación de esa fase): `times`/`primary`/`secondary` llevan, por
+// fecha de decisión (orden ascendente), la propia fecha, la fracción de rutas que ejercitó
+// (`primary`) y el número de rutas in-the-money en esa fecha (`secondary`, casteado a
+// `double`) -- mismo hueco de forma que `ExposureProfileMeasure` (perfil temporal +
+// `has_scalar`/`scalar` para el precio agregado).
+class PayoffExerciseQMeasure : public IMeasure {
+public:
+    explicit PayoffExerciseQMeasure(const Params&) {}
+
+    std::string type_name() const override { return "PayoffExerciseQ"; }
+
+    MeasureResult evaluate(
+        const IModel& model, const IProduct& product, const MarketSnapshot& market,
+        const PricingContext& pricing, const ExecutionContext& execution
+    ) const override;
+};
+
+// Probabilidad bajo Q de que un `Trigger` del contrato dispare (PLAN_PRODUCTS.md §12 Fase 6).
+// `event` (obligatorio, `Params{{"event", std::string(...)}}`) identifica el `EventId` del
+// `Trigger` a consultar -- mismo estilo que `Dv01Measure::bump_` (configuración leída en el
+// constructor porque `evaluate()` no recibe un `Params` propio).
+class PayoffHitProbabilityQMeasure : public IMeasure {
+public:
+    explicit PayoffHitProbabilityQMeasure(const Params& params) : event_(get_string(params, "event")) {}
+
+    std::string type_name() const override { return "PayoffHitProbabilityQ"; }
+
+    MeasureResult evaluate(
+        const IModel& model, const IProduct& product, const MarketSnapshot& market,
+        const PricingContext& pricing, const ExecutionContext& execution
+    ) const override;
+
+private:
+    std::string event_;
+};
+
+// Perfil de exposición pathwise bajo Q de un `PayoffProduct` (PLAN_PRODUCTS.md §12 Fase 6).
+// `exposure_times` (obligatorio, `Params{{"exposure_times", std::vector<double>{...}}}`) --
+// mismo `times`/`primary`(EE)/`secondary`(PFE95) que `ExposureProfileMeasure`, reutilizando
+// `engine::ExposureProfile` sin inventar una forma de resultado nueva (§5.5).
+class PayoffExposureProfileQMeasure : public IMeasure {
+public:
+    explicit PayoffExposureProfileQMeasure(const Params& params) : exposure_times_(get_vector(params, "exposure_times")) {}
+
+    std::string type_name() const override { return "PayoffExposureProfileQ"; }
+
+    MeasureResult evaluate(
+        const IModel& model, const IProduct& product, const MarketSnapshot& market,
+        const PricingContext& pricing, const ExecutionContext& execution
+    ) const override;
+
+private:
+    std::vector<double> exposure_times_;
+};
+
+// "Forecast" bajo P de un `PayoffProduct` (PLAN_PRODUCTS.md §12 Fase 7): NUNCA descontado --
+// `model` debe ser `GbmPModel` (un `GbmModel` de Fase 5 se rechaza, "el motor rechaza
+// combinaciones Q/P inválidas", ver el preflight de `forecast_gbm_p`).
+class PayoffForecastPMeasure : public IMeasure {
+public:
+    explicit PayoffForecastPMeasure(const Params&) {}
+
+    std::string type_name() const override { return "PayoffForecastP"; }
+
+    MeasureResult evaluate(
+        const IModel& model, const IProduct& product, const MarketSnapshot& market,
+        const PricingContext& pricing, const ExecutionContext& execution
+    ) const override;
+};
+
+// Probabilidad bajo P de que un `Trigger` dispare (PLAN_PRODUCTS.md §12 Fase 7). Mismo `event`
+// obligatorio que `PayoffHitProbabilityQMeasure`; `model` debe ser `GbmPModel`.
+class PayoffHitProbabilityPMeasure : public IMeasure {
+public:
+    explicit PayoffHitProbabilityPMeasure(const Params& params) : event_(get_string(params, "event")) {}
+
+    std::string type_name() const override { return "PayoffHitProbabilityP"; }
+
+    MeasureResult evaluate(
+        const IModel& model, const IProduct& product, const MarketSnapshot& market,
+        const PricingContext& pricing, const ExecutionContext& execution
+    ) const override;
+
+private:
+    std::string event_;
+};
+
+// Distribución de P&L de una estrategia bajo P (PLAN_PRODUCTS.md §12 Fase 7): `scalar`/`mean`
+// es la media, `primary=[var]`/`secondary=[es]` (un único elemento cada uno, `es >= var`
+// siempre -- ver el doc-comment de `PnlDistributionResult`). `confidence` opcional (default
+// `0.95`, mismo estilo que `Dv01Measure::bump_`).
+class PayoffPnlDistributionPMeasure : public IMeasure {
+public:
+    explicit PayoffPnlDistributionPMeasure(const Params& params) : confidence_(get_double(params, "confidence", 0.95)) {}
+
+    std::string type_name() const override { return "PayoffPnlDistributionP"; }
+
+    MeasureResult evaluate(
+        const IModel& model, const IProduct& product, const MarketSnapshot& market,
+        const PricingContext& pricing, const ExecutionContext& execution
+    ) const override;
+
+private:
+    double confidence_;
+};
+
 // --- Lote homogéneo (PLAN.md §7.17/§7.19) ---------------------------------------------------
 // Equivalentes de lote de los `compute_*` internos de measure.cpp. Declarados aquí (no en el
 // `namespace {}` anónimo de measure.cpp) porque `engine::price_batch` (price.hpp) necesita

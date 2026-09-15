@@ -56,7 +56,13 @@ def test_register_builtins_populates_all_registries():
     # PLAN_REAPI.md §6 Fase 3: price_measure_names() ya no es una tabla curada cerrada de 5
     # nombres -- es Registry<IMeasure>.list() ("ExposureProfile" incluido, antes inalcanzable
     # como nombre de PRICE) más los dos alias heredados que no son un tipo registrado propio.
-    assert set(eng.list_measures()) == {"PV", "DV01", "ExposureProfile", "ExpectedExposure", "PFE95", "UnilateralCVA"}
+    # Las siete medidas "Payoff*Q"/"Payoff*P" (PLAN_PRODUCTS.md §12 Fase 5-7) son el cableado de
+    # las funciones Monte Carlo GBM de payoff a Registry<IMeasure>/Engine.price.
+    assert set(eng.list_measures()) == {
+        "PV", "DV01", "ExposureProfile", "ExpectedExposure", "PFE95", "UnilateralCVA",
+        "PayoffPriceQ", "PayoffExerciseQ", "PayoffHitProbabilityQ", "PayoffExposureProfileQ",
+        "PayoffForecastP", "PayoffHitProbabilityP", "PayoffPnlDistributionP",
+    }
 
 
 def test_create_unknown_model_raises_index_error():

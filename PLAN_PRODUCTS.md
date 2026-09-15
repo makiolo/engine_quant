@@ -757,12 +757,29 @@ resultado más allá de tolerancia declarada.
   `hit_probability_gbm_q`, `payoff_exposure_profile_gbm_q`, `price_payoff_exercise_gbm_q`),
   mismo patrón que `crate::api::irs_hull_white_exposure_profile`; benchmark
   `payoff_gpu_vs_cpu_bench.rs` y test diferencial CPU/GPU (`--features gpu`). La interfaz cxx
-  hacia C++ no cambió (`engine-ffi` sigue pasando `"cpu"` fijo) -- estas funciones siguen
-  sin estar registradas en `Registry<IMeasure>` ni alcanzables desde C++/Python/Excel con
-  selección de backend real; eso queda pendiente si algún día hace falta GPU de verdad desde
-  fuera de Rust. Nota de entorno: en esta máquina, `--features gpu` compila pero el kernel wgpu
-  falla en runtime con `.log()`/`.exp()` (los usa `Gbm`, Hull-White no) -- parece limitación del
-  driver/entorno, no un bug introducido aquí; revisar antes de depender de GPU real para payoff.
+  hacia C++ no cambió (`engine-ffi` sigue pasando `"cpu"` fijo) -- selección de backend real
+  desde fuera de Rust sigue pendiente, si algún día hace falta GPU de verdad para payoff. Nota
+  de entorno: en esta máquina, `--features gpu` compila pero el kernel wgpu falla en runtime con
+  `.log()`/`.exp()` (los usa `Gbm`, Hull-White no) -- parece limitación del driver/entorno, no un
+  bug introducido aquí; revisar antes de depender de GPU real para payoff.
+- Hecho: **cableado a `Registry<IMeasure>`/`Engine.price(...)`** (sesión posterior a Fase 11,
+  motivada por el punto anterior): siete `IMeasure` nuevas en `measure.hpp`/`measure.cpp`
+  (`PayoffPriceQ`, `PayoffExerciseQ`, `PayoffHitProbabilityQ`, `PayoffExposureProfileQ`,
+  `PayoffForecastP`, `PayoffHitProbabilityP`, `PayoffPnlDistributionP`), registradas en
+  `bootstrap.cpp`, delegando en las funciones libres ya existentes de
+  `engine/payoff/measures.hpp` (que ya cruzaban a Rust vía `engine-ffi`, pero solo eran
+  alcanzables llamándolas directamente desde C++). `n_paths`/`seed` de `PricingContext`
+  (consistencia con las medidas Monte Carlo de IRS); `event`/`exposure_times`/`confidence` como
+  `Params` de la medida. Al ser medidas registradas, `price()`/`price_batch`/`price_many`/
+  `price_grid`/Python (nanobind)/Excel/C ABI las resuelven por nombre sin ningún cambio
+  adicional en esas capas (`price_batch`/`price_many` de un `PayoffProduct` ya enrutaban por
+  `price_batch_generic`, genérico sobre `Registry<IMeasure>` desde Fase 8) -- verificado end to
+  end con un smoke test de Python (`Engine.price(...)` con `"PayoffPriceQ"`) además de los tests
+  de C++. Nombres nuevos y explícitos, no ramas adicionales dentro de "PV"/"ExposureProfile": ver
+  el doc-comment de `measure.hpp` para la justificación. Sigue pendiente: cablear
+  `payoff::api::payoff_sensitivity_gbm_q` (Fase 11, sensibilidades pathwise) y
+  `payoff::hedge::synthesize_hedge_gbm_q` (síntesis de cobertura) -- ninguna de las dos cruza
+  todavía el bridge cxx, son Rust-only.
 - Hecho: **AAD con fallback a bump-and-reval** para sensibilidades del pricer Monte Carlo GBM de
   payoff (`payoff/dual.rs` + `payoff/sensitivity.rs`, expuesto como `payoff::api::
   payoff_sensitivity_gbm_q`). Método pathwise (Broadie-Glasserman): se recupera el browniano
