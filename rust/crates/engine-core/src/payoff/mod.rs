@@ -39,6 +39,7 @@ pub mod api_p;
 pub mod compile;
 mod dual;
 pub mod eval;
+pub mod hedge;
 pub mod ir;
 pub mod lsm;
 mod sensitivity;
@@ -50,6 +51,7 @@ pub use api::{
 pub use api_p::{forecast_gbm_p, hit_probability_gbm_p, pnl_distribution_gbm_p, PnlDistribution};
 pub use compile::compile;
 pub use eval::{evaluate, evaluate_with_events, evaluate_with_events_seeded, EventOutcome, ObservablePath, PathCashflow};
+pub use hedge::{solve_hedge, synthesize_hedge_gbm_q, HedgeResult};
 pub use ir::{
     BarrierDirection, BridgePattern, CompiledPayoff, ContractOp, MonitoringMode, PredicateOp, ScalarOp,
     SettlementMode, COMPILED_PAYOFF_VERSION,
