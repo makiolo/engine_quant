@@ -37,13 +37,15 @@
 pub mod api;
 pub mod api_p;
 pub mod compile;
+mod dual;
 pub mod eval;
 pub mod ir;
 pub mod lsm;
+mod sensitivity;
 
 pub use api::{
-    hit_probability_gbm_q, payoff_exposure_profile_gbm_q, price_payoff_exercise_gbm_q, price_payoff_gbm_q,
-    ExercisePolicyResult,
+    hit_probability_gbm_q, payoff_exposure_profile_gbm_q, payoff_sensitivity_gbm_q, price_payoff_exercise_gbm_q,
+    price_payoff_gbm_q, ExercisePolicyResult,
 };
 pub use api_p::{forecast_gbm_p, hit_probability_gbm_p, pnl_distribution_gbm_p, PnlDistribution};
 pub use compile::compile;

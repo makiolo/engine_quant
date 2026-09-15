@@ -221,7 +221,12 @@ pub(crate) fn eval_scalar(
 
 /// Evalua `payoff.predicate_ops[idx]`. `All`/`Any` cortocircuitan (ADR-P0-03), igual que exige el
 /// AST de autoria en C++.
-fn eval_predicate(
+///
+/// `pub(crate)` (en vez de privado del modulo) porque `super::sensitivity` la reutiliza tal cual
+/// para decidir la rama de `ContractOp::If` en la pasada dual (PLAN_PRODUCTS.md §12 Fase 11): la
+/// ramificacion discreta se decide UNA VEZ sobre la ruta `f64` realizada y se mantiene fija,
+/// nunca se re-evalua con numeros duales -- ver el doc-comment de `sensitivity`.
+pub(crate) fn eval_predicate(
     payoff: &CompiledPayoff,
     idx: usize,
     cursor: Option<f64>,

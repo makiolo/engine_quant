@@ -27,9 +27,11 @@ use crate::exposure::ExposureProfile;
 use crate::mc::{self, McEstimate};
 use crate::models::gbm::Gbm;
 use crate::payoff::compile::compile;
+use crate::payoff::dual::Dual;
 use crate::payoff::eval::{evaluate_with_events_seeded, evaluate_with_resolved_states, resolve_trigger_states, ObservablePath};
 use crate::payoff::ir::CompiledPayoff;
 use crate::payoff::lsm::{self, ExerciseDateDiagnostic};
+use crate::payoff::sensitivity::{contains_exercise, evaluate_dual, GbmDualPath, GbmGreek};
 use burn::tensor::backend::Backend;
 use burn::tensor::{Tensor, TensorData};
 
@@ -323,6 +325,159 @@ fn price_payoff_exercise_gbm_q_on<B: Backend<FloatElem = f64>>(
     }
 
     Ok(ExercisePolicyResult { price: mc::aggregate(&discounted_samples, mc::Z_95), dates: diagnostics })
+}
+
+/// Sensibilidad ("Greek") de `price_payoff_gbm_q` respecto de uno de los cuatro parametros de
+/// `Gbm` (`"spot"`, `"rate"`, `"dividend_yield"`, `"volatility"`) -- PLAN_PRODUCTS.md §12 Fase 11,
+/// item pendiente "AAD con fallback a bump-and-reval para sensibilidades del pricer Monte Carlo
+/// GBM de payoff".
+///
+/// Sin `ContractOp::Exercise` en el contrato: pasada pathwise (`crate::payoff::sensitivity`) sobre
+/// las MISMAS rutas que usaria `price_payoff_gbm_q` -- una derivada exacta por ruta (sin ruido de
+/// discretizacion de un bump finito), agregada igual que cualquier otro estimador Monte Carlo
+/// (`crate::mc::McEstimate`). Con `ContractOp::Exercise`: el pathwise method no aplica limpiamente
+/// (re-decidir la politica de Longstaff-Schwartz bajo el parametro perturbado cambia la regresion
+/// completa, no solo esta ruta) -- fallback automatico a diferencia central bump-and-reval con
+/// numeros aleatorios comunes (mismo `seed` en ambas valoraciones bumped, ver
+/// `payoff_sensitivity_bump_and_reval`), exactamente el fallback que PLAN_PRODUCTS.md preveia.
+#[allow(clippy::too_many_arguments)]
+pub fn payoff_sensitivity_gbm_q(
+    backend: &str,
+    spec_json: &str,
+    observable: &str,
+    greek: &str,
+    s0: f64,
+    r: f64,
+    q: f64,
+    sigma: f64,
+    n_paths: u64,
+    seed: u64,
+) -> Result<McEstimate, String> {
+    let payoff = compile(spec_json)?;
+    check_single_observable(&payoff, observable, n_paths)?;
+    if contains_exercise(&payoff) {
+        return payoff_sensitivity_bump_and_reval(backend, spec_json, observable, greek, s0, r, q, sigma, n_paths, seed);
+    }
+    let greek_kind = GbmGreek::parse(greek)?;
+    match resolve_backend(backend) {
+        ComputeBackend::Cpu => {
+            let device = burn::tensor::Device::<CpuBackend>::default();
+            payoff_sensitivity_pathwise_on::<CpuBackend>(&device, &payoff, s0, r, q, sigma, greek_kind, n_paths, seed)
+        }
+        ComputeBackend::Gpu => {
+            #[cfg(feature = "gpu")]
+            {
+                let device = burn::tensor::Device::<crate::backend::GpuBackend>::default();
+                payoff_sensitivity_pathwise_on::<crate::backend::GpuBackend>(
+                    &device, &payoff, s0, r, q, sigma, greek_kind, n_paths, seed,
+                )
+            }
+            #[cfg(not(feature = "gpu"))]
+            {
+                let device = burn::tensor::Device::<CpuBackend>::default();
+                payoff_sensitivity_pathwise_on::<CpuBackend>(&device, &payoff, s0, r, q, sigma, greek_kind, n_paths, seed)
+            }
+        }
+    }
+}
+
+/// Pasada pathwise (ver el doc-comment de `payoff_sensitivity_gbm_q` y de `crate::payoff::
+/// sensitivity`): simula las mismas rutas GBM que `price_payoff_gbm_q_on`, resuelve los
+/// `Trigger`/estados sobre la ruta `f64` (fijos para la derivada, ver `sensitivity`), interpreta el
+/// ledger como `Dual` sobre `GbmDualPath` y descuenta con un `r` TAMBIEN dual
+/// (`GbmDualPath::rate_dual`) -- si `greek == Rate`, el propio factor de descuento aporta a la
+/// sensibilidad ademas de la ruta, tal como exige `rho`.
+#[allow(clippy::too_many_arguments)]
+fn payoff_sensitivity_pathwise_on<B: Backend<FloatElem = f64>>(
+    device: &burn::tensor::Device<B>,
+    payoff: &CompiledPayoff,
+    s0: f64,
+    r: f64,
+    q: f64,
+    sigma: f64,
+    greek: GbmGreek,
+    n_paths: u64,
+    seed: u64,
+) -> Result<McEstimate, String> {
+    let (times, columns) = simulate_gbm_columns::<B>(device, payoff, s0, r, q, sigma, n_paths, seed)?;
+    let n_paths_usize = n_paths as usize;
+
+    let mut samples = Vec::with_capacity(n_paths_usize);
+    for path_idx in 0..n_paths_usize {
+        let values: Vec<f64> = columns.iter().map(|col| col[path_idx]).collect();
+        let f64_path = SinglePath { times: &times, values: &values, sigma };
+        let states = resolve_trigger_states(payoff, &f64_path, bridge_seed_for_path(seed, path_idx));
+        let dual_path = GbmDualPath::new(&times, &values, s0, r, q, sigma, greek);
+        let ledger = evaluate_dual(payoff, &dual_path, &f64_path, &states);
+
+        let r_dual = dual_path.rate_dual();
+        let mut present_value = Dual::constant(0.0);
+        for cf in &ledger {
+            let discount = (-r_dual * Dual::constant(cf.payment_time)).exp();
+            present_value = present_value + cf.amount * discount;
+        }
+        samples.push(present_value.deriv);
+    }
+
+    Ok(mc::aggregate(&samples, mc::Z_95))
+}
+
+/// Fallback bump-and-reval (diferencia central, numeros aleatorios comunes) para contratos con
+/// `ContractOp::Exercise` -- ver el doc-comment de `payoff_sensitivity_gbm_q`. `h` es un bump
+/// relativo (`1e-4`), con un piso absoluto (`1e-6`) para el caso de un parametro nominalmente cero
+/// (p.ej. `q=0`); ambas valoraciones bumped comparten `seed` para que la unica diferencia entre
+/// ellas sea el parametro perturbado, reduciendo varianza frente a semillas independientes.
+#[allow(clippy::too_many_arguments)]
+fn payoff_sensitivity_bump_and_reval(
+    backend: &str,
+    spec_json: &str,
+    observable: &str,
+    greek: &str,
+    s0: f64,
+    r: f64,
+    q: f64,
+    sigma: f64,
+    n_paths: u64,
+    seed: u64,
+) -> Result<McEstimate, String> {
+    // 1% relativo (convencion habitual de bump-and-reval Monte Carlo, no el 1e-6 de
+    // `tests/aad_vs_bump_reval.rs`): un bump demasiado pequeno divide la diferencia de dos
+    // precios Monte Carlo (cada uno con su propio error estandar) por un `denominator` diminuto,
+    // amplificando el ruido en vez de acercarse a la derivada -- a diferencia de una formula
+    // cerrada (sin ruido de muestreo), aqui el bump debe ser lo bastante grande para que la
+    // SENAL (diferencia de precio real) domine sobre el error estandar del estimador.
+    const RELATIVE_BUMP: f64 = 1e-2;
+    const MIN_ABSOLUTE_BUMP: f64 = 1e-4;
+    let bump = |v: f64| (RELATIVE_BUMP * v.abs()).max(MIN_ABSOLUTE_BUMP);
+
+    let greek_kind = GbmGreek::parse(greek)?;
+    let (s0_up, s0_dn, r_up, r_dn, q_up, q_dn, sigma_up, sigma_dn, half_denominator) = match greek_kind {
+        GbmGreek::Spot => {
+            let h = bump(s0);
+            (s0 + h, s0 - h, r, r, q, q, sigma, sigma, h)
+        }
+        GbmGreek::Rate => {
+            let h = bump(r);
+            (s0, s0, r + h, r - h, q, q, sigma, sigma, h)
+        }
+        GbmGreek::DividendYield => {
+            let h = bump(q);
+            (s0, s0, r, r, q + h, q - h, sigma, sigma, h)
+        }
+        GbmGreek::Volatility => {
+            let h = bump(sigma);
+            (s0, s0, r, r, q, q, sigma + h, sigma - h, h)
+        }
+    };
+
+    let up = price_payoff_exercise_gbm_q(backend, spec_json, observable, s0_up, r_up, q_up, sigma_up, n_paths, seed)?.price;
+    let down =
+        price_payoff_exercise_gbm_q(backend, spec_json, observable, s0_dn, r_dn, q_dn, sigma_dn, n_paths, seed)?.price;
+
+    let denominator = 2.0 * half_denominator;
+    let mean = (up.mean - down.mean) / denominator;
+    let std_error = (up.std_error.powi(2) + down.std_error.powi(2)).sqrt() / denominator;
+    Ok(McEstimate { mean, std_error, ci_low: mean - mc::Z_95 * std_error, ci_high: mean + mc::Z_95 * std_error, n_paths })
 }
 
 /// Probabilidad bajo Q de que el evento `event` (un `Trigger` de `spec_json`, identificado por su
@@ -976,27 +1131,41 @@ mod tests {
     // ejercicio anticipado ESTRICTAMENTE anteriores a `maturity` -- `continuation` ya paga el
     // intrinseco europeo en `maturity`, asi que incluir `maturity` en `dates` seria redundante
     // (la decision ahi coincidiria siempre con la propia continuacion).
+    // Correccion de un bug preexistente encontrado durante Fase 11 (no introducido por este
+    // cambio): `ev_left`/`ev_right`/`cont_left`/`cont_right` se combinaban antes con
+    // `{"type": "max", "left": ..., "right": ...}` DIRECTAMENTE sobre strike/spot, produciendo
+    // `max(K, S)` en vez de `max(K - S, 0)` (payoff de un put) -- una cantidad SIEMPRE >= K y
+    // creciente en S, el reverso exacto de un put real. Las comparaciones relativas de las
+    // pruebas de esta seccion (americana >= europea, monotonia en fechas, americana==europea sin
+    // dividendos para una call) seguian pasando por accidente (se cumplen para ambas formas), asi
+    // que el bug nunca se manifesto hasta pedir el SIGNO de la sensibilidad respecto del spot
+    // (`sensitivity_of_a_bermuda_put_...`, mas abajo), que si lo expuso. Ahora ambas ramas restan
+    // explicitamente antes del `max(..., 0)`, igual que `CALL_JSON_TEMPLATE`/`european_vanilla_json`.
     fn bermuda_contract_json(event_id: &str, kind: &str, strike: f64, maturity: f64, dates: &[f64]) -> String {
         let dates_json = dates.iter().map(|t| t.to_string()).collect::<Vec<_>>().join(",");
         let (ev_left, ev_right) = match kind {
             "put" => (
-                r#"{"type": "constant", "value": {strike}}"#,
-                r#"{"type": "current", "observable": "EQ.SPOT.XYZ"}"#,
+                r#"{"type": "sub", "left": {"type": "constant", "value": {strike}},
+                    "right": {"type": "current", "observable": "EQ.SPOT.XYZ"}}"#,
+                r#"{"type": "constant", "value": 0.0}"#,
             ),
             "call" => (
-                r#"{"type": "current", "observable": "EQ.SPOT.XYZ"}"#,
-                r#"{"type": "constant", "value": {strike}}"#,
+                r#"{"type": "sub", "left": {"type": "current", "observable": "EQ.SPOT.XYZ"},
+                    "right": {"type": "constant", "value": {strike}}}"#,
+                r#"{"type": "constant", "value": 0.0}"#,
             ),
             other => panic!("kind desconocido: {other}"),
         };
         let (cont_left, cont_right) = match kind {
             "put" => (
-                r#"{"type": "constant", "value": {strike}}"#,
-                r#"{"type": "fixing", "observable": "EQ.SPOT.XYZ", "time": {maturity}}"#,
+                r#"{"type": "sub", "left": {"type": "constant", "value": {strike}},
+                    "right": {"type": "fixing", "observable": "EQ.SPOT.XYZ", "time": {maturity}}}"#,
+                r#"{"type": "constant", "value": 0.0}"#,
             ),
             "call" => (
-                r#"{"type": "fixing", "observable": "EQ.SPOT.XYZ", "time": {maturity}}"#,
-                r#"{"type": "constant", "value": {strike}}"#,
+                r#"{"type": "sub", "left": {"type": "fixing", "observable": "EQ.SPOT.XYZ", "time": {maturity}},
+                    "right": {"type": "constant", "value": {strike}}}"#,
+                r#"{"type": "constant", "value": 0.0}"#,
             ),
             other => panic!("kind desconocido: {other}"),
         };
@@ -1019,15 +1188,19 @@ mod tests {
         format!(r#"{{"schema": "engine.payoff/v1", "id": "BERMUDA_{kind}", "contract": {contract}}}"#)
     }
 
+    // Mismo bug preexistente que `bermuda_contract_json` (ver su comentario): corregido a
+    // `max(K - S, 0)` / `max(S - K, 0)` en vez de `max(K, S)` / `max(S, K)`.
     fn european_vanilla_json(kind: &str, strike: f64, maturity: f64) -> String {
         let (left, right) = match kind {
             "put" => (
-                r#"{"type": "constant", "value": {strike}}"#,
-                r#"{"type": "fixing", "observable": "EQ.SPOT.XYZ", "time": {maturity}}"#,
+                r#"{"type": "sub", "left": {"type": "constant", "value": {strike}},
+                    "right": {"type": "fixing", "observable": "EQ.SPOT.XYZ", "time": {maturity}}}"#,
+                r#"{"type": "constant", "value": 0.0}"#,
             ),
             "call" => (
-                r#"{"type": "fixing", "observable": "EQ.SPOT.XYZ", "time": {maturity}}"#,
-                r#"{"type": "constant", "value": {strike}}"#,
+                r#"{"type": "sub", "left": {"type": "fixing", "observable": "EQ.SPOT.XYZ", "time": {maturity}},
+                    "right": {"type": "constant", "value": {strike}}}"#,
+                r#"{"type": "constant", "value": 0.0}"#,
             ),
             other => panic!("kind desconocido: {other}"),
         };
@@ -1187,6 +1360,134 @@ mod tests {
                 assert_eq!(d.exercised_fraction, 0.0);
             }
         }
+    }
+
+    // Sensibilidades pathwise (PLAN_PRODUCTS.md §12 Fase 11: "AAD con fallback a bump-and-reval
+    // para sensibilidades del pricer Monte Carlo GBM de payoff"). El oraculo es una diferencia
+    // central de la formula CERRADA de Black-Scholes (`black_scholes_call`, deterministica, sin
+    // ruido de Monte Carlo) -- la unica fuente de tolerancia es el propio estimador Monte Carlo
+    // bajo prueba (`delta.std_error`), no el oraculo.
+    #[test]
+    fn sensitivity_delta_of_a_call_matches_finite_difference_of_black_scholes() {
+        let _guard = crate::rng_test_lock::LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (s0, strike, r, q, sigma, maturity) = (100.0, 100.0, 0.05, 0.0, 0.2, 1.0);
+        let spec = CALL_JSON_TEMPLATE.replace("{maturity}", &maturity.to_string()).replace("{strike}", &strike.to_string());
+        let (n_paths, seed) = (200_000, 7);
+
+        let delta =
+            payoff_sensitivity_gbm_q("cpu", &spec, "EQ.SPOT.XYZ", "spot", s0, r, q, sigma, n_paths, seed).unwrap();
+
+        let h = 1e-3;
+        let analytic_delta = (black_scholes_call(s0 + h, strike, r, q, sigma, maturity)
+            - black_scholes_call(s0 - h, strike, r, q, sigma, maturity))
+            / (2.0 * h);
+
+        let tolerance = 8.0 * delta.std_error;
+        assert!(
+            (delta.mean - analytic_delta).abs() < tolerance,
+            "delta MC={} (se={}) delta analitica={analytic_delta} tol={tolerance}",
+            delta.mean,
+            delta.std_error
+        );
+    }
+
+    #[test]
+    fn sensitivity_vega_of_a_call_matches_finite_difference_of_black_scholes() {
+        let _guard = crate::rng_test_lock::LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (s0, strike, r, q, sigma, maturity) = (100.0, 100.0, 0.05, 0.0, 0.2, 1.0);
+        let spec = CALL_JSON_TEMPLATE.replace("{maturity}", &maturity.to_string()).replace("{strike}", &strike.to_string());
+        let (n_paths, seed) = (200_000, 11);
+
+        let vega =
+            payoff_sensitivity_gbm_q("cpu", &spec, "EQ.SPOT.XYZ", "volatility", s0, r, q, sigma, n_paths, seed)
+                .unwrap();
+
+        let h = 1e-3;
+        let analytic_vega = (black_scholes_call(s0, strike, r, q, sigma + h, maturity)
+            - black_scholes_call(s0, strike, r, q, sigma - h, maturity))
+            / (2.0 * h);
+
+        let tolerance = 8.0 * vega.std_error;
+        assert!(
+            (vega.mean - analytic_vega).abs() < tolerance,
+            "vega MC={} (se={}) vega analitica={analytic_vega} tol={tolerance}",
+            vega.mean,
+            vega.std_error
+        );
+    }
+
+    #[test]
+    fn sensitivity_rho_of_a_call_matches_finite_difference_of_black_scholes() {
+        let _guard = crate::rng_test_lock::LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (s0, strike, r, q, sigma, maturity) = (100.0, 100.0, 0.05, 0.0, 0.2, 1.0);
+        let spec = CALL_JSON_TEMPLATE.replace("{maturity}", &maturity.to_string()).replace("{strike}", &strike.to_string());
+        let (n_paths, seed) = (200_000, 13);
+
+        let rho = payoff_sensitivity_gbm_q("cpu", &spec, "EQ.SPOT.XYZ", "rate", s0, r, q, sigma, n_paths, seed).unwrap();
+
+        let h = 1e-3;
+        let analytic_rho = (black_scholes_call(s0, strike, r + h, q, sigma, maturity)
+            - black_scholes_call(s0, strike, r - h, q, sigma, maturity))
+            / (2.0 * h);
+
+        let tolerance = 8.0 * rho.std_error;
+        assert!(
+            (rho.mean - analytic_rho).abs() < tolerance,
+            "rho MC={} (se={}) rho analitica={analytic_rho} tol={tolerance}",
+            rho.mean,
+            rho.std_error
+        );
+    }
+
+    #[test]
+    fn sensitivity_of_dividend_yield_of_a_call_matches_finite_difference_of_black_scholes() {
+        let _guard = crate::rng_test_lock::LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (s0, strike, r, q, sigma, maturity) = (100.0, 100.0, 0.05, 0.02, 0.2, 1.0);
+        let spec = CALL_JSON_TEMPLATE.replace("{maturity}", &maturity.to_string()).replace("{strike}", &strike.to_string());
+        let (n_paths, seed) = (200_000, 17);
+
+        let sensitivity =
+            payoff_sensitivity_gbm_q("cpu", &spec, "EQ.SPOT.XYZ", "dividend_yield", s0, r, q, sigma, n_paths, seed)
+                .unwrap();
+
+        let h = 1e-3;
+        let analytic = (black_scholes_call(s0, strike, r, q + h, sigma, maturity)
+            - black_scholes_call(s0, strike, r, q - h, sigma, maturity))
+            / (2.0 * h);
+
+        let tolerance = 8.0 * sensitivity.std_error;
+        assert!(
+            (sensitivity.mean - analytic).abs() < tolerance,
+            "MC={} (se={}) analitica={analytic} tol={tolerance}",
+            sensitivity.mean,
+            sensitivity.std_error
+        );
+    }
+
+    #[test]
+    fn sensitivity_rejects_an_unknown_greek_name() {
+        let spec = CALL_JSON_TEMPLATE.replace("{maturity}", "1.0").replace("{strike}", "100.0");
+        let err = payoff_sensitivity_gbm_q("cpu", &spec, "EQ.SPOT.XYZ", "theta", 100.0, 0.05, 0.0, 0.2, 1_000, 7)
+            .expect_err("un nombre de greek desconocido debe fallar");
+        assert!(err.contains("theta"));
+    }
+
+    #[test]
+    fn sensitivity_of_a_bermuda_put_falls_back_to_bump_and_reval_and_the_spot_delta_is_negative() {
+        // El contrato contiene un ContractOp::Exercise -- payoff_sensitivity_gbm_q debe tomar el
+        // camino bump-and-reval (ver contains_exercise en el doc-comment del modulo sensitivity),
+        // no la pasada pathwise. No hay formula cerrada de referencia para una bermuda con
+        // Longstaff-Schwartz, asi que esto es un sanity check direccional: la delta de un put
+        // americano/bermuda respecto del spot siempre es <= 0.
+        let _guard = crate::rng_test_lock::LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (s0, strike, r, q, sigma, maturity) = (100.0, 100.0, 0.05, 0.0, 0.2, 1.0);
+        let spec = bermuda_json("put", strike, maturity, &[0.25, 0.5, 0.75]);
+        let (n_paths, seed) = (20_000, 41);
+
+        let delta =
+            payoff_sensitivity_gbm_q("cpu", &spec, "EQ.SPOT.XYZ", "spot", s0, r, q, sigma, n_paths, seed).unwrap();
+
+        assert!(delta.mean < 0.0, "delta={} deberia ser negativa para un put bermuda", delta.mean);
     }
 
     // Fase 11 (PLAN_PRODUCTS.md §8: "CPU y GPU deben ejecutar el mismo IR y superar tests
