@@ -64,6 +64,12 @@ def test_greek_forwards_an_explicit_bump_and_method():
     assert spec[1]["method"] == "bump_and_reval"
 
 
+def test_builders_forward_an_explicit_bump_and_method_too():
+    assert greeks.dv01(bump=0.0002).to_spec()[1]["bump"] == 0.0002
+    assert greeks.theta("PayoffPriceQ", bump=2.0).to_spec()[1]["bump"] == 2.0
+    assert greeks.delta("PayoffPriceQ", "spot", method="pathwise").to_spec()[1]["method"] == "pathwise"
+
+
 def _gbm_call_fixture():
     eng = engine.Engine()
     trade = q.european_call("AAPL_CALL_100", "EQ.SPOT.AAPL", strike=100.0, notional=1_000.0, maturity=1.0)
@@ -131,6 +137,7 @@ if __name__ == "__main__":
     test_theta_and_credit_builders_default_metrics()
     test_greek_forwards_metric_params_with_the_metric_dot_prefix()
     test_greek_forwards_an_explicit_bump_and_method()
+    test_builders_forward_an_explicit_bump_and_method_too()
     test_delta_of_a_call_through_price_matches_black_scholes()
     test_all_greeks_on_gbm_returns_the_four_model_parameters_plus_curve_credit_and_theta()
     test_all_greeks_include_second_order_adds_gamma_for_each_model_parameter()

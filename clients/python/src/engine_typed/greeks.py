@@ -4,7 +4,8 @@ parametros propios de la metrica interior, via la convencion de prefijo `metric.
 `Params`/dict que ya consume `Engine.price`/`price_batch`/`price_many`/`price_grid` -- igual
 patron `.to_spec()` que `engine_typed.measure.PV`/`DV01`. Los builders `delta`/`vega`/`rho`/
 `gamma`/`dv01`/`theta`/`hazard_rate`/`recovery_rate` son azucar sobre `Greek` para los
-`RiskFactor` mas comunes (§8.4: "greeks.delta('spot')", etc.), no una API distinta.
+`RiskFactor` mas comunes (§8.4: "greeks.delta('spot')", etc.), no una API distinta -- todos
+aceptan `bump`/`method` opcionales ademas de los parametros propios de la metrica interior.
 
 Una Greek concreta (una combinacion metric/risk_factor/order/method a la vez) es esta clase;
 el BARRIDO automatico de todas las Greeks aplicables a una metrica (§8.5, sin enumerar cada
@@ -59,34 +60,46 @@ class Greek(Measure):
         return params
 
 
-def delta(metric: str, risk_factor: str, **metric_params) -> Greek:
+def delta(
+    metric: str, risk_factor: str, *, bump: Optional[float] = None, method: str = "auto", **metric_params
+) -> Greek:
     """Derivada de primer orden de `metric` respecto de un parametro de MODELO -- p.ej.
     `delta("PayoffPriceQ", "spot")` -> `risk_factor="model.spot"`. `risk_factor` es el nombre
     "amigable" del parametro (sin el prefijo "model.", que añade esta funcion), mismo criterio
-    que ya usa `compute_greek` del lado C++ (ver `resolve_model_parameter_key` en greeks.cpp)."""
-    return Greek(metric=metric, risk_factor=f"model.{risk_factor}", metric_params=metric_params)
+    que ya usa `compute_greek` del lado C++ (ver `resolve_model_parameter_key` en greeks.cpp).
+    `bump`/`method` (PLAN_GREEKS.md §3.4/§3.3) son opcionales: `bump=None` usa la politica de
+    default por tipo de factor, `method="auto"` (default) elige la ruta especializada
+    verificada si existe, o cae a bump-and-reval."""
+    return Greek(metric=metric, risk_factor=f"model.{risk_factor}", metric_params=metric_params, bump=bump, method=method)
 
 
-def vega(metric: str, risk_factor: str = "volatility", **metric_params) -> Greek:
+def vega(
+    metric: str, risk_factor: str = "volatility", *, bump: Optional[float] = None, method: str = "auto", **metric_params
+) -> Greek:
     """Delta del parametro de volatilidad -- `risk_factor` por defecto es "volatility" (Gbm/
     GbmP), se puede sobreescribir para un modelo con otro nombre de parametro de vol."""
-    return delta(metric, risk_factor, **metric_params)
+    return delta(metric, risk_factor, bump=bump, method=method, **metric_params)
 
 
-def rho(metric: str, risk_factor: str = "rate", **metric_params) -> Greek:
+def rho(
+    metric: str, risk_factor: str = "rate", *, bump: Optional[float] = None, method: str = "auto", **metric_params
+) -> Greek:
     """Delta del parametro de tipo de interes del propio modelo (distinto de `dv01`, que es la
     sensibilidad a la CURVA de mercado, no a un parametro de `IModel`) -- `risk_factor` por
     defecto es "rate" (Gbm), se puede sobreescribir (p.ej. "r0" para Hull-White)."""
-    return delta(metric, risk_factor, **metric_params)
+    return delta(metric, risk_factor, bump=bump, method=method, **metric_params)
 
 
-def gamma(metric: str, risk_factor: str, **metric_params) -> Greek:
+def gamma(metric: str, risk_factor: str, *, bump: Optional[float] = None, **metric_params) -> Greek:
     """Segunda derivada pura (PLAN_GREEKS.md §11 Fase 6) del mismo `risk_factor` que `delta` --
-    mismo estencil de 3 puntos que ya usa `compute_greek` cuando `order=2`."""
-    return delta(metric, risk_factor, **metric_params).model_copy(update={"order": 2})
+    mismo estencil de 3 puntos que ya usa `compute_greek` cuando `order=2`. Sin `method`: las
+    rutas especializadas solo cubren `order=1` (§5.2), Gamma siempre es bump-and-reval."""
+    return delta(metric, risk_factor, bump=bump, **metric_params).model_copy(update={"order": 2})
 
 
-def dv01(metric: str = "PV", pillar: Optional[int] = None, **metric_params) -> Greek:
+def dv01(
+    metric: str = "PV", pillar: Optional[int] = None, *, bump: Optional[float] = None, **metric_params
+) -> Greek:
     """Sensibilidad a la curva de descuento (PLAN_GREEKS.md §3.1): `curve.parallel` por
     defecto, o `curve.pillar:<i>` si se pasa `pillar`. `metric` por defecto es "PV" -- a
     diferencia de `delta`/`vega`/`rho`, una sensibilidad de curva sobre un NPV es el caso de
@@ -94,20 +107,21 @@ def dv01(metric: str = "PV", pillar: Optional[int] = None, **metric_params) -> G
     asi que aqui si hay un default razonable. Para el barrido de TODOS los pillars a la vez
     (bucketed) usar `Engine.all_greeks(..., include_curve_buckets=True)`, no esta funcion."""
     risk_factor = "curve.parallel" if pillar is None else f"curve.pillar:{pillar}"
-    return Greek(metric=metric, risk_factor=risk_factor, metric_params=metric_params)
+    return Greek(metric=metric, risk_factor=risk_factor, metric_params=metric_params, bump=bump)
 
 
-def theta(metric: str = "PV", **metric_params) -> Greek:
+def theta(metric: str = "PV", *, bump: Optional[float] = None, **metric_params) -> Greek:
     """Theta puro (PLAN_GREEKS.md §7.1): `metric` por defecto "PV" (junto con "PayoffPriceQ",
-    una de las dos metricas que honran `PricingContext::pricing_date()` hoy, §11 Fase 5)."""
-    return Greek(metric=metric, risk_factor="time.theta", metric_params=metric_params)
+    una de las dos metricas que honran `PricingContext::pricing_date()` hoy, §11 Fase 5).
+    `bump` aqui es `dt` (anios) -- default un dia (1/365) si se omite."""
+    return Greek(metric=metric, risk_factor="time.theta", metric_params=metric_params, bump=bump)
 
 
-def hazard_rate(metric: str = "UnilateralCVA", **metric_params) -> Greek:
+def hazard_rate(metric: str = "UnilateralCVA", *, bump: Optional[float] = None, **metric_params) -> Greek:
     """Sensibilidad de credito (PLAN_GREEKS.md §11 Fase 4): `metric` por defecto
     "UnilateralCVA", la metrica que de verdad consume `hazard_rate`/`recovery_rate`."""
-    return Greek(metric=metric, risk_factor="credit.hazard_rate", metric_params=metric_params)
+    return Greek(metric=metric, risk_factor="credit.hazard_rate", metric_params=metric_params, bump=bump)
 
 
-def recovery_rate(metric: str = "UnilateralCVA", **metric_params) -> Greek:
-    return Greek(metric=metric, risk_factor="credit.recovery_rate", metric_params=metric_params)
+def recovery_rate(metric: str = "UnilateralCVA", *, bump: Optional[float] = None, **metric_params) -> Greek:
+    return Greek(metric=metric, risk_factor="credit.recovery_rate", metric_params=metric_params, bump=bump)

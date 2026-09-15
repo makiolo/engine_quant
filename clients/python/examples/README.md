@@ -19,6 +19,10 @@ params_dict)`, la sigue usando Excel/C ABI) pero ya no es lo que muestran estos 
 - `price_batch_flow.py` — los tres niveles de la API de cálculo por lotes (PLAN.md §7.19):
   `price_batch` (lote homogéneo, mismo calendario), `price_many` (lote heterogéneo, agrupa
   internamente) y `price_grid` (explosión Trades × Models × Markets).
+- `greeks_flow.py` — flujo completo de PLAN_GREEKS.md §9.1: autoría programática del payoff →
+  `create_product` → `price(...)` → `all_greeks(...)`, sin código nuevo por factor de riesgo.
+  Muestra tanto una Greek concreta (`engine_typed.greeks.delta(...)` vía `Engine.price`) como el
+  barrido automático (`Engine.all_greeks`, con `include_second_order=True` para la Gamma pura).
 
 Requieren haber compilado el proyecto con CMake antes (ver `PLAN.md` en la raíz):
 
@@ -26,4 +30,5 @@ Requieren haber compilado el proyecto con CMake antes (ver `PLAN.md` en la raíz
 python clients/python/examples/price_flow.py build/clients/python
 python clients/python/examples/price_flow_typed.py build/clients/python
 python clients/python/examples/price_batch_flow.py build/clients/python
+python clients/python/examples/greeks_flow.py build/clients/python
 ```

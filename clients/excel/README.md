@@ -34,6 +34,7 @@ El resultado es `build/clients/excel/engine_excel.xll`. Solo se construye en Win
 | `ENGINE.PRICE_BATCH(trades, medidas, modelo, mercado, contexto, ejecucion)` | `Engine().price_batch(trades, medidas, modelo, market, pricing, execution)` |
 | `ENGINE.PRICE_MANY(trades, medidas, modelo, mercado, contexto, ejecucion)` | `Engine().price_many(trades, medidas, modelo, market, pricing, execution)` |
 | `ENGINE.PRICE_GRID(trades, medidas, modelos, mercados, contexto, ejecucion)` | `Engine().price_grid(trades, medidas, modelos, markets, pricing, execution)` |
+| `ENGINE.ALL_GREEKS(trade, metrica, parametros_metrica, modelo, mercado, contexto, ejecucion, incluir_pillars, incluir_orden2)` | `Engine().all_greeks(trade, metrica, model, market, pricing, execution, metric_params, include_curve_buckets, include_second_order)` |
 | `ENGINE.LIST_CALIBRATORS()` | `Engine().list_calibrators()` |
 | `ENGINE.CREATE_CALIBRATOR(nombre)` | `Engine().create_calibrator(nombre)` |
 | `ENGINE.CALIBRATE(calibrador, mercado, estimacion_inicial)` | `Calibrator.calibrate(market, initial_guess)` |
@@ -147,6 +148,44 @@ columnas de índice al frente — `ENGINE.PRICE_BATCH`/`ENGINE.PRICE_MANY` añad
 (0-based) del trade/modelo/mercado correspondiente en la columna de handles de entrada — fácil
 de cruzar de vuelta con `INDICE`/`ÍNDICE` sobre esa misma columna si hace falta el handle o
 cualquier otro dato asociado a esa fila.
+
+## `ENGINE.ALL_GREEKS` (PLAN_GREEKS.md §8.5/§9.2)
+
+Barrido automático de Greeks: calcula TODAS las sensibilidades de primer orden aplicables a
+`metrica` sobre `Model`/`Market` (cada parámetro del modelo, la curva paralela, crédito y
+theta), sin enumerarlas celda a celda. Una sola Greek concreta sigue alcanzable con
+`ENGINE.PRICE(Trade, {("Greek", <params>)}, ...)` — `ENGINE.ALL_GREEKS` es el barrido, no un
+reemplazo de esa vía.
+
+```
+Trade    =ENGINE.CREATE_PRODUCT("Payoff", <spec_json de una call europea>)
+Model    =ENGINE.CREATE_MODEL("GBM", <rango GBM: s0, r, q, sigma, observable>)
+Market   =ENGINE.CREATE_MARKET(<rango mercado>)
+Pricing  =ENGINE.CREATE_CONTEXT(<rango contexto de valoracion>)
+Compute  =ENGINE.CREATE_EXECUTION(<rango contexto de ejecucion>)
+         =ENGINE.PRICE(Trade, {"PayoffPriceQ"}, Model, Market, Pricing, Compute)
+         =ENGINE.ALL_GREEKS(Trade, "PayoffPriceQ", , Model, Market, Pricing, Compute, FALSO, FALSO)
+```
+
+`parametros_metrica` (tercer argumento) es un rango clave/valor **opcional** — dejarlo en
+blanco (celda vacía, como arriba) equivale a que la métrica interior no necesita configuración
+propia (p. ej. "PayoffPriceQ"/"PV"); para una métrica con parámetros propios (`event` de
+`PayoffHitProbabilityQ`, `confidence` de `PayoffPnlDistributionP`) se pasa aquí, sin el prefijo
+`metric.` que sí hace falta al construir una `"Greek"` a mano para `ENGINE.PRICE`.
+`incluir_pillars`/`incluir_orden2` (últimos dos argumentos, opcionales — `FALSO` por defecto):
+`incluir_pillars=VERDADERO` añade un candidato `curve.pillar:<i>` por cada pillar de `Market`
+(en vez de solo `curve.parallel`); `incluir_orden2=VERDADERO` añade la Gamma pura de cada
+parámetro de modelo (nunca de curva/crédito, nunca derivadas cruzadas — esas se piden a mano
+vía `ENGINE.PRICE` con una `"Greek"` de `order=2`+`risk_factor` cruzado).
+
+Resultado en **formato largo**: columnas `[RiskFactor, Time, Value, Method, Measure, BumpUsed,
+StdError]` — una fila por factor de riesgo (o por fecha, para una Greek con perfil temporal en
+vez de escalar), con los candidatos que no aplican (`GreeksReport::skipped`, p. ej.
+`credit.hazard_rate` sobre una métrica sin crédito da Value=0 y SÍ aparece, mientras que
+`time.theta` sobre una métrica que no honra `pricing_date` aún no puede calcularse) añadidos al
+final con `Method="skipped"` y el motivo completo en la columna `RiskFactor` — Excel solo puede
+devolver un único rango desde una UDF, a diferencia de Python/C ABI, que exponen `skipped` en un
+segundo campo separado del mismo `GreeksReport`.
 
 ## Backend de cómputo: `ExecutionContext` sustituye el estado global (PLAN.md §7.15)
 

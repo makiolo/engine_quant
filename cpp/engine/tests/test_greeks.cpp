@@ -21,10 +21,13 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <fstream>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <vector>
 
+#include "engine/abi.h"
 #include "engine/bootstrap.hpp"
 #include "engine/greeks.hpp"
 #include "engine/model.hpp"
@@ -121,6 +124,21 @@ class FakeProduct : public engine::IProduct {
 public:
     std::string type_name() const override { return "Fake"; }
 };
+
+#ifndef ENGINE_PAYOFF_EXAMPLES_DIR
+#error "ENGINE_PAYOFF_EXAMPLES_DIR no definido (ver cpp/engine/tests/CMakeLists.txt)"
+#endif
+
+// Mismo helper que test_payoff_fixtures_cross_layer.cpp (no exportado desde alli, se repite
+// aqui): lee un fixture de docs/schema/engine.payoff/examples/ para el test cruzado de Fase 9.
+std::string read_fixture_file(const std::string& name) {
+    std::string path = std::string(ENGINE_PAYOFF_EXAMPLES_DIR) + "/" + name;
+    std::ifstream f(path, std::ios::binary);
+    if (!f) throw std::runtime_error("no se pudo abrir " + path);
+    std::ostringstream ss;
+    ss << f.rdbuf();
+    return ss.str();
+}
 
 } // namespace
 
@@ -1834,4 +1852,91 @@ TEST(GreeksFase8Test, PriceBatchStillRejectsATrulyUnknownMeasureName) {
         ),
         std::invalid_argument
     );
+}
+
+// PLAN_GREEKS.md §9.4 (criterio de aceptacion cruzado de la Fase 9): el MISMO fixture JSON
+// (docs/schema/engine.payoff/examples/call.json, reutilizado de PLAN_PRODUCTS.md, no uno
+// nuevo) debe producir el mismo conjunto de risk_factor, el mismo valor por factor y el mismo
+// `skipped` en la capa nucleo C++ (compute_all_greeks) y en la C ABI (engine_abi_all_greeks) --
+// analogo a PayoffFixturesCrossLayerTest (test_payoff_fixtures_cross_layer.cpp), que hace lo
+// mismo para explain()/hash. La cobertura Python (nanobind vs C ABI via ctypes) vive en
+// clients/python/tests/test_greeks_fixtures_cross_layer.py, mismo patron que
+// test_payoff_fixtures_cross_layer.py -- las tres capas juntas satisfacen "ejercitado desde
+// C++, Python y la sonda C ABI en un unico test de integracion" sin repetir infraestructura.
+TEST(GreeksFase9Test, CoreAndAbiAgreeOnAllGreeksForTheCallFixture) {
+    std::string spec = read_fixture_file("call.json");
+
+    Registries registries;
+    register_builtins(registries);
+    auto product = registries.products.create("Payoff", Params{{"spec", spec}});
+    engine::GbmModel model = make_gbm_q(100.0, 0.05, 0.0, 0.2, "EQ.SPOT.AAPL");
+    MarketSnapshot market({1.0}, {0.05});
+    PricingContext pricing = pricing_context(50'000, 7);
+    ExecutionContext execution = cpu_execution();
+
+    engine::greeks::GreeksReport core_report = engine::greeks::compute_all_greeks(
+        registries, "PayoffPriceQ", Params{}, model, *product, market, pricing, execution
+    );
+
+    EngineParam spec_param{"spec", ENGINE_PARAM_STRING, 0.0, nullptr, 0, spec.c_str()};
+    EngineProduct* abi_product = engine_abi_create_product("Payoff", &spec_param, 1);
+    ASSERT_NE(abi_product, nullptr);
+    EngineParam model_params[] = {
+        EngineParam{"s0", ENGINE_PARAM_DOUBLE, 100.0, nullptr, 0, nullptr},
+        EngineParam{"r", ENGINE_PARAM_DOUBLE, 0.05, nullptr, 0, nullptr},
+        EngineParam{"q", ENGINE_PARAM_DOUBLE, 0.0, nullptr, 0, nullptr},
+        EngineParam{"sigma", ENGINE_PARAM_DOUBLE, 0.2, nullptr, 0, nullptr},
+        EngineParam{"observable", ENGINE_PARAM_STRING, 0.0, nullptr, 0, "EQ.SPOT.AAPL"},
+    };
+    EngineModel* abi_model = engine_abi_create_model("GBM", model_params, 5);
+    ASSERT_NE(abi_model, nullptr);
+
+    double pillars[] = {1.0};
+    double zero_rates[] = {0.05};
+    EngineMarketSnapshot abi_market{pillars, zero_rates, 1, 0.0, 0.0};
+    EnginePricingContext abi_pricing{0.0, 50'000, 1, 7};
+    EngineExecutionContext abi_execution{"cpu", "fp64"};
+
+    EngineGreekResultEntry* greek_entries = nullptr;
+    std::size_t n_greeks = 0;
+    char** skipped = nullptr;
+    std::size_t n_skipped = 0;
+    int rc = engine_abi_all_greeks(
+        abi_product, "PayoffPriceQ", nullptr, 0, abi_model, &abi_market, &abi_pricing, &abi_execution,
+        /*include_curve_buckets=*/0, /*include_second_order=*/0, &greek_entries, &n_greeks, &skipped, &n_skipped
+    );
+    ASSERT_EQ(rc, 0);
+
+    ASSERT_EQ(core_report.greeks.size(), n_greeks);
+    for (const auto& core_greek : core_report.greeks) {
+        const std::string core_factor = engine::greeks::to_string(core_greek.risk_factor);
+        bool matched = false;
+        for (std::size_t i = 0; i < n_greeks; ++i) {
+            if (core_factor != greek_entries[i].risk_factor) continue;
+            matched = true;
+            EXPECT_EQ(core_greek.has_scalar, greek_entries[i].result.has_scalar != 0) << core_factor;
+            EXPECT_DOUBLE_EQ(core_greek.value, greek_entries[i].result.scalar) << core_factor;
+            EXPECT_EQ(engine::greeks::to_string(core_greek.method_used), std::string(greek_entries[i].method_used)) << core_factor;
+            EXPECT_EQ(engine::greeks::to_string(core_greek.measure), std::string(greek_entries[i].measure)) << core_factor;
+            EXPECT_EQ(core_greek.bump_used.has_value(), greek_entries[i].has_bump != 0) << core_factor;
+            if (core_greek.bump_used.has_value() && greek_entries[i].has_bump) {
+                EXPECT_DOUBLE_EQ(*core_greek.bump_used, greek_entries[i].bump_used) << core_factor;
+            }
+            break;
+        }
+        EXPECT_TRUE(matched) << "risk_factor de compute_all_greeks ausente en engine_abi_all_greeks: " << core_factor;
+    }
+
+    ASSERT_EQ(core_report.skipped.size(), n_skipped);
+    for (const std::string& reason : core_report.skipped) {
+        bool matched = false;
+        for (std::size_t i = 0; i < n_skipped; ++i) {
+            if (reason == skipped[i]) { matched = true; break; }
+        }
+        EXPECT_TRUE(matched) << "skipped de compute_all_greeks ausente en engine_abi_all_greeks: " << reason;
+    }
+
+    engine_abi_free_greeks_report(greek_entries, n_greeks, skipped, n_skipped);
+    engine_abi_free_product(abi_product);
+    engine_abi_free_model(abi_model);
 }
