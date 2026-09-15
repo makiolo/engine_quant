@@ -21,10 +21,12 @@ namespace greeks {
 // namespaced ("model.spot", "curve.parallel", "curve.pillar:3", "credit.hazard_rate",
 // "time.theta") antes de evaluar -- una ausencia/typo es error explícito, nunca `0.0` silencioso
 // (mismo criterio que `ObservableId` en PLAN_PRODUCTS.md §3.1). Fase 1 solo ejecutaba
-// `ModelParameter`; Fase 3 añade `CurveParallel`/`CurvePillar` (ver `compute_greek`), aplicable a
+// `ModelParameter`; Fase 3 añadió `CurveParallel`/`CurvePillar` (ver `compute_greek`), aplicable a
 // CUALQUIER producto que descuenta con `MarketSnapshot` (IrSwapProduct y PayoffProduct vía
-// `market_snapshot_bridge`), no solo a "DV01". `CreditParameter`/`TimeShift` ya se parsean aquí
-// (sintaxis fijada en Fase 0) pero `compute_greek` los rechaza todavía -- llegan en Fases 4-5.
+// `market_snapshot_bridge`), no solo a "DV01". Fase 4 añade `CreditParameter`
+// (`hazard_rate`/`recovery_rate`), aplicado sobre todo a `UnilateralCVA`/`ExposureProfile`.
+// `TimeShift` ya se parsea aquí (sintaxis fijada en Fase 0) pero `compute_greek` lo rechaza
+// todavía -- llega en Fase 5.
 enum class RiskFactorKind { ModelParameter, CurveParallel, CurvePillar, CreditParameter, TimeShift };
 
 struct RiskFactor {
@@ -105,11 +107,11 @@ struct GreekResult {
 
 // Motor genérico de bump-and-reval (PLAN_GREEKS.md §4): para `RiskFactorKind::ModelParameter`
 // reconstruye `model` con el parámetro desplazado +-h vía `IModel::to_params()`; para
-// `CurveParallel`/`CurvePillar` (Fase 3) reconstruye `market` desplazada +-h vía
-// `bump_market_parallel`/`bump_market_pillar` (engine/market.hpp) dejando `model` intacto -- en
-// ambos casos vuelve a invocar `request.metric_name` (resuelto por `registries.measures`) sobre
-// cada copia -- diferencia central (no adelantada), mismo `pricing`/`seed` en ambas evaluaciones
-// (números aleatorios comunes, §4.4).
+// `CurveParallel`/`CurvePillar`/`CreditParameter` (Fases 3-4) reconstruye `market` desplazada +-h
+// vía `bump_market_parallel`/`bump_market_pillar`/`bump_market_credit` (engine/market.hpp)
+// dejando `model` intacto -- en todos los casos vuelve a invocar `request.metric_name` (resuelto
+// por `registries.measures`) sobre cada copia -- diferencia central (no adelantada), mismo
+// `pricing`/`seed` en ambas evaluaciones (números aleatorios comunes, §4.4).
 //
 // Fase 1: únicamente `request.order.order == 1` sin `cross_factor`,
 // `request.risk_factor.kind == RiskFactorKind::ModelParameter`, `request.method` en
@@ -117,10 +119,10 @@ struct GreekResult {
 // `up`/`down` deben tener la MISMA forma (mismo `has_scalar`, mismo número de puntos en
 // `times`/`primary`/`secondary`) -- una discrepancia de forma entre las dos evaluaciones
 // bumpeadas es un error explícito (indicaría que `metric_params` cambia el tamaño del perfil de
-// forma no determinista, lo que no debería ocurrir nunca). Fase 3 añade `CurveParallel`/
-// `CurvePillar` al conjunto soportado (`CreditParameter`/`TimeShift` siguen rechazados hasta las
-// Fases 4-5). Cualquier otra combinación lanza std::invalid_argument con el motivo exacto --
-// nunca aproxima en silencio.
+// forma no determinista, lo que no debería ocurrir nunca). Fase 3 añadió `CurveParallel`/
+// `CurvePillar`; Fase 4 añade `CreditParameter` (`TimeShift` sigue rechazado hasta la Fase 5).
+// Cualquier otra combinación lanza std::invalid_argument con el motivo exacto -- nunca aproxima
+// en silencio.
 //
 // Nota de diseño (Fase 3): `Dv01Measure` (measure.hpp) NO se reimplementa sobre esta función --
 // su convención numérica es un bump UNIDIRECCIONAL (`bumped - base`, sin dividir por `h`,
@@ -128,8 +130,8 @@ struct GreekResult {
 // (`(up-down)/(2h)`, una estimación de derivada); son dos preguntas distintas ("¿cuánto cambia el
 // NPV si la curva sube 1pb?" vs "¿cuál es la derivada del NPV respecto de la curva?") que
 // coinciden solo aproximadamente. Lo que SÍ comparten, para no duplicar la construcción de la
-// curva bumpeada en tres sitios (PLAN_GREEKS.md §4.2), es `bump_market_parallel`/
-// `bump_market_pillar` -- ver measure.cpp y payoff/market_snapshot_bridge.cpp.
+// curva/mercado bumpeado en varios sitios (PLAN_GREEKS.md §4.2), es `bump_market_parallel`/
+// `bump_market_pillar`/`bump_market_credit` -- ver measure.cpp y payoff/market_snapshot_bridge.cpp.
 GreekResult compute_greek(
     const Registries& registries, const GreekRequest& request, const IModel& model,
     const IProduct& product, const MarketSnapshot& market, const PricingContext& pricing,
@@ -138,12 +140,14 @@ GreekResult compute_greek(
 
 // Barrido automático de Greeks (PLAN_GREEKS.md §8.5): enumera candidatos de `RiskFactor` sin que
 // el llamante los nombre uno a uno. Fase 1: enumera `ModelParameter`, una entrada por cada clave
-// `double` de `model.to_params()`. Fase 3 añade `curve.parallel` SIEMPRE como candidato, y
+// `double` de `model.to_params()`. Fase 3 añadió `curve.parallel` SIEMPRE como candidato, y
 // `curve.pillar:i` por cada pillar de `market.pillars()` solo si `include_curve_buckets` (política
-// de enumeración exacta de §8.5, punto 2) -- crédito/tiempo/segundo orden siguen pendientes de las
-// Fases 4-6 (`include_second_order` se acepta por compatibilidad con la firma final de §8.5 pero
-// todavía no produce candidatos). Un candidato que falle (`compute_greek` lanza) se registra en
-// `skipped` con el motivo -- nunca aborta el reporte completo.
+// de enumeración exacta de §8.5, punto 2). Fase 4 añade `credit.hazard_rate`/
+// `credit.recovery_rate` SIEMPRE (§8.5 punto 3: "una derivada nula es una respuesta válida,
+// distinta de 'no aplica'") -- tiempo/segundo orden siguen pendientes de las Fases 5-6
+// (`include_second_order` se acepta por compatibilidad con la firma final de §8.5 pero todavía no
+// produce candidatos). Un candidato que falle (`compute_greek` lanza) se registra en `skipped`
+// con el motivo -- nunca aborta el reporte completo.
 struct GreeksReport {
     std::vector<GreekResult> greeks;
     std::vector<std::string> skipped;

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <string>
 #include <vector>
 
 #include "engine/params.hpp"
@@ -127,5 +128,11 @@ MarketSnapshot bump_market_parallel(const MarketSnapshot& market, double bump);
 // generaliza el "bucketed" de PLAN_REAPI.md §6 Fase 5 a cualquier consumidor de MarketSnapshot).
 // Lanza std::invalid_argument si `pillar_index >= market.pillars().size()`.
 MarketSnapshot bump_market_pillar(const MarketSnapshot& market, std::size_t pillar_index, double bump);
+
+// Mercado con `hazard_rate` O `recovery_rate` desplazado en `bump`, curva de descuento intacta
+// (PLAN_GREEKS.md §4.2/Fase 4). `name` es el mismo nombre que usa `RiskFactor::name` para
+// `RiskFactorKind::CreditParameter` ("hazard_rate"/"recovery_rate"); cualquier otro valor lanza
+// std::invalid_argument (mensaje que nombra el valor recibido y las dos alternativas válidas).
+MarketSnapshot bump_market_credit(const MarketSnapshot& market, const std::string& name, double bump);
 
 } // namespace engine

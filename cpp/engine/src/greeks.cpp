@@ -192,11 +192,13 @@ GreekResult compute_greek(
     }
     const bool is_curve_factor =
         request.risk_factor.kind == RiskFactorKind::CurveParallel || request.risk_factor.kind == RiskFactorKind::CurvePillar;
-    if (request.risk_factor.kind != RiskFactorKind::ModelParameter && !is_curve_factor) {
+    const bool is_credit_factor = request.risk_factor.kind == RiskFactorKind::CreditParameter;
+    const bool is_market_factor = is_curve_factor || is_credit_factor;
+    if (request.risk_factor.kind != RiskFactorKind::ModelParameter && !is_market_factor) {
         throw std::invalid_argument(
             "compute_greek: RiskFactorKind de '" + to_string(request.risk_factor) +
-            "' no soportado todavia (Fase 3 soporta model.*/curve.parallel/curve.pillar:<i>; "
-            "credito/tiempo llegan en Fases 4-5)"
+            "' no soportado todavia (Fase 4 soporta model.*/curve.parallel/curve.pillar:<i>/"
+            "credit.hazard_rate/credit.recovery_rate; tiempo llega en Fase 5)"
         );
     }
     if (request.method == GreekMethod::Pathwise || request.method == GreekMethod::AadReverse) {
@@ -213,7 +215,7 @@ GreekResult compute_greek(
     MeasureResult down;
     double h;
 
-    if (is_curve_factor) {
+    if (is_market_factor) {
         if (request.risk_factor.kind == RiskFactorKind::CurvePillar) {
             const std::size_t pillar_index = request.risk_factor.pillar_index.value_or(0);
             if (pillar_index >= market.pillars().size()) {
@@ -224,12 +226,24 @@ GreekResult compute_greek(
             }
         }
         h = request.bump_override.value_or(default_curve_bump());
-        MarketSnapshot market_up = request.risk_factor.kind == RiskFactorKind::CurveParallel
-                                        ? bump_market_parallel(market, h)
-                                        : bump_market_pillar(market, *request.risk_factor.pillar_index, h);
-        MarketSnapshot market_down = request.risk_factor.kind == RiskFactorKind::CurveParallel
-                                          ? bump_market_parallel(market, -h)
-                                          : bump_market_pillar(market, *request.risk_factor.pillar_index, -h);
+        MarketSnapshot market_up = market;
+        MarketSnapshot market_down = market;
+        switch (request.risk_factor.kind) {
+            case RiskFactorKind::CurveParallel:
+                market_up = bump_market_parallel(market, h);
+                market_down = bump_market_parallel(market, -h);
+                break;
+            case RiskFactorKind::CurvePillar:
+                market_up = bump_market_pillar(market, *request.risk_factor.pillar_index, h);
+                market_down = bump_market_pillar(market, *request.risk_factor.pillar_index, -h);
+                break;
+            case RiskFactorKind::CreditParameter:
+                market_up = bump_market_credit(market, request.risk_factor.name, h);
+                market_down = bump_market_credit(market, request.risk_factor.name, -h);
+                break;
+            default:
+                break; // inalcanzable: is_market_factor ya descarta ModelParameter/TimeShift
+        }
         up = metric->evaluate(model, product, market_up, pricing, execution);
         down = metric->evaluate(model, product, market_down, pricing, execution);
     } else {
@@ -354,6 +368,12 @@ GreeksReport compute_all_greeks(
             try_candidate(RiskFactor{RiskFactorKind::CurvePillar, "curve", "", i});
         }
     }
+
+    // Politica de enumeracion de §8.5, punto 3 (Fase 4): "credit.hazard_rate"/
+    // "credit.recovery_rate" siempre -- una derivada nula (metrica que no consume credito) es una
+    // respuesta valida, distinta de "no aplica", y se reporta como tal en vez de omitirse.
+    try_candidate(RiskFactor{RiskFactorKind::CreditParameter, "credit", "hazard_rate", std::nullopt});
+    try_candidate(RiskFactor{RiskFactorKind::CreditParameter, "credit", "recovery_rate", std::nullopt});
 
     return report;
 }

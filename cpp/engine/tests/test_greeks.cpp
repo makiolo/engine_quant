@@ -231,9 +231,10 @@ TEST(GreeksFase1Test, GreekResultReportsBumpUsedMethodUsedAndInferredMeasure) {
     EXPECT_EQ(result.order.order, 1);
 }
 
-// Actualizado en Fase 3 (PLAN_GREEKS.md §8.5 punto 2): "curve.parallel" ahora se enumera SIEMPRE,
-// además de los 4 parámetros de modelo -- 5 candidatos en vez de 4, ninguno en skipped.
-TEST(GreeksFase1Test, ComputeAllGreeksOnGbmReturnsTheFourModelParametersPlusCurveParallel) {
+// Actualizado en Fase 4 (PLAN_GREEKS.md §8.5 puntos 2-3): "curve.parallel"/"credit.hazard_rate"/
+// "credit.recovery_rate" se enumeran SIEMPRE, además de los 4 parámetros de modelo -- 7
+// candidatos en vez de 4, ninguno en skipped.
+TEST(GreeksFase1Test, ComputeAllGreeksOnGbmReturnsTheFourModelParametersPlusCurveAndCredit) {
     Registries registries;
     register_builtins(registries);
     const pf::ObservableId spot{"EQ.SPOT.XYZ"};
@@ -245,31 +246,37 @@ TEST(GreeksFase1Test, ComputeAllGreeksOnGbmReturnsTheFourModelParametersPlusCurv
     );
 
     EXPECT_TRUE(report.skipped.empty());
-    ASSERT_EQ(report.greeks.size(), 5u);
+    ASSERT_EQ(report.greeks.size(), 7u);
     std::vector<std::string> factors;
     for (const auto& greek : report.greeks) factors.push_back(engine::greeks::to_string(greek.risk_factor));
     std::sort(factors.begin(), factors.end());
     EXPECT_EQ(
         factors,
-        (std::vector<std::string>{"curve.parallel", "model.dividend_yield", "model.rate", "model.spot", "model.volatility"})
+        (std::vector<std::string>{
+            "credit.hazard_rate", "credit.recovery_rate", "curve.parallel", "model.dividend_yield", "model.rate",
+            "model.spot", "model.volatility"
+        })
     );
 
     // PayoffPriceQMeasure ignora `market` (measure.cpp) -- ambas evaluaciones +-h usan
-    // exactamente el mismo modelo/paths, así que la derivada respecto de la curva es 0 exacto,
-    // no una aproximación de Monte Carlo.
+    // exactamente el mismo modelo/paths, así que la derivada respecto de la curva/crédito es 0
+    // exacto, no una aproximación de Monte Carlo.
     for (const auto& greek : report.greeks) {
-        if (greek.risk_factor.kind == engine::greeks::RiskFactorKind::CurveParallel) {
+        if (greek.risk_factor.kind == engine::greeks::RiskFactorKind::CurveParallel ||
+            greek.risk_factor.kind == engine::greeks::RiskFactorKind::CreditParameter) {
             EXPECT_DOUBLE_EQ(greek.value, 0.0);
         }
     }
 }
 
-// Actualizado en Fase 3: además de los 4 parámetros de Hull-White (derivada nula, sin cambios --
+// Actualizado en Fase 4: además de los 4 parámetros de Hull-White (derivada nula, sin cambios --
 // PresentValueMeasure::evaluate para IrSwapProduct no usa el modelo en absoluto), "curve.parallel"
 // se enumera SIEMPRE y su valor SÍ depende de la curva (PLAN_GREEKS.md §8.5: "una derivada nula es
 // una respuesta valida, distinta de 'no aplica'" -- aquí, al revés, una derivada no nula es la
 // respuesta correcta porque PV de un IRS es, por construcción, función de la curva de descuento).
-TEST(GreeksFase1Test, ComputeAllGreeksOnIrsPvIsZeroForHullWhiteButNonZeroForCurveParallel) {
+// "credit.hazard_rate"/"credit.recovery_rate" también se enumeran SIEMPRE, con derivada nula (PV
+// de un IRS no consume datos de crédito).
+TEST(GreeksFase1Test, ComputeAllGreeksOnIrsPvIsZeroForHullWhiteAndCreditButNonZeroForCurveParallel) {
     Registries registries;
     register_builtins(registries);
     engine::IrSwapProduct swap(Params{
@@ -286,7 +293,7 @@ TEST(GreeksFase1Test, ComputeAllGreeksOnIrsPvIsZeroForHullWhiteButNonZeroForCurv
     );
 
     EXPECT_TRUE(report.skipped.empty());
-    ASSERT_EQ(report.greeks.size(), 5u);
+    ASSERT_EQ(report.greeks.size(), 7u);
 
     auto pv = registries.measures.create("PV", Params{});
     const double h = 0.0001; // default de curva (PLAN_GREEKS.md §4.3)
@@ -298,9 +305,13 @@ TEST(GreeksFase1Test, ComputeAllGreeksOnIrsPvIsZeroForHullWhiteButNonZeroForCurv
 
     std::vector<std::string> model_param_names;
     bool saw_curve_parallel = false;
+    int credit_factors_seen = 0;
     for (const auto& greek : report.greeks) {
         if (greek.risk_factor.kind == engine::greeks::RiskFactorKind::ModelParameter) {
             model_param_names.push_back(greek.risk_factor.name);
+            EXPECT_DOUBLE_EQ(greek.value, 0.0);
+        } else if (greek.risk_factor.kind == engine::greeks::RiskFactorKind::CreditParameter) {
+            ++credit_factors_seen;
             EXPECT_DOUBLE_EQ(greek.value, 0.0);
         } else {
             ASSERT_EQ(greek.risk_factor.kind, engine::greeks::RiskFactorKind::CurveParallel);
@@ -309,6 +320,7 @@ TEST(GreeksFase1Test, ComputeAllGreeksOnIrsPvIsZeroForHullWhiteButNonZeroForCurv
         }
     }
     EXPECT_TRUE(saw_curve_parallel);
+    EXPECT_EQ(credit_factors_seen, 2);
     std::sort(model_param_names.begin(), model_param_names.end());
     EXPECT_EQ(model_param_names, (std::vector<std::string>{"a", "b", "r0", "sigma"}));
 }
@@ -407,27 +419,23 @@ TEST(GreeksFase1Test, ComputeGreekRejectsPathwiseMethodExplicitly) {
     );
 }
 
-// Actualizado en Fase 3: "curve.parallel"/"curve.pillar:<i>" ya son soportados (ver
-// GreeksFase3Test más abajo) -- este test se mueve a los dos RiskFactorKind que siguen
-// pendientes de las Fases 4-5 ("credit.*"/"time.theta").
-TEST(GreeksFase1Test, ComputeGreekRejectsCreditAndTimeRiskFactorKindsStillPending) {
+// Actualizado en Fase 4: "credit.hazard_rate"/"credit.recovery_rate" ya son soportados (ver
+// GreeksFase4Test más abajo) -- este test se mueve al único RiskFactorKind que sigue pendiente de
+// la Fase 5 ("time.theta").
+TEST(GreeksFase1Test, ComputeGreekRejectsTimeRiskFactorKindStillPending) {
     Registries registries;
     register_builtins(registries);
     const pf::ObservableId spot{"EQ.SPOT.XYZ"};
     pf::PayoffProduct product("CALL", european_call(spot, 100.0, 1.0));
     engine::GbmModel model = make_gbm_q(100.0, 0.05, 0.0, 0.2, spot.value);
 
-    for (const std::string& factor : {"credit.hazard_rate", "time.theta"}) {
-        GreekRequest request = payoff_price_q_request("spot");
-        request.risk_factor = engine::greeks::parse_risk_factor(factor);
+    GreekRequest request = payoff_price_q_request("spot");
+    request.risk_factor = engine::greeks::parse_risk_factor("time.theta");
 
-        EXPECT_THROW(
-            engine::greeks::compute_greek(
-                registries, request, model, product, flat_market(), pricing_context(1'000, 7), cpu_execution()
-            ),
-            std::invalid_argument
-        ) << factor;
-    }
+    EXPECT_THROW(
+        engine::greeks::compute_greek(registries, request, model, product, flat_market(), pricing_context(1'000, 7), cpu_execution()),
+        std::invalid_argument
+    );
 }
 
 TEST(GreeksFase1Test, ComputeGreekRejectsAnUnknownModelParameterName) {
@@ -812,14 +820,14 @@ TEST(GreeksFase3Test, ComputeAllGreeksWithIncludeCurveBucketsAddsOnePillarCandid
         /*include_curve_buckets=*/false
     );
     EXPECT_TRUE(without_buckets.skipped.empty());
-    ASSERT_EQ(without_buckets.greeks.size(), 5u); // 4 params HW1F + curve.parallel
+    ASSERT_EQ(without_buckets.greeks.size(), 7u); // 4 params HW1F + curve.parallel + 2 credit
 
     engine::greeks::GreeksReport with_buckets = engine::greeks::compute_all_greeks(
         registries, "PV", Params{}, model, swap, market, pricing_context(1'000, 7), cpu_execution(),
         /*include_curve_buckets=*/true
     );
     EXPECT_TRUE(with_buckets.skipped.empty());
-    ASSERT_EQ(with_buckets.greeks.size(), 8u); // + curve.pillar:0/1/2
+    ASSERT_EQ(with_buckets.greeks.size(), 10u); // + curve.pillar:0/1/2
 
     std::vector<std::string> pillar_factors;
     for (const auto& greek : with_buckets.greeks) {
@@ -848,5 +856,108 @@ TEST(GreeksFase3Test, GreekMeasureReachesCurveParallelThroughEnginePrice) {
 
     ASSERT_EQ(result.size(), 1u);
     ASSERT_TRUE(result[0].result.has_scalar);
+    EXPECT_TRUE(std::isfinite(result[0].result.scalar));
+}
+
+// --- Fase 4: RiskFactorKind::CreditParameter (hazard_rate/recovery_rate de CVA) -----------------
+//
+// A diferencia de curve.*/model.* (bumpea market/model, respectivamente, pero afecta la curva de
+// descuento o el modelo de tipos), aquí se bumpea `market.hazard_rate()`/`market.recovery_rate()`
+// -- datos de crédito puros, consumidos hoy únicamente por `UnilateralCvaMeasure`
+// (`ExposureProfileMeasure::evaluate` ignora `market` por completo, measure.cpp). El oráculo es
+// bump-and-reval MANUAL con `engine::bump_market_credit`, la misma función que ahora usa
+// `compute_greek` internamente. Como el perfil de exposición no depende de `market`, ambas
+// evaluaciones +-h comparten exactamente los mismos paths Monte Carlo -- la derivada resultante es
+// numéricamente exacta (sin ruido de Monte Carlo), igual que curve.parallel sobre PV de un IRS.
+
+MarketSnapshot credit_market() {
+    return MarketSnapshot({1.0, 2.0, 3.0}, {0.02, 0.021, 0.022}, /*hazard_rate=*/0.02, /*recovery_rate=*/0.4);
+}
+
+TEST(GreeksFase4Test, HazardRateGreekOfCvaMatchesManualBumpAndRevalAndHasExpectedSign) {
+    Registries registries;
+    register_builtins(registries);
+    engine::IrSwapProduct swap = make_irs(1'000'000.0, 0.02);
+    engine::HullWhite1FModel model = make_hull_white();
+    MarketSnapshot market = credit_market();
+    const double h = 0.0001;
+
+    GreekRequest request;
+    request.metric_name = "UnilateralCVA";
+    request.risk_factor = RiskFactor{RiskFactorKind::CreditParameter, "credit", "hazard_rate", std::nullopt};
+    request.order = GreekOrder{1, std::nullopt};
+    request.method = GreekMethod::Auto;
+    request.bump_override = h;
+
+    engine::greeks::GreekResult via_greek =
+        engine::greeks::compute_greek(registries, request, model, swap, market, pricing_context(1'000, 7), cpu_execution());
+
+    auto cva = registries.measures.create("UnilateralCVA", Params{});
+    MarketSnapshot market_up = engine::bump_market_credit(market, "hazard_rate", h);
+    MarketSnapshot market_down = engine::bump_market_credit(market, "hazard_rate", -h);
+    double manual = (cva->evaluate(model, swap, market_up, pricing_context(1'000, 7), cpu_execution()).scalar -
+                      cva->evaluate(model, swap, market_down, pricing_context(1'000, 7), cpu_execution()).scalar) /
+                     (2.0 * h);
+
+    EXPECT_TRUE(via_greek.has_scalar);
+    EXPECT_EQ(via_greek.bump_used, h);
+    EXPECT_GT(via_greek.value, 0.0); // sube el hazard rate -> sube CVA (PLAN_GREEKS.md §11 Fase 4)
+    EXPECT_NEAR(via_greek.value, manual, 1e-9) << "Greek=" << via_greek.value << " manual=" << manual;
+}
+
+TEST(GreeksFase4Test, RecoveryRateGreekOfCvaMatchesManualBumpAndRevalAndIsNegative) {
+    Registries registries;
+    register_builtins(registries);
+    engine::IrSwapProduct swap = make_irs(1'000'000.0, 0.02);
+    engine::HullWhite1FModel model = make_hull_white();
+    MarketSnapshot market = credit_market();
+    const double h = 0.0001;
+
+    GreekRequest request;
+    request.metric_name = "UnilateralCVA";
+    request.risk_factor = RiskFactor{RiskFactorKind::CreditParameter, "credit", "recovery_rate", std::nullopt};
+    request.order = GreekOrder{1, std::nullopt};
+    request.method = GreekMethod::Auto;
+    request.bump_override = h;
+
+    engine::greeks::GreekResult via_greek =
+        engine::greeks::compute_greek(registries, request, model, swap, market, pricing_context(1'000, 7), cpu_execution());
+
+    auto cva = registries.measures.create("UnilateralCVA", Params{});
+    MarketSnapshot market_up = engine::bump_market_credit(market, "recovery_rate", h);
+    MarketSnapshot market_down = engine::bump_market_credit(market, "recovery_rate", -h);
+    double manual = (cva->evaluate(model, swap, market_up, pricing_context(1'000, 7), cpu_execution()).scalar -
+                      cva->evaluate(model, swap, market_down, pricing_context(1'000, 7), cpu_execution()).scalar) /
+                     (2.0 * h);
+
+    EXPECT_TRUE(via_greek.has_scalar);
+    EXPECT_LT(via_greek.value, 0.0); // mas recovery -> menos perdida dado default -> menos CVA
+    EXPECT_NEAR(via_greek.value, manual, 1e-9) << "Greek=" << via_greek.value << " manual=" << manual;
+}
+
+TEST(GreeksFase4Test, ComputeGreekRejectsAnUnknownCreditParameterNameAtParseTime) {
+    // `parse_risk_factor` (Fase 0) ya rechaza cualquier nombre de credito que no sea
+    // "hazard_rate"/"recovery_rate" antes de que compute_greek llegue a bumpear nada.
+    EXPECT_THROW(engine::greeks::parse_risk_factor("credit.default_correlation"), std::invalid_argument);
+}
+
+TEST(GreeksFase4Test, GreekMeasureReachesCreditHazardRateThroughEnginePrice) {
+    Registries registries;
+    register_builtins(registries);
+    engine::IrSwapProduct swap = make_irs(1'000'000.0, 0.02);
+    engine::HullWhite1FModel model = make_hull_white();
+    MarketSnapshot market = credit_market();
+
+    engine::PriceResult result = engine::price(
+        registries, swap,
+        std::vector<engine::MeasureSpec>{
+            {"Greek", Params{{"metric", std::string("UnilateralCVA")}, {"risk_factor", std::string("credit.hazard_rate")}}}
+        },
+        model, market, pricing_context(1'000, 7), cpu_execution()
+    );
+
+    ASSERT_EQ(result.size(), 1u);
+    ASSERT_TRUE(result[0].result.has_scalar);
+    EXPECT_GT(result[0].result.scalar, 0.0);
     EXPECT_TRUE(std::isfinite(result[0].result.scalar));
 }

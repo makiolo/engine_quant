@@ -110,4 +110,20 @@ MarketSnapshot bump_market_pillar(const MarketSnapshot& market, std::size_t pill
     return MarketSnapshot(market.pillars(), std::move(bumped_rates), market.hazard_rate(), market.recovery_rate());
 }
 
+MarketSnapshot bump_market_credit(const MarketSnapshot& market, const std::string& name, double bump) {
+    double hazard_rate = market.hazard_rate();
+    double recovery_rate = market.recovery_rate();
+    if (name == "hazard_rate") {
+        hazard_rate += bump;
+    } else if (name == "recovery_rate") {
+        recovery_rate += bump;
+    } else {
+        throw std::invalid_argument(
+            "bump_market_credit: parametro de credito '" + name +
+            "' desconocido (validos: 'hazard_rate', 'recovery_rate')"
+        );
+    }
+    return MarketSnapshot(market.pillars(), market.zero_rates(), hazard_rate, recovery_rate);
+}
+
 } // namespace engine
