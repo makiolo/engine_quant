@@ -71,6 +71,11 @@ enum class GreekMethod { Auto, BumpAndReval, Pathwise, AadReverse };
 GreekMethod parse_greek_method(const std::string& text);
 std::string to_string(GreekMethod method);
 
+// Serializacion de GreekResult::measure (PLAN_GREEKS.md §3.4/§9.3, Fase 9): usada por los
+// bindings (C ABI/Python) para exponer la ProbabilityMeasure heredada de la metrica base como
+// texto, mismo criterio que to_string(RiskFactor)/to_string(GreekMethod) de arriba.
+std::string to_string(payoff::ProbabilityMeasure measure);
+
 // Petición de una Greek (PLAN_GREEKS.md §3.4): `metric_name` debe ser un nombre ya registrado en
 // `Registry<IMeasure>` (p.ej. "PV", "PayoffPriceQ"); `metric_params` son los propios de esa
 // medida (vacíos para las tres métricas soportadas en Fase 1: "PV"/"PayoffPriceQ"/

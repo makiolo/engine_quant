@@ -547,6 +547,15 @@ std::string to_string(GreekMethod method) {
     throw std::logic_error("engine::greeks::to_string(GreekMethod): GreekMethod desconocido"); // inalcanzable
 }
 
+std::string to_string(payoff::ProbabilityMeasure measure) {
+    switch (measure) {
+        case payoff::ProbabilityMeasure::RiskNeutralQ: return "RiskNeutralQ";
+        case payoff::ProbabilityMeasure::PhysicalP: return "PhysicalP";
+        case payoff::ProbabilityMeasure::DeterministicScenario: return "DeterministicScenario";
+    }
+    throw std::logic_error("engine::greeks::to_string(ProbabilityMeasure): valor desconocido"); // inalcanzable
+}
+
 GreekResult compute_greek(
     const Registries& registries, const GreekRequest& request, const IModel& model,
     const IProduct& product, const MarketSnapshot& market, const PricingContext& pricing,

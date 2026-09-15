@@ -11,6 +11,7 @@
 
 #include "engine/price.hpp"
 #include "engine/engine.hpp"
+#include "engine/greeks.hpp"
 #include "engine/payoff/payoff_product.hpp"
 
 #include <algorithm>
@@ -156,6 +157,65 @@ EnginePriceResultEntry* export_calc_result(const engine::PriceResult& result) {
         mr.scalar = src.result.scalar;
     }
     return entries;
+}
+
+// Copia `src` a un char* owned en el heap (PLAN_GREEKS.md §9.3): mismo patron ad-hoc que ya
+// usan export_calc_result (measure_name) y export_params (key) mas arriba, extraido aqui como
+// funcion nombrada porque export_greeks_report lo necesita tres veces por fila.
+char* dup_cstr(const std::string& src) {
+    char* copy = new char[src.size() + 1];
+    std::memcpy(copy, src.data(), src.size() + 1);
+    return copy;
+}
+
+// Convierte un engine::greeks::GreeksReport a los dos arrays owned que expone
+// engine_abi_all_greeks (PLAN_GREEKS.md §9.3): reutiliza EngineMeasureResult (mismo shape que
+// ya rellena export_calc_result) para el escalar/perfil de cada GreekResult.
+EngineGreekResultEntry* export_greeks_report(const std::vector<engine::greeks::GreekResult>& greeks) {
+    if (greeks.empty()) return nullptr;
+    auto* entries = new EngineGreekResultEntry[greeks.size()]{};
+    for (std::size_t i = 0; i < greeks.size(); ++i) {
+        const engine::greeks::GreekResult& src = greeks[i];
+        EngineGreekResultEntry& dst = entries[i];
+
+        dst.risk_factor = dup_cstr(engine::greeks::to_string(src.risk_factor));
+        dst.method_used = dup_cstr(engine::greeks::to_string(src.method_used));
+        dst.measure = dup_cstr(engine::greeks::to_string(src.measure));
+
+        EngineMeasureResult& mr = dst.result;
+        mr.len = src.times.size();
+        if (mr.len > 0 && src.primary.size() == mr.len) {
+            mr.times = new double[mr.len];
+            std::memcpy(mr.times, src.times.data(), mr.len * sizeof(double));
+            mr.primary = new double[mr.len];
+            std::memcpy(mr.primary, src.primary.data(), mr.len * sizeof(double));
+            if (src.secondary.size() == mr.len) {
+                mr.secondary = new double[mr.len];
+                std::memcpy(mr.secondary, src.secondary.data(), mr.len * sizeof(double));
+            }
+        } else {
+            mr.len = 0;
+        }
+        mr.has_scalar = src.has_scalar ? 1 : 0;
+        mr.scalar = src.value;
+
+        dst.has_std_error = src.std_error.has_value() ? 1 : 0;
+        dst.std_error = src.std_error.value_or(0.0);
+        dst.has_bump = src.bump_used.has_value() ? 1 : 0;
+        dst.bump_used = src.bump_used.value_or(0.0);
+    }
+    return entries;
+}
+
+char** export_skipped(const std::vector<std::string>& skipped, std::size_t* out_count) {
+    if (skipped.empty()) {
+        *out_count = 0;
+        return nullptr;
+    }
+    auto* array = new char*[skipped.size()];
+    for (std::size_t i = 0; i < skipped.size(); ++i) array[i] = dup_cstr(skipped[i]);
+    *out_count = skipped.size();
+    return array;
 }
 
 std::vector<std::string> to_string_vector(const char* const* names, std::size_t count) {
@@ -442,6 +502,75 @@ void engine_abi_free_price_results(EnginePriceResultEntry* entries, std::size_t 
         delete[] entries[i].result.secondary;
     }
     delete[] entries;
+}
+
+int engine_abi_all_greeks(
+    const EngineProduct* product,
+    const char* metric_name,
+    const EngineParam* metric_params,
+    std::size_t n_metric_params,
+    const EngineModel* model,
+    const EngineMarketSnapshot* market,
+    const EnginePricingContext* pricing,
+    const EngineExecutionContext* execution,
+    int include_curve_buckets,
+    int include_second_order,
+    EngineGreekResultEntry** out_greeks,
+    std::size_t* out_n_greeks,
+    char*** out_skipped,
+    std::size_t* out_n_skipped
+) {
+    *out_greeks = nullptr;
+    *out_n_greeks = 0;
+    *out_skipped = nullptr;
+    *out_n_skipped = 0;
+    try {
+        if (!product || !model || !market || !pricing || !execution) {
+            throw std::invalid_argument(
+                "engine_abi_all_greeks: product/model/market/pricing/execution no pueden ser NULL");
+        }
+        if (!metric_name) {
+            throw std::invalid_argument("engine_abi_all_greeks: metric_name no puede ser NULL");
+        }
+        engine::greeks::GreeksReport report = engine::greeks::compute_all_greeks(
+            registries(), metric_name, to_params(metric_params, n_metric_params), *model->ptr, *product->ptr,
+            to_market(*market), to_pricing_context(*pricing), to_execution_context(*execution),
+            include_curve_buckets != 0, include_second_order != 0
+        );
+
+        *out_greeks = export_greeks_report(report.greeks);
+        *out_n_greeks = report.greeks.size();
+        *out_skipped = export_skipped(report.skipped, out_n_skipped);
+        clear_last_error();
+        return 0;
+    } catch (const std::exception& e) {
+        set_last_error(e);
+        *out_greeks = nullptr;
+        *out_n_greeks = 0;
+        *out_skipped = nullptr;
+        *out_n_skipped = 0;
+        return 1;
+    }
+}
+
+void engine_abi_free_greeks_report(
+    EngineGreekResultEntry* greeks, std::size_t n_greeks, char** skipped, std::size_t n_skipped
+) {
+    if (greeks) {
+        for (std::size_t i = 0; i < n_greeks; ++i) {
+            delete[] greeks[i].risk_factor;
+            delete[] greeks[i].method_used;
+            delete[] greeks[i].measure;
+            delete[] greeks[i].result.times;
+            delete[] greeks[i].result.primary;
+            delete[] greeks[i].result.secondary;
+        }
+        delete[] greeks;
+    }
+    if (skipped) {
+        for (std::size_t i = 0; i < n_skipped; ++i) delete[] skipped[i];
+        delete[] skipped;
+    }
 }
 
 int engine_abi_price_batch(

@@ -332,6 +332,59 @@ ENGINE_ABI_API int engine_abi_price_grid(
 );
 ENGINE_ABI_API void engine_abi_free_price_grid_results(EnginePriceGridResultEntry* entries, size_t count);
 
+/* --- ENGINE.ALL_GREEKS (PLAN_GREEKS.md §8.5/§9.3, Fase 9) --------------------------------
+ * Barrido automatico de Greeks (engine::greeks::compute_all_greeks): enumera los RiskFactor
+ * candidatos de `model`/`market` para `metric_name` y calcula todos los que apliquen, sin que
+ * el llamante enumere spot/rate/sigma/curva/credito/tiempo a mano (mismo motivo que
+ * engine_abi_price no repite create_measure por medida). Un unico "Greek" suelto (una
+ * combinacion metric/risk_factor/order/method concreta) sigue alcanzable con
+ * engine_abi_price(product, {"Greek"}, ...) pasando esos campos en `measure_params` -- esta
+ * funcion es el barrido, no un reemplazo de esa via. */
+
+/* Analogo a EnginePriceResultEntry pero para una fila de GreeksReport::greeks: a diferencia
+ * del sketch de PLAN_GREEKS.md §9.3 (que solo preveia un `value` escalar), `result` es un
+ * EngineMeasureResult completo (mismo tipo que ya usa EnginePriceResultEntry) porque
+ * GreekResult puede llevar un perfil temporal (times/primary) ademas de, o en vez de, un
+ * escalar (PLAN_GREEKS.md §11 Fase 2) -- reusar EngineMeasureResult evita un tercer struct de
+ * resultado con el mismo shape. */
+typedef struct EngineGreekResultEntry {
+    char* risk_factor;   /* copia owned, ver engine::greeks::to_string(RiskFactor) */
+    char* method_used;   /* "auto" nunca aparece aqui: siempre el metodo REALMENTE ejecutado */
+    char* measure;        /* "RiskNeutralQ" | "PhysicalP" | "DeterministicScenario" */
+    EngineMeasureResult result;
+    int has_std_error;    /* 0 o 1 */
+    double std_error;      /* valido solo si has_std_error == 1 */
+    int has_bump;          /* 0 o 1 -- ausente si method_used es "pathwise"/"aad" */
+    double bump_used;      /* valido solo si has_bump == 1 */
+} EngineGreekResultEntry;
+
+/* Devuelve 0 en exito (`*out_greeks`/`*out_n_greeks`/`*out_skipped`/`*out_n_skipped` quedan
+ * rellenos, liberar con engine_abi_free_greeks_report) o != 0 en error (product/model/market/
+ * pricing/execution NULL, metric_name desconocido para Registry<IMeasure> -- ver
+ * engine_abi_last_error; en ese caso `*out_greeks`/`*out_skipped` quedan NULL y los counts a
+ * 0). Un candidato individual que no aplique (p.ej. credit.hazard_rate sobre una metrica sin
+ * credito, o time.theta sobre una metrica todavia no cableada) NUNCA hace fallar la llamada
+ * entera: cae en `*out_skipped` con el motivo (PLAN_GREEKS.md §8.5, "best effort"). */
+ENGINE_ABI_API int engine_abi_all_greeks(
+    const EngineProduct* product,
+    const char* metric_name,
+    const EngineParam* metric_params,
+    size_t n_metric_params,
+    const EngineModel* model,
+    const EngineMarketSnapshot* market,
+    const EnginePricingContext* pricing,
+    const EngineExecutionContext* execution,
+    int include_curve_buckets,
+    int include_second_order,
+    EngineGreekResultEntry** out_greeks,
+    size_t* out_n_greeks,
+    char*** out_skipped,
+    size_t* out_n_skipped
+);
+ENGINE_ABI_API void engine_abi_free_greeks_report(
+    EngineGreekResultEntry* greeks, size_t n_greeks, char** skipped, size_t n_skipped
+);
+
 ENGINE_ABI_API int engine_abi_is_gpu_backend_available(void);
 
 /* --- Errores --------------------------------------------------------------------------
