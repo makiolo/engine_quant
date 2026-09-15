@@ -33,6 +33,7 @@
 #include "engine/bootstrap.hpp"
 #include "engine/price.hpp"
 #include "engine/execution_context.hpp"
+#include "engine/greeks.hpp"
 #include "engine/market.hpp"
 #include "engine/pricing_context.hpp"
 
@@ -114,6 +115,23 @@ public:
         const std::vector<std::string>& market_handles,
         const std::string& pricing_handle,
         const std::string& execution_handle
+    ) const;
+
+    // Barrido automatico de Greeks (PLAN_GREEKS.md §8.5/§9.2, Fase 9): enumera los RiskFactor
+    // candidatos de model/market para metric_name y calcula todos los que apliquen -- ver
+    // engine::greeks::compute_all_greeks. metric_params_arg es un rango clave/valor como
+    // params_arg en el resto de create_* (vacio/omitido = sin parametros propios de la
+    // metrica interior).
+    engine::greeks::GreeksReport all_greeks(
+        const std::string& product_handle,
+        const std::string& metric_name,
+        const XLOPER12& metric_params_arg,
+        const std::string& model_handle,
+        const std::string& market_handle,
+        const std::string& pricing_handle,
+        const std::string& execution_handle,
+        bool include_curve_buckets,
+        bool include_second_order
     ) const;
 
     // market_handle: handle devuelto por create_market (ya no un rango inline -- un

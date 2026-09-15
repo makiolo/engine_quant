@@ -439,6 +439,93 @@ XLOPER12* new_price_grid_result(const engine::PriceGridResult& result) {
     return out;
 }
 
+namespace {
+
+XLOPER12 owned_str_cell(const std::string& text) {
+    std::vector<XCHAR> buf = to_xl_string_buffer(text);
+    XCHAR* owned = new XCHAR[buf.size()];
+    std::copy(buf.begin(), buf.end(), owned);
+    XLOPER12 cell{};
+    cell.xltype = xltypeStr;
+    cell.val.str = owned;
+    return cell;
+}
+
+XLOPER12 num_cell(double value) {
+    XLOPER12 cell{};
+    cell.xltype = xltypeNum;
+    cell.val.num = value;
+    return cell;
+}
+
+XLOPER12 blank_cell() {
+    XLOPER12 cell{};
+    cell.xltype = xltypeNil;
+    return cell;
+}
+
+} // namespace
+
+XLOPER12* new_greeks_report(const engine::greeks::GreeksReport& report) {
+    RW total_rows = 0;
+    for (const auto& g : report.greeks) total_rows += g.has_scalar ? 1 : static_cast<RW>(g.times.size());
+    total_rows += static_cast<RW>(report.skipped.size());
+    if (total_rows == 0) return new_error(xlerrNA);
+
+    constexpr COL kColumns = 7; // RiskFactor, Time, Value, Method, Measure, BumpUsed, StdError
+    XLOPER12* cells = new XLOPER12[static_cast<std::size_t>(total_rows) * kColumns]{};
+    RW row = 0;
+    for (const auto& g : report.greeks) {
+        std::string risk_factor = engine::greeks::to_string(g.risk_factor);
+        std::string method = engine::greeks::to_string(g.method_used);
+        std::string measure = engine::greeks::to_string(g.measure);
+        XLOPER12 bump_cell = g.bump_used.has_value() ? num_cell(*g.bump_used) : blank_cell();
+        XLOPER12 std_error_cell = g.std_error.has_value() ? num_cell(*g.std_error) : blank_cell();
+
+        auto write_common = [&](RW r) {
+            cells[r * kColumns + 0] = owned_str_cell(risk_factor);
+            cells[r * kColumns + 3] = owned_str_cell(method);
+            cells[r * kColumns + 4] = owned_str_cell(measure);
+            cells[r * kColumns + 5] = bump_cell;
+            cells[r * kColumns + 6] = std_error_cell;
+        };
+
+        if (g.has_scalar) {
+            write_common(row);
+            cells[row * kColumns + 1] = blank_cell(); // Time en blanco: Greek escalar
+            cells[row * kColumns + 2] = num_cell(g.value);
+            ++row;
+        } else {
+            // Greek con perfil temporal (p.ej. sensibilidad de un ExposureProfile, PLAN_GREEKS.md
+            // §11 Fase 2): una fila por fecha, solo `primary` -- mismo recorte que ya usa
+            // new_price_result para ExpectedExposure/PFE95 (secondary no se surface aqui).
+            for (std::size_t i = 0; i < g.times.size(); ++i) {
+                write_common(row);
+                cells[row * kColumns + 1] = num_cell(g.times[i]);
+                cells[row * kColumns + 2] = num_cell(g.primary[i]);
+                ++row;
+            }
+        }
+    }
+    for (const std::string& reason : report.skipped) {
+        cells[row * kColumns + 0] = owned_str_cell(reason);
+        cells[row * kColumns + 1] = blank_cell();
+        cells[row * kColumns + 2] = blank_cell();
+        cells[row * kColumns + 3] = owned_str_cell("skipped");
+        cells[row * kColumns + 4] = blank_cell();
+        cells[row * kColumns + 5] = blank_cell();
+        cells[row * kColumns + 6] = blank_cell();
+        ++row;
+    }
+
+    XLOPER12* out = new XLOPER12{};
+    out->xltype = xltypeMulti | xlbitDLLFree;
+    out->val.array.rows = total_rows;
+    out->val.array.columns = kColumns;
+    out->val.array.lparray = cells;
+    return out;
+}
+
 XLOPER12* new_calibration_result(const engine::CalibrationResult& result) {
     engine::Params rows = result.optimal_params;
     rows.emplace("rmse", result.rmse);

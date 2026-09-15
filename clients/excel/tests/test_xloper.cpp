@@ -13,6 +13,7 @@
 // (PLAN.md §5.6 capa 4: CI no tiene Excel instalado).
 
 #include <cmath>
+#include <unordered_map>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -381,6 +382,61 @@ TEST(HandleRegistry, CalcRejectsUnknownMeasureName) {
     std::string execution = registry.create_execution(cpu_execution_table(execution_bufs, execution_cells));
 
     EXPECT_THROW(registry.price(product, {"NoExiste"}, model, market, pricing, execution), std::invalid_argument);
+}
+
+// PLAN_GREEKS.md §8.5/§9.2: HandleRegistry::all_greeks delega en compute_all_greeks sin
+// reimplementar nada -- mismo caso que GreeksFase1Test.ComputeAllGreeksOnIrsPvIsZeroFor...
+// (test_greeks.cpp): "PV" de un IrSwapProduct descuenta por la curva observada desde
+// PLAN_REAPI.md §6 Fase 4 y ya NO depende del modelo (ver measure.cpp::PresentValueMeasure),
+// asi que sus Greeks de parametro de HullWhite1F son exactamente cero mientras que
+// curve.parallel es no nulo.
+TEST(HandleRegistry, AllGreeksOfIrsPvIsZeroForModelParamsButNonzeroForCurveParallel) {
+    xlbridge::HandleRegistry registry = make_registry();
+    std::vector<std::vector<XCHAR>> model_bufs, product_bufs, market_bufs, pricing_bufs, execution_bufs;
+    std::vector<XLOPER12> model_cells, product_cells, market_cells, pricing_cells, execution_cells;
+
+    std::string model = registry.create_model("HullWhite1F", hull_white_params_table(model_bufs, model_cells));
+    std::string product = registry.create_product("IRSwap", par_irs_5y_params_table(product_bufs, product_cells));
+    std::string market = registry.create_market(market_params_table(market_bufs, market_cells));
+    std::string pricing = registry.create_context(pricing_context_table(pricing_bufs, pricing_cells, 100.0, 1.0));
+    std::string execution = registry.create_execution(cpu_execution_table(execution_bufs, execution_cells));
+
+    XLOPER12 no_metric_params = missing_arg();
+    engine::greeks::GreeksReport report =
+        registry.all_greeks(product, "PV", no_metric_params, model, market, pricing, execution, false, false);
+
+    std::unordered_map<std::string, double> by_factor;
+    for (const auto& g : report.greeks) by_factor[engine::greeks::to_string(g.risk_factor)] = g.value;
+
+    ASSERT_TRUE(by_factor.count("model.a"));
+    EXPECT_DOUBLE_EQ(by_factor.at("model.a"), 0.0);
+    ASSERT_TRUE(by_factor.count("curve.parallel"));
+    EXPECT_NE(by_factor.at("curve.parallel"), 0.0);
+}
+
+// A diferencia de price()/price_batch (que validan el nombre de medida por adelantado y
+// lanzan), compute_all_greeks es "best effort" por candidato (PLAN_GREEKS.md §8.5): un
+// metric_name desconocido hace que CADA candidato individual falle dentro de su propio
+// try/catch (ver compute_all_greeks::try_request en greeks.cpp), asi que el resultado es un
+// GreeksReport con greeks vacio y todos los candidatos en skipped -- nunca una excepcion que
+// cruce hasta el llamante de HandleRegistry::all_greeks.
+TEST(HandleRegistry, AllGreeksWithAnUnknownMetricNameSkipsEveryCandidateInsteadOfThrowing) {
+    xlbridge::HandleRegistry registry = make_registry();
+    std::vector<std::vector<XCHAR>> model_bufs, product_bufs, market_bufs, pricing_bufs, execution_bufs;
+    std::vector<XLOPER12> model_cells, product_cells, market_cells, pricing_cells, execution_cells;
+
+    std::string model = registry.create_model("HullWhite1F", hull_white_params_table(model_bufs, model_cells));
+    std::string product = registry.create_product("IRSwap", par_irs_5y_params_table(product_bufs, product_cells));
+    std::string market = registry.create_market(market_params_table(market_bufs, market_cells));
+    std::string pricing = registry.create_context(pricing_context_table(pricing_bufs, pricing_cells, 100.0, 1.0));
+    std::string execution = registry.create_execution(cpu_execution_table(execution_bufs, execution_cells));
+
+    XLOPER12 no_metric_params = missing_arg();
+    engine::greeks::GreeksReport report =
+        registry.all_greeks(product, "NoExiste", no_metric_params, model, market, pricing, execution, false, false);
+
+    EXPECT_TRUE(report.greeks.empty());
+    EXPECT_FALSE(report.skipped.empty());
 }
 
 // PLAN.md §7.19: HandleRegistry::price_batch (lote homogéneo) debe coincidir, trade a trade,
@@ -811,6 +867,64 @@ TEST(NewPriceGridResult, PrependsTradeModelMarketIndexColumns) {
 TEST(NewPriceGridResult, EmptyResultBecomesNaError) {
     engine::PriceGridResult result;
     XLOPER12* out = xlbridge::new_price_grid_result(result);
+    EXPECT_EQ(xl_base_type(*out), static_cast<DWORD>(xltypeErr));
+    xlbridge::free_xloper(out);
+}
+
+// PLAN_GREEKS.md §8.5/§9.2: formato largo de ENGINE.ALL_GREEKS -- [RiskFactor, Time, Value,
+// Method, Measure, BumpUsed, StdError], con GreeksReport::skipped anadido al final.
+TEST(NewGreeksReport, MixesScalarRowsBumpUsedAndSkippedInLongFormat) {
+    engine::greeks::GreeksReport report;
+
+    engine::greeks::GreekResult delta;
+    delta.has_scalar = true;
+    delta.value = 637.5;
+    delta.order = engine::greeks::GreekOrder{1, std::nullopt};
+    delta.risk_factor = engine::greeks::RiskFactor{engine::greeks::RiskFactorKind::ModelParameter, "model", "spot", std::nullopt};
+    delta.method_used = engine::greeks::GreekMethod::Pathwise;
+    delta.measure = engine::payoff::ProbabilityMeasure::RiskNeutralQ;
+    report.greeks.push_back(delta);
+
+    engine::greeks::GreekResult dv01;
+    dv01.has_scalar = true;
+    dv01.value = 0.0;
+    dv01.order = engine::greeks::GreekOrder{1, std::nullopt};
+    dv01.risk_factor = engine::greeks::RiskFactor{engine::greeks::RiskFactorKind::CurveParallel, "curve", "", std::nullopt};
+    dv01.method_used = engine::greeks::GreekMethod::BumpAndReval;
+    dv01.measure = engine::payoff::ProbabilityMeasure::RiskNeutralQ;
+    dv01.bump_used = 0.0001;
+    report.greeks.push_back(dv01);
+
+    report.skipped.push_back("time.theta (order=1): metrica no cableada");
+
+    XLOPER12* out = xlbridge::new_greeks_report(report);
+    ASSERT_EQ(xl_base_type(*out), static_cast<DWORD>(xltypeMulti));
+    EXPECT_EQ(out->val.array.columns, 7);
+    ASSERT_EQ(out->val.array.rows, 3);
+
+    const XLOPER12* rows = out->val.array.lparray;
+    EXPECT_EQ(xlbridge::from_xl_string(rows[0 * 7 + 0].val.str + 1, rows[0 * 7 + 0].val.str[0]), "model.spot");
+    EXPECT_EQ(xl_base_type(rows[0 * 7 + 1]), static_cast<DWORD>(xltypeNil)); // Time en blanco: escalar
+    EXPECT_DOUBLE_EQ(rows[0 * 7 + 2].val.num, 637.5);
+    EXPECT_EQ(xlbridge::from_xl_string(rows[0 * 7 + 3].val.str + 1, rows[0 * 7 + 3].val.str[0]), "pathwise");
+    EXPECT_EQ(xl_base_type(rows[0 * 7 + 5]), static_cast<DWORD>(xltypeNil)); // BumpUsed ausente
+
+    EXPECT_EQ(xlbridge::from_xl_string(rows[1 * 7 + 0].val.str + 1, rows[1 * 7 + 0].val.str[0]), "curve.parallel");
+    EXPECT_DOUBLE_EQ(rows[1 * 7 + 5].val.num, 0.0001);
+
+    EXPECT_EQ(
+        xlbridge::from_xl_string(rows[2 * 7 + 0].val.str + 1, rows[2 * 7 + 0].val.str[0]),
+        "time.theta (order=1): metrica no cableada"
+    );
+    EXPECT_EQ(xlbridge::from_xl_string(rows[2 * 7 + 3].val.str + 1, rows[2 * 7 + 3].val.str[0]), "skipped");
+    EXPECT_EQ(xl_base_type(rows[2 * 7 + 2]), static_cast<DWORD>(xltypeNil)); // Value en blanco: fila omitida
+
+    xlbridge::free_xloper(out);
+}
+
+TEST(NewGreeksReport, EmptyResultBecomesNaError) {
+    engine::greeks::GreeksReport report;
+    XLOPER12* out = xlbridge::new_greeks_report(report);
     EXPECT_EQ(xl_base_type(*out), static_cast<DWORD>(xltypeErr));
     xlbridge::free_xloper(out);
 }

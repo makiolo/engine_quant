@@ -192,6 +192,29 @@ extern "C" __declspec(dllexport) LPXLOPER12 WINAPI xlEnginePriceGrid(
     });
 }
 
+// Barrido automatico de Greeks (PLAN_GREEKS.md §8.5/§9.2): mismo modelo mental que ENGINE.PRICE
+// pero para "todas las Greeks aplicables a una metrica", sin que el usuario de Excel enumere
+// spot/rate/sigma/curva/credito/tiempo celda a celda. "metrica_params" es un rango clave/valor
+// opcional (Nil si la metrica no necesita configuracion propia, igual que "params" en
+// ENGINE.CREATE_MODEL/etc.); "incluir_pillars"/"incluir_orden2" son booleanos opcionales
+// (Nil = false). Resultado en formato largo (xlbridge::new_greeks_report):
+// [RiskFactor, Time, Value, Method, Measure, BumpUsed, StdError], con los candidatos omitidos
+// (GreeksReport::skipped) anadidos al final con Method="skipped".
+extern "C" __declspec(dllexport) LPXLOPER12 WINAPI xlEngineAllGreeks(
+    LPXLOPER12 trade, LPXLOPER12 metric_name, LPXLOPER12 metric_params, LPXLOPER12 model,
+    LPXLOPER12 market, LPXLOPER12 pricing, LPXLOPER12 execution, LPXLOPER12 include_curve_buckets,
+    LPXLOPER12 include_second_order
+) {
+    return xlbridge::guarded([&] {
+        return xlbridge::new_greeks_report(xlbridge::shared().all_greeks(
+            xlbridge::read_string(*trade), xlbridge::read_string(*metric_name), *metric_params,
+            xlbridge::read_string(*model), xlbridge::read_string(*market), xlbridge::read_string(*pricing),
+            xlbridge::read_string(*execution),
+            !xlbridge::is_blank(*include_curve_buckets) && xlbridge::read_bool(*include_curve_buckets),
+            !xlbridge::is_blank(*include_second_order) && xlbridge::read_bool(*include_second_order)));
+    });
+}
+
 // Calibración (PLAN.md §7.14): mismo modelo mental que list_models/create_model. El mercado
 // se pasa como handle (ENGINE.CREATE_MARKET, PLAN.md §7.15) en vez de un rango inline; el
 // resultado es una tabla clave/valor pensada para poder pasarse tal cual a
@@ -275,6 +298,17 @@ constexpr FnSpec kFunctions[] = {
         L"Calcula la rejilla Trades x Modelos x Mercados (columnas de handles); contexto de "
         L"valoracion/ejecucion compartidos, no forman parte de la rejilla. Resultado en "
         L"formato largo: [TradeIndex, ModelIndex, MarketIndex, MeasureName, Time, Value]."
+    ),
+    ENGINE_XLL_ENTRY(
+        xlEngineAllGreeks, L"UQQQQQQQQQ", L"ENGINE.ALL_GREEKS",
+        L"trade,metrica,parametros_metrica,modelo,mercado,contexto,ejecucion,incluir_pillars,incluir_orden2",
+        L"Calcula TODAS las Greeks de primer orden aplicables a 'metrica' sobre el "
+        L"modelo/mercado dados (cada parametro del modelo, curva paralela, credito, theta), sin "
+        L"enumerarlas a mano. 'parametros_metrica' es un rango clave/valor opcional (config "
+        L"propia de la metrica interior, p.ej. 'event' de PayoffHitProbabilityQ); "
+        L"'incluir_pillars'/'incluir_orden2' son booleanos opcionales (FALSO por defecto). "
+        L"Resultado en formato largo: [RiskFactor, Time, Value, Method, Measure, BumpUsed, "
+        L"StdError], con los factores omitidos al final (Method=\"skipped\")."
     ),
     ENGINE_XLL_ENTRY(xlEngineListCalibrators, L"U", L"ENGINE.LIST_CALIBRATORS", L"",
                       L"Lista los calibradores registrados en el motor."),

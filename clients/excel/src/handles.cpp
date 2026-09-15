@@ -269,6 +269,45 @@ engine::CalibrationResult HandleRegistry::calibrate(
     return calibrator_it->second->calibrate(market_it->second, initial_guess.params);
 }
 
+engine::greeks::GreeksReport HandleRegistry::all_greeks(
+    const std::string& product_handle,
+    const std::string& metric_name,
+    const XLOPER12& metric_params_arg,
+    const std::string& model_handle,
+    const std::string& market_handle,
+    const std::string& pricing_handle,
+    const std::string& execution_handle,
+    bool include_curve_buckets,
+    bool include_second_order
+) const {
+    auto product_it = products_.find(product_handle);
+    if (product_it == products_.end()) {
+        throw std::out_of_range("xlbridge: handle de producto desconocido: " + product_handle);
+    }
+    auto model_it = models_.find(model_handle);
+    if (model_it == models_.end()) {
+        throw std::out_of_range("xlbridge: handle de modelo desconocido: " + model_handle);
+    }
+    auto market_it = markets_.find(market_handle);
+    if (market_it == markets_.end()) {
+        throw std::out_of_range("xlbridge: handle de mercado desconocido: " + market_handle);
+    }
+    auto pricing_it = pricing_contexts_.find(pricing_handle);
+    if (pricing_it == pricing_contexts_.end()) {
+        throw std::out_of_range("xlbridge: handle de contexto de valoracion desconocido: " + pricing_handle);
+    }
+    auto execution_it = execution_contexts_.find(execution_handle);
+    if (execution_it == execution_contexts_.end()) {
+        throw std::out_of_range("xlbridge: handle de contexto de ejecucion desconocido: " + execution_handle);
+    }
+
+    ParsedParams metric_params = table_to_params(metric_params_arg);
+    return engine::greeks::compute_all_greeks(
+        registries_, metric_name, metric_params.params, *model_it->second, *product_it->second,
+        market_it->second, pricing_it->second, execution_it->second, include_curve_buckets, include_second_order
+    );
+}
+
 void HandleRegistry::clear() {
     models_.clear();
     products_.clear();

@@ -21,6 +21,7 @@
 
 #include "engine/price.hpp"
 #include "engine/calibrator.hpp"
+#include "engine/greeks.hpp"
 #include "engine/market.hpp"
 #include "engine/measure.hpp"
 #include "engine/params.hpp"
@@ -89,6 +90,15 @@ XLOPER12* new_price_batch_result(const engine::PriceBatchResult& result);
 // Igual formato largo, con tres columnas de indice al frente (PLAN.md §7.19): [TradeIndex,
 // ModelIndex, MarketIndex, MeasureName, Time, Value]. Usado por ENGINE.PRICE_GRID.
 XLOPER12* new_price_grid_result(const engine::PriceGridResult& result);
+
+// Resultado de ENGINE.ALL_GREEKS en formato largo (PLAN_GREEKS.md §8.5/§9.2): una fila por
+// RiskFactor (o por fecha, para una Greek con perfil temporal en vez de escalar) --
+// [RiskFactor, Time, Value, Method, Measure, BumpUsed, StdError]. `GreeksReport::skipped`
+// (candidatos que no aplicaron, con el motivo -- §8.5 "best effort") se anaden al final con
+// Method="skipped" y el motivo completo en la columna RiskFactor, Value/Measure/BumpUsed/
+// StdError en blanco: un unico rango dinamico para toda la respuesta, sin un segundo canal de
+// retorno que Excel no tiene forma de dar de una UDF.
+XLOPER12* new_greeks_report(const engine::greeks::GreeksReport& report);
 
 // Tabla clave/valor (col 0 = clave, col 1.. = valor -- mismo formato que espera
 // table_to_params, para poder pasar directamente el resultado a ENGINE.CREATE_MODEL): los
