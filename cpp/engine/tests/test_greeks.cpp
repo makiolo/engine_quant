@@ -231,10 +231,12 @@ TEST(GreeksFase1Test, GreekResultReportsBumpUsedMethodUsedAndInferredMeasure) {
     EXPECT_EQ(result.order.order, 1);
 }
 
-// Actualizado en Fase 4 (PLAN_GREEKS.md §8.5 puntos 2-3): "curve.parallel"/"credit.hazard_rate"/
-// "credit.recovery_rate" se enumeran SIEMPRE, además de los 4 parámetros de modelo -- 7
-// candidatos en vez de 4, ninguno en skipped.
-TEST(GreeksFase1Test, ComputeAllGreeksOnGbmReturnsTheFourModelParametersPlusCurveAndCredit) {
+// Actualizado en Fase 5 (PLAN_GREEKS.md §8.5 puntos 2-4): "curve.parallel"/"credit.hazard_rate"/
+// "credit.recovery_rate"/"time.theta" se enumeran SIEMPRE, además de los 4 parámetros de modelo
+// -- 8 candidatos en vez de 4, ninguno en skipped ("PayoffPriceQ" SÍ honra
+// `PricingContext::pricing_date()`, a diferencia de curve/credit que `PayoffPriceQMeasure`
+// ignora por completo).
+TEST(GreeksFase1Test, ComputeAllGreeksOnGbmReturnsTheFourModelParametersPlusCurveCreditAndTheta) {
     Registries registries;
     register_builtins(registries);
     const pf::ObservableId spot{"EQ.SPOT.XYZ"};
@@ -246,7 +248,7 @@ TEST(GreeksFase1Test, ComputeAllGreeksOnGbmReturnsTheFourModelParametersPlusCurv
     );
 
     EXPECT_TRUE(report.skipped.empty());
-    ASSERT_EQ(report.greeks.size(), 7u);
+    ASSERT_EQ(report.greeks.size(), 8u);
     std::vector<std::string> factors;
     for (const auto& greek : report.greeks) factors.push_back(engine::greeks::to_string(greek.risk_factor));
     std::sort(factors.begin(), factors.end());
@@ -254,28 +256,37 @@ TEST(GreeksFase1Test, ComputeAllGreeksOnGbmReturnsTheFourModelParametersPlusCurv
         factors,
         (std::vector<std::string>{
             "credit.hazard_rate", "credit.recovery_rate", "curve.parallel", "model.dividend_yield", "model.rate",
-            "model.spot", "model.volatility"
+            "model.spot", "model.volatility", "time.theta"
         })
     );
 
     // PayoffPriceQMeasure ignora `market` (measure.cpp) -- ambas evaluaciones +-h usan
     // exactamente el mismo modelo/paths, así que la derivada respecto de la curva/crédito es 0
-    // exacto, no una aproximación de Monte Carlo.
+    // exacto, no una aproximación de Monte Carlo. Theta SÍ depende de `pricing_date()`
+    // (cableado en esta fase) y por tanto no es cero (una call pierde valor temporal).
     for (const auto& greek : report.greeks) {
         if (greek.risk_factor.kind == engine::greeks::RiskFactorKind::CurveParallel ||
             greek.risk_factor.kind == engine::greeks::RiskFactorKind::CreditParameter) {
             EXPECT_DOUBLE_EQ(greek.value, 0.0);
         }
+        if (greek.risk_factor.kind == engine::greeks::RiskFactorKind::TimeShift) {
+            EXPECT_LT(greek.value, 0.0);
+        }
     }
 }
 
-// Actualizado en Fase 4: además de los 4 parámetros de Hull-White (derivada nula, sin cambios --
+// Actualizado en Fase 4/5: además de los 4 parámetros de Hull-White (derivada nula, sin cambios --
 // PresentValueMeasure::evaluate para IrSwapProduct no usa el modelo en absoluto), "curve.parallel"
 // se enumera SIEMPRE y su valor SÍ depende de la curva (PLAN_GREEKS.md §8.5: "una derivada nula es
 // una respuesta valida, distinta de 'no aplica'" -- aquí, al revés, una derivada no nula es la
 // respuesta correcta porque PV de un IRS es, por construcción, función de la curva de descuento).
 // "credit.hazard_rate"/"credit.recovery_rate" también se enumeran SIEMPRE, con derivada nula (PV
-// de un IRS no consume datos de crédito).
+// de un IRS no consume datos de crédito). "time.theta" (Fase 5) también se intenta SIEMPRE, pero
+// este swap tiene `start()==0.0` (default) y el bump por defecto de Theta es `1/365 > 0`: cruza
+// la guardia de `npv_from_market` (§7.4, "Theta no puede cruzar el primer reset sin fixing
+// historico de la pata flotante") y cae en `skipped`, no en `greeks` -- ver
+// `GreeksFase5Test.HullWhiteIrsPvThetaMatchesManualBumpAndRevalWhenStartIsInTheFuture` para el
+// caso donde SÍ se computa.
 TEST(GreeksFase1Test, ComputeAllGreeksOnIrsPvIsZeroForHullWhiteAndCreditButNonZeroForCurveParallel) {
     Registries registries;
     register_builtins(registries);
@@ -292,7 +303,8 @@ TEST(GreeksFase1Test, ComputeAllGreeksOnIrsPvIsZeroForHullWhiteAndCreditButNonZe
         registries, "PV", Params{}, model, swap, market, pricing_context(1'000, 7), cpu_execution()
     );
 
-    EXPECT_TRUE(report.skipped.empty());
+    ASSERT_EQ(report.skipped.size(), 1u);
+    EXPECT_NE(report.skipped[0].find("time.theta"), std::string::npos) << report.skipped[0];
     ASSERT_EQ(report.greeks.size(), 7u);
 
     auto pv = registries.measures.create("PV", Params{});
@@ -419,24 +431,11 @@ TEST(GreeksFase1Test, ComputeGreekRejectsPathwiseMethodExplicitly) {
     );
 }
 
-// Actualizado en Fase 4: "credit.hazard_rate"/"credit.recovery_rate" ya son soportados (ver
-// GreeksFase4Test más abajo) -- este test se mueve al único RiskFactorKind que sigue pendiente de
-// la Fase 5 ("time.theta").
-TEST(GreeksFase1Test, ComputeGreekRejectsTimeRiskFactorKindStillPending) {
-    Registries registries;
-    register_builtins(registries);
-    const pf::ObservableId spot{"EQ.SPOT.XYZ"};
-    pf::PayoffProduct product("CALL", european_call(spot, 100.0, 1.0));
-    engine::GbmModel model = make_gbm_q(100.0, 0.05, 0.0, 0.2, spot.value);
-
-    GreekRequest request = payoff_price_q_request("spot");
-    request.risk_factor = engine::greeks::parse_risk_factor("time.theta");
-
-    EXPECT_THROW(
-        engine::greeks::compute_greek(registries, request, model, product, flat_market(), pricing_context(1'000, 7), cpu_execution()),
-        std::invalid_argument
-    );
-}
+// Actualizado en Fase 5: los cinco RiskFactorKind del catálogo (§3.1) ya están soportados --
+// "time.theta" (el último) queda cableado, pero solo para las métricas de la lista cerrada de
+// `metric_supports_time_shift` ("PV"/"PayoffPriceQ"). Pedirlo sobre cualquier otra métrica sigue
+// rechazándose explícito (ver GreeksFase5Test.ComputeGreekRejectsTimeShiftForAMetricNotYetWired
+// más abajo) -- lo que este test verificaba (un RiskFactorKind entero pendiente) ya no existe.
 
 TEST(GreeksFase1Test, ComputeGreekRejectsAnUnknownModelParameterName) {
     Registries registries;
@@ -819,14 +818,17 @@ TEST(GreeksFase3Test, ComputeAllGreeksWithIncludeCurveBucketsAddsOnePillarCandid
         registries, "PV", Params{}, model, swap, market, pricing_context(1'000, 7), cpu_execution(),
         /*include_curve_buckets=*/false
     );
-    EXPECT_TRUE(without_buckets.skipped.empty());
+    // "time.theta" cae en skipped: make_irs() usa start()==0.0 (default), y el bump por defecto
+    // de Theta (1/365 > 0) cruza la guardia de npv_from_market (§7.4) -- ver GreeksFase1Test.
+    // ComputeAllGreeksOnIrsPvIsZeroForHullWhiteAndCreditButNonZeroForCurveParallel.
+    ASSERT_EQ(without_buckets.skipped.size(), 1u);
     ASSERT_EQ(without_buckets.greeks.size(), 7u); // 4 params HW1F + curve.parallel + 2 credit
 
     engine::greeks::GreeksReport with_buckets = engine::greeks::compute_all_greeks(
         registries, "PV", Params{}, model, swap, market, pricing_context(1'000, 7), cpu_execution(),
         /*include_curve_buckets=*/true
     );
-    EXPECT_TRUE(with_buckets.skipped.empty());
+    ASSERT_EQ(with_buckets.skipped.size(), 1u);
     ASSERT_EQ(with_buckets.greeks.size(), 10u); // + curve.pillar:0/1/2
 
     std::vector<std::string> pillar_factors;
@@ -960,4 +962,161 @@ TEST(GreeksFase4Test, GreekMeasureReachesCreditHazardRateThroughEnginePrice) {
     ASSERT_TRUE(result[0].result.has_scalar);
     EXPECT_GT(result[0].result.scalar, 0.0);
     EXPECT_TRUE(std::isfinite(result[0].result.scalar));
+}
+
+// --- Fase 5: RiskFactorKind::TimeShift (Theta) --------------------------------------------------
+//
+// A diferencia de model.*/curve.*/credit.* (bumpea `model`/`market`, diferencia CENTRAL), aquí se
+// desplaza `PricingContext::pricing_date()` y se usa una diferencia UNIDIRECCIONAL
+// `Metric(t+dt) - Metric(t)` (ADR §7.1, "theta puro": todo lo demás constante, solo avanza el
+// reloj) -- mismo patrón no-derivado que `Dv01Measure`. Solo está cableado para `metric_name` en
+// {"PV", "PayoffPriceQ"} (`metric_supports_time_shift`, greeks.cpp); cualquier otra métrica se
+// rechaza explícito para no devolver un Theta silenciosamente nulo.
+
+TEST(GreeksFase5Test, ThetaOfAEuropeanCallIsNegativeAndMatchesClosedFormFiniteDifference) {
+    Registries registries;
+    register_builtins(registries);
+    const pf::ObservableId spot{"EQ.SPOT.XYZ"};
+    const double s0 = 100.0, strike = 100.0, r = 0.05, q = 0.0, sigma = 0.2, maturity = 1.0;
+    const double dt = 1.0 / 365.0;
+
+    pf::PayoffProduct product("CALL", european_call(spot, strike, maturity));
+    engine::GbmModel model = make_gbm_q(s0, r, q, sigma, spot.value);
+
+    GreekRequest request;
+    request.metric_name = "PayoffPriceQ";
+    request.risk_factor = RiskFactor{RiskFactorKind::TimeShift, "time", "", std::nullopt};
+    request.order = GreekOrder{1, std::nullopt};
+    request.method = GreekMethod::Auto;
+
+    engine::greeks::GreekResult via_greek = engine::greeks::compute_greek(
+        registries, request, model, product, flat_market(), pricing_context(300'000, 7), cpu_execution()
+    );
+
+    double analytic_theta =
+        black_scholes_call(s0, strike, r, q, sigma, maturity - dt) - black_scholes_call(s0, strike, r, q, sigma, maturity);
+
+    EXPECT_TRUE(via_greek.has_scalar);
+    EXPECT_EQ(via_greek.bump_used, dt);
+    EXPECT_LT(via_greek.value, 0.0) << "una call sin dividendos pierde valor temporal";
+    EXPECT_NEAR(via_greek.value, analytic_theta, 0.02)
+        << "Greek=" << via_greek.value << " analytic=" << analytic_theta;
+}
+
+// Swap forward-starting (start > dt) valorado exactamente a la par en t=0: NPV(0) = 0 por
+// construccion, y NPV(dt) = NPV(0) / discount_factor(dt) (reescalado lineal, ver el doc-comment
+// de npv_from_market) -- Theta = NPV(dt) - NPV(0) = 0 EXACTO, no solo "aproximadamente cero".
+TEST(GreeksFase5Test, HullWhiteIrsPvThetaIsExactlyZeroForAParSwapWhenStartIsInTheFuture) {
+    Registries registries;
+    register_builtins(registries);
+    MarketSnapshot market = upward_sloping_market(); // pillars {1,2,3}, zero_rates {.02,.021,.022}
+    const double start = 0.5;
+    const std::vector<double> payment_times{1.5, 2.5, 3.5};
+    const std::vector<double> accruals{1.0, 1.0, 1.0};
+
+    double par_numerator = market.discount_factor(start) - market.discount_factor(payment_times.back());
+    double par_denominator = 0.0;
+    for (std::size_t i = 0; i < payment_times.size(); ++i) par_denominator += accruals[i] * market.discount_factor(payment_times[i]);
+    double par_rate = par_numerator / par_denominator;
+
+    engine::IrSwapProduct swap(Params{
+        {"notional", 1'000'000.0},
+        {"fixed_rate", par_rate},
+        {"start", start},
+        {"payment_times", payment_times},
+        {"accruals", accruals},
+    });
+    engine::HullWhite1FModel model = make_hull_white();
+
+    GreekRequest request;
+    request.metric_name = "PV";
+    request.risk_factor = RiskFactor{RiskFactorKind::TimeShift, "time", "", std::nullopt};
+    request.order = GreekOrder{1, std::nullopt};
+    request.method = GreekMethod::Auto;
+
+    engine::greeks::GreekResult via_greek =
+        engine::greeks::compute_greek(registries, request, model, swap, market, pricing_context(1'000, 7), cpu_execution());
+
+    EXPECT_TRUE(via_greek.has_scalar);
+    EXPECT_NEAR(via_greek.value, 0.0, 1e-6) << "swap a la par, curva sin cambios -> Theta ~ 0";
+}
+
+TEST(GreeksFase5Test, ComputeGreekRejectsTimeShiftForAMetricNotYetWired) {
+    Registries registries;
+    register_builtins(registries);
+    engine::IrSwapProduct swap = make_irs(1'000'000.0, 0.02);
+    engine::HullWhite1FModel model = make_hull_white();
+    MarketSnapshot market = upward_sloping_market();
+
+    GreekRequest request;
+    request.metric_name = "DV01"; // no esta en metric_supports_time_shift (solo "PV"/"PayoffPriceQ")
+    request.risk_factor = RiskFactor{RiskFactorKind::TimeShift, "time", "", std::nullopt};
+    request.order = GreekOrder{1, std::nullopt};
+    request.method = GreekMethod::Auto;
+
+    EXPECT_THROW(
+        engine::greeks::compute_greek(registries, request, model, swap, market, pricing_context(1'000, 7), cpu_execution()),
+        std::invalid_argument
+    );
+}
+
+TEST(GreeksFase5Test, ComputeGreekRejectsTimeShiftThatCrossesARequiredTimeOfThePayoffContract) {
+    Registries registries;
+    register_builtins(registries);
+    const pf::ObservableId spot{"EQ.SPOT.XYZ"};
+    pf::PayoffProduct product("CALL", european_call(spot, 100.0, 1.0)); // maturity = 1.0
+    engine::GbmModel model = make_gbm_q(100.0, 0.05, 0.0, 0.2, spot.value);
+
+    GreekRequest request;
+    request.metric_name = "PayoffPriceQ";
+    request.risk_factor = RiskFactor{RiskFactorKind::TimeShift, "time", "", std::nullopt};
+    request.order = GreekOrder{1, std::nullopt};
+    request.method = GreekMethod::Auto;
+    request.bump_override = 2.0; // > maturity: cruza el unico instante requerido por el contrato
+
+    EXPECT_THROW(
+        engine::greeks::compute_greek(registries, request, model, product, flat_market(), pricing_context(1'000, 7), cpu_execution()),
+        std::exception
+    );
+}
+
+TEST(GreeksFase5Test, ComputeGreekRejectsTimeShiftThatCrossesTheFirstResetOfAnIrs) {
+    // make_irs() usa start()==0.0 (default) -- cualquier dt>0 ya cruza el primer reset de la pata
+    // flotante (§7.4, ver el doc-comment de npv_from_market en measure.cpp).
+    Registries registries;
+    register_builtins(registries);
+    engine::IrSwapProduct swap = make_irs(1'000'000.0, 0.02);
+    engine::HullWhite1FModel model = make_hull_white();
+    MarketSnapshot market = upward_sloping_market();
+
+    GreekRequest request;
+    request.metric_name = "PV";
+    request.risk_factor = RiskFactor{RiskFactorKind::TimeShift, "time", "", std::nullopt};
+    request.order = GreekOrder{1, std::nullopt};
+    request.method = GreekMethod::Auto;
+
+    EXPECT_THROW(
+        engine::greeks::compute_greek(registries, request, model, swap, market, pricing_context(1'000, 7), cpu_execution()),
+        std::invalid_argument
+    );
+}
+
+TEST(GreeksFase5Test, GreekMeasureReachesTimeThetaThroughEnginePrice) {
+    Registries registries;
+    register_builtins(registries);
+    const pf::ObservableId spot{"EQ.SPOT.XYZ"};
+    pf::PayoffProduct product("CALL", european_call(spot, 100.0, 1.0));
+    engine::GbmModel model = make_gbm_q(100.0, 0.05, 0.0, 0.2, spot.value);
+
+    engine::PriceResult result = engine::price(
+        registries, product,
+        std::vector<engine::MeasureSpec>{
+            {"Greek", Params{{"metric", std::string("PayoffPriceQ")}, {"risk_factor", std::string("time.theta")}}}
+        },
+        model, flat_market(), pricing_context(200'000, 7), cpu_execution()
+    );
+
+    ASSERT_EQ(result.size(), 1u);
+    ASSERT_TRUE(result[0].result.has_scalar);
+    EXPECT_LT(result[0].result.scalar, 0.0);
 }

@@ -497,6 +497,10 @@ mod ffi {
         // otro error de compilacion del JSON) -- `Result<T>` hace que un `Err(String)` del lado
         // Rust cruce como una excepcion de C++ en el punto de la llamada (ver cpp/engine/src/
         // payoff/measures.cpp, que la captura y la reexpone como ValidationError/EvaluationError).
+        //
+        // `valuation_time` (PLAN_GREEKS.md §7.2/Fase 5): desplaza "hoy" -- 0.0 preserva el
+        // comportamiento previo. Ver `engine_core::payoff::price_payoff_gbm_q`/
+        // `simulate_gbm_columns` para el rechazo explicito si cruza un instante requerido.
         fn price_payoff_gbm_q(
             spec_json: String,
             observable: String,
@@ -506,6 +510,7 @@ mod ffi {
             sigma: f64,
             n_paths: u64,
             seed: u64,
+            valuation_time: f64,
         ) -> Result<PayoffQPriceResult>;
 
         // PLAN_PRODUCTS.md §12 Fase 6: probabilidad bajo Q de que `event` (un Trigger del
@@ -1102,9 +1107,11 @@ fn price_payoff_gbm_q(
     sigma: f64,
     n_paths: u64,
     seed: u64,
+    valuation_time: f64,
 ) -> Result<ffi::PayoffQPriceResult, String> {
-    let estimate =
-        engine_core::payoff::price_payoff_gbm_q("cpu", &spec_json, &observable, s0, r, q, sigma, n_paths, seed)?;
+    let estimate = engine_core::payoff::price_payoff_gbm_q(
+        "cpu", &spec_json, &observable, s0, r, q, sigma, n_paths, seed, valuation_time,
+    )?;
     Ok(ffi::PayoffQPriceResult {
         mean: estimate.mean,
         std_error: estimate.std_error,

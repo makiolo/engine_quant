@@ -58,7 +58,7 @@ fn bench_one(backend: &str, spec_json: &str, n_paths: u64) -> Duration {
     let (s0, r, q, sigma) = (100.0, 0.05, 0.0, 0.2);
 
     let start = Instant::now();
-    let estimate = price_payoff_gbm_q(backend, spec_json, "EQ.SPOT.XYZ", s0, r, q, sigma, n_paths, 42).unwrap();
+    let estimate = price_payoff_gbm_q(backend, spec_json, "EQ.SPOT.XYZ", s0, r, q, sigma, n_paths, 42, 0.0).unwrap();
     std::hint::black_box(&estimate);
     start.elapsed()
 }

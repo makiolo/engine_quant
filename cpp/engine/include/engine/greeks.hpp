@@ -109,9 +109,15 @@ struct GreekResult {
 // reconstruye `model` con el parámetro desplazado +-h vía `IModel::to_params()`; para
 // `CurveParallel`/`CurvePillar`/`CreditParameter` (Fases 3-4) reconstruye `market` desplazada +-h
 // vía `bump_market_parallel`/`bump_market_pillar`/`bump_market_credit` (engine/market.hpp)
-// dejando `model` intacto -- en todos los casos vuelve a invocar `request.metric_name` (resuelto
-// por `registries.measures`) sobre cada copia -- diferencia central (no adelantada), mismo
-// `pricing`/`seed` en ambas evaluaciones (números aleatorios comunes, §4.4).
+// dejando `model` intacto; para `TimeShift` (Fase 5) reconstruye `PricingContext` con
+// `pricing_date() + dt` dejando `model`/`market` intactos -- en todos los casos vuelve a invocar
+// `request.metric_name` (resuelto por `registries.measures`) sobre cada copia. Todo factor SALVO
+// `TimeShift` usa diferencia central (no adelantada), mismo `pricing`/`seed` en ambas
+// evaluaciones (números aleatorios comunes, §4.4); `TimeShift` usa una diferencia UNIDIRECCIONAL
+// `Metric(t+dt) - Metric(t)` (ADR §7.1, ver el cuerpo de la función) porque el tiempo no
+// retrocede, y solo está cableado para `metric_name` en {"PV", "PayoffPriceQ"}
+// (`metric_supports_time_shift` en greeks.cpp) -- pedirlo sobre otra métrica se rechaza explícito
+// en vez de devolver un Theta silenciosamente nulo.
 //
 // Fase 1: únicamente `request.order.order == 1` sin `cross_factor`,
 // `request.risk_factor.kind == RiskFactorKind::ModelParameter`, `request.method` en
@@ -120,9 +126,8 @@ struct GreekResult {
 // `times`/`primary`/`secondary`) -- una discrepancia de forma entre las dos evaluaciones
 // bumpeadas es un error explícito (indicaría que `metric_params` cambia el tamaño del perfil de
 // forma no determinista, lo que no debería ocurrir nunca). Fase 3 añadió `CurveParallel`/
-// `CurvePillar`; Fase 4 añade `CreditParameter` (`TimeShift` sigue rechazado hasta la Fase 5).
-// Cualquier otra combinación lanza std::invalid_argument con el motivo exacto -- nunca aproxima
-// en silencio.
+// `CurvePillar`; Fase 4 añadió `CreditParameter`; Fase 5 añade `TimeShift`. Cualquier otra
+// combinación lanza std::invalid_argument con el motivo exacto -- nunca aproxima en silencio.
 //
 // Nota de diseño (Fase 3): `Dv01Measure` (measure.hpp) NO se reimplementa sobre esta función --
 // su convención numérica es un bump UNIDIRECCIONAL (`bumped - base`, sin dividir por `h`,
@@ -142,12 +147,16 @@ GreekResult compute_greek(
 // el llamante los nombre uno a uno. Fase 1: enumera `ModelParameter`, una entrada por cada clave
 // `double` de `model.to_params()`. Fase 3 añadió `curve.parallel` SIEMPRE como candidato, y
 // `curve.pillar:i` por cada pillar de `market.pillars()` solo si `include_curve_buckets` (política
-// de enumeración exacta de §8.5, punto 2). Fase 4 añade `credit.hazard_rate`/
+// de enumeración exacta de §8.5, punto 2). Fase 4 añadió `credit.hazard_rate`/
 // `credit.recovery_rate` SIEMPRE (§8.5 punto 3: "una derivada nula es una respuesta válida,
-// distinta de 'no aplica'") -- tiempo/segundo orden siguen pendientes de las Fases 5-6
-// (`include_second_order` se acepta por compatibilidad con la firma final de §8.5 pero todavía no
-// produce candidatos). Un candidato que falle (`compute_greek` lanza) se registra en `skipped`
-// con el motivo -- nunca aborta el reporte completo.
+// distinta de 'no aplica'"). Fase 5 añade `time.theta` SIEMPRE (§8.5 punto 4): si la métrica
+// todavía no honra `PricingContext::pricing_date()` (`metric_supports_time_shift` en greeks.cpp)
+// o `dt` cruza un instante que el motor no puede reconstruir sin histórico, `compute_greek` lanza
+// y el candidato cae en `skipped` con el motivo -- nunca se omite en silencio ni se computa como
+// un Theta cero engañoso. Segundo orden sigue pendiente de la Fase 6 (`include_second_order` se
+// acepta por compatibilidad con la firma final de §8.5 pero todavía no produce candidatos). Un
+// candidato que falle (`compute_greek` lanza) se registra en `skipped` con el motivo -- nunca
+// aborta el reporte completo.
 struct GreeksReport {
     std::vector<GreekResult> greeks;
     std::vector<std::string> skipped;

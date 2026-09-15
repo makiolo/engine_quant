@@ -28,7 +28,17 @@ namespace payoff {
 // Un payoff fuera de este alcance (más de una moneda, o cualquier observable que
 // `MarketSnapshot` no modele) lanza `EvaluationError`/`std::invalid_argument` al llamar estas
 // funciones -- explícito, nunca un resultado silenciosamente incorrecto (§3.1).
-ValuationResult present_value_from_market_snapshot(const ContractPtr& root, const MarketSnapshot& market);
+//
+// `valuation_time` (PLAN_GREEKS.md §7.2/Fase 5, aditivo, default `0.0`): registra el discount
+// factor de cada cashflow como "valor en `valuation_time`" (`discount_factor(t) /
+// discount_factor(valuation_time)`, misma curva absoluta) en vez de "valor en 0" -- Theta puro
+// (§7.1), delegado en `present_value(..., TimePoint{valuation_time})`. Un cashflow cuyo
+// `payment_time < valuation_time` (ya "pagado" respecto del nuevo valuation_time) NO se registra
+// -- `present_value` lo encuentra ausente y lanza explícito (§7.4: sin `FixingStore` para
+// reemplazarlo por su valor histórico, nunca se aproxima en silencio).
+ValuationResult present_value_from_market_snapshot(
+    const ContractPtr& root, const MarketSnapshot& market, double valuation_time = 0.0
+);
 
 // Bump-and-reval paralelo de tipo cero sobre la única curva de `market` (mismo bump que
 // `compute_dv01`/`Dv01Measure::evaluate` en measure.cpp).

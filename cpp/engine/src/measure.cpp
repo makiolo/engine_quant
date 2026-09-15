@@ -115,22 +115,49 @@ double effective_fixed_rate(const MarketSnapshot& market, const IrSwapProduct& i
     return par_rate_from_market(market, irs_product.start(), irs_product.payment_times(), irs_product.accruals());
 }
 
-double npv_from_market(const MarketSnapshot& market, const IrSwapProduct& irs_product, double fixed_rate) {
-    double p_start = market.discount_factor(irs_product.start());
-    double p_end = market.discount_factor(irs_product.payment_times().back());
+// `valuation_time` (PLAN_GREEKS.md §7.3/Fase 5, aditivo, default `0.0`): reescala cada discount
+// factor absoluto de `market` (anclado en "hoy"=0 sin importar `valuation_time`, la curva
+// observada no se mueve) a "valor en `valuation_time` de un cashflow en `t`" ==
+// `discount_factor(t) / discount_factor(valuation_time)` -- Theta puro (§7.1): misma curva,
+// mismo tipo fijo efectivo, solo avanza el reloj. `valuation_time == 0.0` da
+// `discount_factor(0.0) == 1.0` exacto (ver `Curve::discount_factor`), preservando la formula
+// previa byte a byte.
+//
+// Guardia explicita (`valuation_time > irs_product.start()`): esta formula representa la pata
+// flotante completa como DOS discount factors (`P(start)-P(end)`, replica en bonos cero-cupon de
+// "la pata flotante vale su nocional en el proximo reset") -- una vez pasado `start()` el primer
+// reset ya ocurrio (la pata flotante fijo un cupon conocido que este motor simplificado no
+// desglosa por periodo) y la formula deja de ser valida. Sin un `FixingStore` para la pata
+// flotante (PLAN_GREEKS.md §7.4, mismo principio que la ruta Monte Carlo de payoff), Theta que
+// cruza `start()` se rechaza explicito, nunca se aproxima en silencio.
+double npv_from_market(
+    const MarketSnapshot& market, const IrSwapProduct& irs_product, double fixed_rate, double valuation_time
+) {
+    if (valuation_time > irs_product.start()) {
+        throw std::invalid_argument(
+            "npv_from_market: valuation_time (" + std::to_string(valuation_time) +
+            ") posterior al start (" + std::to_string(irs_product.start()) +
+            ") del swap -- el primer reset de la pata flotante ya habria ocurrido y este motor no "
+            "modela fixings historicos de esa pata (PLAN_GREEKS.md §7.4)"
+        );
+    }
+    const double discount_at_valuation = market.discount_factor(valuation_time);
+    double p_start = market.discount_factor(irs_product.start()) / discount_at_valuation;
+    double p_end = market.discount_factor(irs_product.payment_times().back()) / discount_at_valuation;
     double floating_leg = irs_product.notional() * (p_start - p_end);
 
     double fixed_leg = 0.0;
     const std::vector<double>& payment_times = irs_product.payment_times();
     const std::vector<double>& accruals = irs_product.accruals();
     for (std::size_t i = 0; i < payment_times.size(); ++i) {
-        fixed_leg += irs_product.notional() * fixed_rate * accruals[i] * market.discount_factor(payment_times[i]);
+        fixed_leg +=
+            irs_product.notional() * fixed_rate * accruals[i] * (market.discount_factor(payment_times[i]) / discount_at_valuation);
     }
     return floating_leg - fixed_leg;
 }
 
-double compute_npv(const MarketSnapshot& market, const IrSwapProduct& irs_product) {
-    return npv_from_market(market, irs_product, effective_fixed_rate(market, irs_product));
+double compute_npv(const MarketSnapshot& market, const IrSwapProduct& irs_product, double valuation_time = 0.0) {
+    return npv_from_market(market, irs_product, effective_fixed_rate(market, irs_product), valuation_time);
 }
 
 // DV01 = NPV(curva bumpeada en `bump`) - NPV(curva base), MISMO tipo fijo efectivo (fijado UNA
@@ -138,10 +165,10 @@ double compute_npv(const MarketSnapshot& market, const IrSwapProduct& irs_produc
 // revaloraciones -- bump-and-reval, no AAD. `bump_market_parallel` (PLAN_GREEKS.md §4.2/Fase 3,
 // engine/market.hpp) es el único punto del motor que construye esta curva desplazada -- antes
 // duplicado aquí y en payoff/market_snapshot_bridge.cpp.
-double compute_dv01(const MarketSnapshot& market, const IrSwapProduct& irs_product, double bump) {
+double compute_dv01(const MarketSnapshot& market, const IrSwapProduct& irs_product, double bump, double valuation_time = 0.0) {
     double fixed_rate = effective_fixed_rate(market, irs_product);
-    double base = npv_from_market(market, irs_product, fixed_rate);
-    double bumped = npv_from_market(bump_market_parallel(market, bump), irs_product, fixed_rate);
+    double base = npv_from_market(market, irs_product, fixed_rate, valuation_time);
+    double bumped = npv_from_market(bump_market_parallel(market, bump), irs_product, fixed_rate, valuation_time);
     return bumped - base;
 }
 
@@ -151,14 +178,17 @@ double compute_dv01(const MarketSnapshot& market, const IrSwapProduct& irs_produ
 // solo depende de zero_rates[i] vía interpolación local: bumpear todos los pillars a la vez
 // (bump paralelo) y bumpearlos uno a uno y sumar dan, hasta convexidad de segundo orden entre
 // pillars, el mismo resultado -- ver el test de consistencia en test_registry.cpp.
+//
+// Sin `valuation_time` (siempre `0.0`): Theta de un DV01 bucketed queda fuera de esta fase, ver
+// el doc-comment de `Dv01Measure::evaluate`.
 std::vector<double> dv01_bucketed_from_market(const MarketSnapshot& market, const IrSwapProduct& irs_product, double bump) {
     double fixed_rate = effective_fixed_rate(market, irs_product);
-    double base = npv_from_market(market, irs_product, fixed_rate);
+    double base = npv_from_market(market, irs_product, fixed_rate, 0.0);
 
     std::vector<double> deltas;
     deltas.reserve(market.pillars().size());
     for (std::size_t i = 0; i < market.pillars().size(); ++i) {
-        double bumped = npv_from_market(bump_market_pillar(market, i, bump), irs_product, fixed_rate);
+        double bumped = npv_from_market(bump_market_pillar(market, i, bump), irs_product, fixed_rate, 0.0);
         deltas.push_back(bumped - base);
     }
     return deltas;
@@ -235,7 +265,8 @@ std::vector<double> compute_npv_batch(const MarketSnapshot& market, const std::v
     results.reserve(irs_products.size());
     for (const IrSwapProduct* irs : irs_products) {
         // require_homogeneous_irs_batch (price.cpp) ya garantiza use_par_rate() == false aquí.
-        results.push_back(npv_from_market(market, *irs, irs->fixed_rate()));
+        // valuation_time=0.0: Theta en lote queda fuera de esta fase (aditivo, sin cambios).
+        results.push_back(npv_from_market(market, *irs, irs->fixed_rate(), 0.0));
     }
     return results;
 }
@@ -247,8 +278,8 @@ std::vector<double> compute_dv01_batch(
     std::vector<double> results;
     results.reserve(irs_products.size());
     for (const IrSwapProduct* irs : irs_products) {
-        double base = npv_from_market(market, *irs, irs->fixed_rate());
-        double bumped = npv_from_market(bumped_market, *irs, irs->fixed_rate());
+        double base = npv_from_market(market, *irs, irs->fixed_rate(), 0.0);
+        double bumped = npv_from_market(bumped_market, *irs, irs->fixed_rate(), 0.0);
         results.push_back(bumped - base);
     }
     return results;
@@ -308,13 +339,13 @@ MeasureResult UnilateralCvaMeasure::evaluate(
 
 MeasureResult PresentValueMeasure::evaluate(
     const IModel&, const IProduct& product, const MarketSnapshot& market,
-    const PricingContext&, const ExecutionContext&
+    const PricingContext& pricing, const ExecutionContext&
 ) const {
     MeasureResult result;
     result.has_scalar = true;
 
     if (const auto* irs_product = dynamic_cast<const IrSwapProduct*>(&product)) {
-        result.scalar = compute_npv(market, *irs_product);
+        result.scalar = compute_npv(market, *irs_product, pricing.pricing_date());
         return result;
     }
     // Rama genérica única para cualquier `PayoffProduct` (PLAN_PRODUCTS.md §9.1/§9.5, Fase 8:
@@ -324,7 +355,9 @@ MeasureResult PresentValueMeasure::evaluate(
     // arriba -- ver market_snapshot_bridge.hpp para el alcance exacto (una moneda, sin
     // observables que `MarketSnapshot` no modele).
     if (const auto* payoff_product = dynamic_cast<const payoff::PayoffProduct*>(&product)) {
-        result.scalar = payoff::present_value_from_market_snapshot(payoff_product->payoff_program()->contract, market).present_value;
+        result.scalar = payoff::present_value_from_market_snapshot(
+            payoff_product->payoff_program()->contract, market, pricing.pricing_date()
+        ).present_value;
         return result;
     }
     throw std::invalid_argument("PresentValueMeasure: producto no soportado: " + product.type_name());
@@ -332,7 +365,7 @@ MeasureResult PresentValueMeasure::evaluate(
 
 MeasureResult Dv01Measure::evaluate(
     const IModel&, const IProduct& product, const MarketSnapshot& market,
-    const PricingContext&, const ExecutionContext&
+    const PricingContext& pricing, const ExecutionContext&
 ) const {
     MeasureResult result;
     if (const auto* irs_product = dynamic_cast<const IrSwapProduct*>(&product)) {
@@ -342,7 +375,7 @@ MeasureResult Dv01Measure::evaluate(
             result.has_scalar = false;
         } else {
             result.has_scalar = true;
-            result.scalar = compute_dv01(market, *irs_product, bump_);
+            result.scalar = compute_dv01(market, *irs_product, bump_, pricing.pricing_date());
         }
         return result;
     }
@@ -385,8 +418,9 @@ MeasureResult PayoffPriceQMeasure::evaluate(
         throw std::invalid_argument("PayoffPriceQMeasure: modelo no soportado: " + model.type_name());
     }
 
-    payoff::QValuationResult out =
-        payoff::risk_neutral_price_gbm(*payoff_product->payoff_program(), *gbm_model, pricing.n_paths(), pricing.seed());
+    payoff::QValuationResult out = payoff::risk_neutral_price_gbm(
+        *payoff_product->payoff_program(), *gbm_model, pricing.n_paths(), pricing.seed(), pricing.pricing_date()
+    );
 
     MeasureResult result;
     result.has_scalar = true;

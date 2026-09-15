@@ -98,6 +98,13 @@ pub(crate) fn check_single_observable(payoff: &CompiledPayoff, observable: &str,
 /// las dos llamantes) y devuelve `columns`: `columns[i][path]` es el valor de ese observable en
 /// `times[i]` para la ruta `path`. Generica sobre `B` (Fase 11): `device` decide en que backend
 /// corre la simulacion, el resto de esta funcion no cambia.
+///
+/// `valuation_time` (PLAN_GREEKS.md §7.2/Fase 5, aditivo, default `0.0` en todas las llamantes
+/// salvo `price_payoff_gbm_q_on`): desplaza el "hoy" de la simulacion -- se simula en
+/// `times[i] - valuation_time` en vez de `times[i]`, manteniendo `s0` (el spot conocido HOY,
+/// theta puro no lo cambia) y el resto de parametros de `Gbm` intactos. La llamante
+/// (`simulate_gbm_columns`) es responsable de garantizar `times[i] > valuation_time` para todo
+/// `i` -- `Gbm::simulate_at_times` asume tiempos estrictamente positivos.
 #[allow(clippy::too_many_arguments)]
 fn simulate_gbm_columns_at<B: Backend<FloatElem = f64>>(
     device: &burn::tensor::Device<B>,
@@ -108,18 +115,27 @@ fn simulate_gbm_columns_at<B: Backend<FloatElem = f64>>(
     sigma: f64,
     n_paths: u64,
     seed: u64,
+    valuation_time: f64,
 ) -> Vec<Vec<f64>> {
     B::seed(device, seed);
+    let shifted_times: Vec<f64> = times.iter().map(|t| t - valuation_time).collect();
     let model = Gbm::<B>::new(scalar(s0, device), scalar(r, device), scalar(q, device), scalar(sigma, device));
-    let simulated = model.simulate_at_times(times, n_paths as usize, device);
+    let simulated = model.simulate_at_times(&shifted_times, n_paths as usize, device);
     simulated.into_iter().map(|t| t.into_data().to_vec::<f64>().unwrap()).collect()
 }
 
 /// Simula bajo GBM el unico observable de `payoff` en `payoff.required_times()` y devuelve
 /// `(times, columns)`: `columns[i][path]` es el valor de ese observable en `times[i]` para la
-/// ruta `path`. Compartido por `price_payoff_gbm_q_on`/`hit_probability_gbm_q_on` -- ambas
-/// interpretan el mismo `CompiledPayoff` sobre las mismas rutas, solo difiere que agregan al
-/// final (cashflow descontado vs. indicador de hit).
+/// ruta `path` (`times` en su escala ORIGINAL, sin desplazar -- el desplazamiento por
+/// `valuation_time` es un detalle interno de la simulacion, el resto del pipeline sigue
+/// razonando en tiempos absolutos). Compartido por `price_payoff_gbm_q_on`/
+/// `hit_probability_gbm_q_on`/`price_payoff_exercise_gbm_q_on`/`payoff_sensitivity_pathwise_on`.
+///
+/// `valuation_time` (PLAN_GREEKS.md §7.2/Fase 5): `Err` explicito si algun `required_time` ya
+/// ocurrio en o antes de `valuation_time` -- este motor no modela un `FixingStore` de historico
+/// para la ruta simulada bajo Q (a diferencia de la ruta determinista `scenario_payoff`/
+/// `present_value`, ver PLAN_GREEKS.md §7.4), asi que Theta nunca puede cruzar un instante
+/// requerido por el contrato: se rechaza explicito, nunca se aproxima en silencio.
 #[allow(clippy::too_many_arguments)]
 fn simulate_gbm_columns<B: Backend<FloatElem = f64>>(
     device: &burn::tensor::Device<B>,
@@ -130,6 +146,7 @@ fn simulate_gbm_columns<B: Backend<FloatElem = f64>>(
     sigma: f64,
     n_paths: u64,
     seed: u64,
+    valuation_time: f64,
 ) -> Result<(Vec<f64>, Vec<Vec<f64>>), String> {
     let times = payoff.required_times();
     if times.is_empty() {
@@ -137,7 +154,14 @@ fn simulate_gbm_columns<B: Backend<FloatElem = f64>>(
             "payoff: el contrato no depende de ningun instante de mercado (nada que simular bajo Q)".to_string(),
         );
     }
-    let columns = simulate_gbm_columns_at::<B>(device, &times, s0, r, q, sigma, n_paths, seed);
+    if let Some(&past) = times.iter().find(|&&t| t <= valuation_time) {
+        return Err(format!(
+            "payoff: valuation_time ({valuation_time}) alcanza o supera un instante requerido por el contrato \
+             ({past}) -- este motor no modela fixings historicos de la ruta Monte Carlo bajo Q \
+             (PLAN_GREEKS.md §7.4), Theta no puede cruzar ese instante"
+        ));
+    }
+    let columns = simulate_gbm_columns_at::<B>(device, &times, s0, r, q, sigma, n_paths, seed, valuation_time);
     Ok((times, columns))
 }
 
@@ -149,6 +173,13 @@ fn simulate_gbm_columns<B: Backend<FloatElem = f64>>(
 /// "`ModelCapabilities::generated_observables`"): si el contrato referencia cualquier otro
 /// nombre, o cualquier nodo no soportado en `CompiledPayoff` v1 (Fase 5), `Err` ANTES de simular
 /// una sola ruta -- preflight, criterio de aceptacion explicito de Fase 5.
+///
+/// `valuation_time` (PLAN_GREEKS.md §7.2/Fase 5 de PLAN_GREEKS.md, NO confundir con la "Fase 5"
+/// de PLAN_PRODUCTS.md citada arriba): desplaza "hoy" -- aditivo, default `0.0` en cada llamante
+/// C++ existente (`engine::payoff::risk_neutral_price_gbm`, ver measures.hpp). Theta puro
+/// (`compute_greek`, `RiskFactorKind::TimeShift`) revalora con `valuation_time = dt` manteniendo
+/// `s0`/`r`/`q`/`sigma` intactos; ver `simulate_gbm_columns` para el rechazo explicito si `dt`
+/// cruza un instante requerido por el contrato.
 #[allow(clippy::too_many_arguments)]
 pub fn price_payoff_gbm_q(
     backend: &str,
@@ -160,18 +191,19 @@ pub fn price_payoff_gbm_q(
     sigma: f64,
     n_paths: u64,
     seed: u64,
+    valuation_time: f64,
 ) -> Result<McEstimate, String> {
     match resolve_backend(backend) {
         ComputeBackend::Cpu => {
             let device = burn::tensor::Device::<CpuBackend>::default();
-            price_payoff_gbm_q_on::<CpuBackend>(&device, spec_json, observable, s0, r, q, sigma, n_paths, seed)
+            price_payoff_gbm_q_on::<CpuBackend>(&device, spec_json, observable, s0, r, q, sigma, n_paths, seed, valuation_time)
         }
         ComputeBackend::Gpu => {
             #[cfg(feature = "gpu")]
             {
                 let device = burn::tensor::Device::<crate::backend::GpuBackend>::default();
                 price_payoff_gbm_q_on::<crate::backend::GpuBackend>(
-                    &device, spec_json, observable, s0, r, q, sigma, n_paths, seed,
+                    &device, spec_json, observable, s0, r, q, sigma, n_paths, seed, valuation_time,
                 )
             }
             #[cfg(not(feature = "gpu"))]
@@ -180,7 +212,7 @@ pub fn price_payoff_gbm_q(
                 // build no tiene la feature `gpu`. CPU como red de seguridad, no como
                 // comportamiento normal (ver crate::api::irs_hull_white_exposure_profile).
                 let device = burn::tensor::Device::<CpuBackend>::default();
-                price_payoff_gbm_q_on::<CpuBackend>(&device, spec_json, observable, s0, r, q, sigma, n_paths, seed)
+                price_payoff_gbm_q_on::<CpuBackend>(&device, spec_json, observable, s0, r, q, sigma, n_paths, seed, valuation_time)
             }
         }
     }
@@ -197,10 +229,11 @@ fn price_payoff_gbm_q_on<B: Backend<FloatElem = f64>>(
     sigma: f64,
     n_paths: u64,
     seed: u64,
+    valuation_time: f64,
 ) -> Result<McEstimate, String> {
     let payoff = compile(spec_json)?;
     check_single_observable(&payoff, observable, n_paths)?;
-    let (times, columns) = simulate_gbm_columns::<B>(device, &payoff, s0, r, q, sigma, n_paths, seed)?;
+    let (times, columns) = simulate_gbm_columns::<B>(device, &payoff, s0, r, q, sigma, n_paths, seed, valuation_time)?;
     let n_paths_usize = n_paths as usize;
 
     let mut discounted_samples = Vec::with_capacity(n_paths_usize);
@@ -209,7 +242,8 @@ fn price_payoff_gbm_q_on<B: Backend<FloatElem = f64>>(
         let path = SinglePath { times: &times, values: &values, sigma };
         let (ledger, _events) =
             evaluate_with_events_seeded(&payoff, &path, bridge_seed_for_path(seed, path_idx));
-        let present_value: f64 = ledger.iter().map(|cf| cf.amount * (-r * cf.payment_time).exp()).sum();
+        let present_value: f64 =
+            ledger.iter().map(|cf| cf.amount * (-r * (cf.payment_time - valuation_time)).exp()).sum();
         discounted_samples.push(present_value);
     }
 
@@ -294,7 +328,9 @@ fn price_payoff_exercise_gbm_q_on<B: Backend<FloatElem = f64>>(
     let payoff = compile(spec_json)?;
     check_single_observable(&payoff, observable, n_paths)?;
     let node = lsm::find_single_exercise_node(&payoff)?;
-    let (times, columns) = simulate_gbm_columns::<B>(device, &payoff, s0, r, q, sigma, n_paths, seed)?;
+    // valuation_time=0.0: Theta de un contrato con Exercise queda fuera de esta fase (Fase 5 de
+    // PLAN_GREEKS.md solo cablea price_payoff_gbm_q) -- aditivo, comportamiento sin cambios.
+    let (times, columns) = simulate_gbm_columns::<B>(device, &payoff, s0, r, q, sigma, n_paths, seed, 0.0)?;
     let n_paths_usize = n_paths as usize;
 
     // Materializar los valores de TODAS las rutas antes de construir los `SinglePath` (que solo
@@ -399,7 +435,8 @@ fn payoff_sensitivity_pathwise_on<B: Backend<FloatElem = f64>>(
     n_paths: u64,
     seed: u64,
 ) -> Result<McEstimate, String> {
-    let (times, columns) = simulate_gbm_columns::<B>(device, payoff, s0, r, q, sigma, n_paths, seed)?;
+    // valuation_time=0.0: sensibilidad pathwise queda fuera de esta fase (aditivo, sin cambios).
+    let (times, columns) = simulate_gbm_columns::<B>(device, payoff, s0, r, q, sigma, n_paths, seed, 0.0)?;
     let n_paths_usize = n_paths as usize;
 
     let mut samples = Vec::with_capacity(n_paths_usize);
@@ -545,7 +582,8 @@ fn hit_probability_gbm_q_on<B: Backend<FloatElem = f64>>(
             payoff.event_slots
         )
     })?;
-    let (times, columns) = simulate_gbm_columns::<B>(device, &payoff, s0, r, q, sigma, n_paths, seed)?;
+    // valuation_time=0.0: Theta de hit probability queda fuera de esta fase (aditivo, sin cambios).
+    let (times, columns) = simulate_gbm_columns::<B>(device, &payoff, s0, r, q, sigma, n_paths, seed, 0.0)?;
     let n_paths_usize = n_paths as usize;
 
     let mut hit_indicators = Vec::with_capacity(n_paths_usize);
@@ -655,7 +693,8 @@ fn payoff_exposure_profile_gbm_q_on<B: Backend<FloatElem = f64>>(
     }
 
     let n_paths_usize = n_paths as usize;
-    let columns = simulate_gbm_columns_at::<B>(device, &simulation_times, s0, r, q, sigma, n_paths, seed);
+    // valuation_time=0.0: Theta de exposure profile queda fuera de esta fase (aditivo, sin cambios).
+    let columns = simulate_gbm_columns_at::<B>(device, &simulation_times, s0, r, q, sigma, n_paths, seed, 0.0);
 
     // Un vector de exposiciones (una por ruta) por cada `t` de `exposure_times` -- se agregan al
     // final, ya con todas las rutas evaluadas (la mediana/percentil 95 necesita el vector
@@ -720,7 +759,7 @@ mod tests {
     #[test]
     fn preflight_rejects_an_observable_the_model_does_not_generate() {
         let spec = CALL_JSON_TEMPLATE.replace("{maturity}", "1.0").replace("{strike}", "100.0");
-        let err = price_payoff_gbm_q("cpu", &spec, "EQ.SPOT.OTHER_TICKER", 100.0, 0.05, 0.0, 0.2, 1_000, 7)
+        let err = price_payoff_gbm_q("cpu", &spec, "EQ.SPOT.OTHER_TICKER", 100.0, 0.05, 0.0, 0.2, 1_000, 7, 0.0)
             .expect_err("un observable distinto del generado por el modelo debe fallar en preflight");
         assert!(err.contains("EQ.SPOT.XYZ"));
         assert!(err.contains("no generado"));
@@ -735,7 +774,7 @@ mod tests {
             .replace("{maturity}", &maturity.to_string())
             .replace("{strike}", &strike.to_string());
 
-        let estimate = price_payoff_gbm_q("cpu", &spec, "EQ.SPOT.XYZ", s0, r, q, sigma, 200_000, 7).unwrap();
+        let estimate = price_payoff_gbm_q("cpu", &spec, "EQ.SPOT.XYZ", s0, r, q, sigma, 200_000, 7, 0.0).unwrap();
         let analytic = black_scholes_call(s0, strike, r, q, sigma, maturity);
 
         let tolerance = 8.0 * estimate.std_error;
@@ -761,8 +800,8 @@ mod tests {
         // intervalos de confianza -- no hay margen para que un dato fisico externo se cuele.
         let spec = CALL_JSON_TEMPLATE.replace("{maturity}", "1.0").replace("{strike}", "100.0");
         let (s0, r, q, sigma) = (100.0, 0.05, 0.0, 0.2);
-        let first = price_payoff_gbm_q("cpu", &spec, "EQ.SPOT.XYZ", s0, r, q, sigma, 50_000, 7).unwrap();
-        let second = price_payoff_gbm_q("cpu", &spec, "EQ.SPOT.XYZ", s0, r, q, sigma, 50_000, 99).unwrap();
+        let first = price_payoff_gbm_q("cpu", &spec, "EQ.SPOT.XYZ", s0, r, q, sigma, 50_000, 7, 0.0).unwrap();
+        let second = price_payoff_gbm_q("cpu", &spec, "EQ.SPOT.XYZ", s0, r, q, sigma, 50_000, 99, 0.0).unwrap();
         let combined_tolerance = 8.0 * (first.std_error + second.std_error);
         assert!(
             (first.mean - second.mean).abs() < combined_tolerance,
@@ -848,9 +887,9 @@ mod tests {
             .replace("{maturity}", &maturity.to_string())
             .replace("{strike}", &strike.to_string());
 
-        let ui = price_payoff_gbm_q("cpu", &ui_spec, "EQ.SPOT.XYZ", s0, r, q, sigma, n_paths, seed).unwrap();
-        let uo = price_payoff_gbm_q("cpu", &uo_spec, "EQ.SPOT.XYZ", s0, r, q, sigma, n_paths, seed + 1).unwrap();
-        let vanilla = price_payoff_gbm_q("cpu", &vanilla_spec, "EQ.SPOT.XYZ", s0, r, q, sigma, n_paths, seed + 2).unwrap();
+        let ui = price_payoff_gbm_q("cpu", &ui_spec, "EQ.SPOT.XYZ", s0, r, q, sigma, n_paths, seed, 0.0).unwrap();
+        let uo = price_payoff_gbm_q("cpu", &uo_spec, "EQ.SPOT.XYZ", s0, r, q, sigma, n_paths, seed + 1, 0.0).unwrap();
+        let vanilla = price_payoff_gbm_q("cpu", &vanilla_spec, "EQ.SPOT.XYZ", s0, r, q, sigma, n_paths, seed + 2, 0.0).unwrap();
 
         let combined_std_error = (ui.std_error.powi(2) + uo.std_error.powi(2) + vanilla.std_error.powi(2)).sqrt();
         let tolerance = 8.0 * combined_std_error;
@@ -880,8 +919,8 @@ mod tests {
         let coarse_spec = up_and_in_call_json(barrier, strike, maturity, &coarse_times);
         let fine_spec = up_and_in_call_json(barrier, strike, maturity, &fine_times);
 
-        let coarse = price_payoff_gbm_q("cpu", &coarse_spec, "EQ.SPOT.XYZ", s0, r, q, sigma, n_paths, seed).unwrap();
-        let fine = price_payoff_gbm_q("cpu", &fine_spec, "EQ.SPOT.XYZ", s0, r, q, sigma, n_paths, seed).unwrap();
+        let coarse = price_payoff_gbm_q("cpu", &coarse_spec, "EQ.SPOT.XYZ", s0, r, q, sigma, n_paths, seed, 0.0).unwrap();
+        let fine = price_payoff_gbm_q("cpu", &fine_spec, "EQ.SPOT.XYZ", s0, r, q, sigma, n_paths, seed, 0.0).unwrap();
 
         let tolerance = 8.0 * (coarse.std_error + fine.std_error);
         assert!(
@@ -917,9 +956,9 @@ mod tests {
         let discrete_spec = up_and_in_call_json(barrier, strike, maturity, &coarse_times);
         let continuous_spec = discrete_spec.replace("\"discrete\"", "\"continuous_approximation\"");
 
-        let discrete = price_payoff_gbm_q("cpu", &discrete_spec, "EQ.SPOT.XYZ", s0, r, q, sigma, n_paths, seed).unwrap();
+        let discrete = price_payoff_gbm_q("cpu", &discrete_spec, "EQ.SPOT.XYZ", s0, r, q, sigma, n_paths, seed, 0.0).unwrap();
         let continuous =
-            price_payoff_gbm_q("cpu", &continuous_spec, "EQ.SPOT.XYZ", s0, r, q, sigma, n_paths, seed).unwrap();
+            price_payoff_gbm_q("cpu", &continuous_spec, "EQ.SPOT.XYZ", s0, r, q, sigma, n_paths, seed, 0.0).unwrap();
 
         let tolerance = 8.0 * (discrete.std_error + continuous.std_error);
         assert!(
@@ -947,13 +986,13 @@ mod tests {
         let fine_continuous = fine_discrete.replace("\"discrete\"", "\"continuous_approximation\"");
 
         let coarse_gap = {
-            let d = price_payoff_gbm_q("cpu", &coarse_discrete, "EQ.SPOT.XYZ", s0, r, q, sigma, n_paths, seed).unwrap();
-            let c = price_payoff_gbm_q("cpu", &coarse_continuous, "EQ.SPOT.XYZ", s0, r, q, sigma, n_paths, seed).unwrap();
+            let d = price_payoff_gbm_q("cpu", &coarse_discrete, "EQ.SPOT.XYZ", s0, r, q, sigma, n_paths, seed, 0.0).unwrap();
+            let c = price_payoff_gbm_q("cpu", &coarse_continuous, "EQ.SPOT.XYZ", s0, r, q, sigma, n_paths, seed, 0.0).unwrap();
             (c.mean - d.mean, c.std_error + d.std_error)
         };
         let fine_gap = {
-            let d = price_payoff_gbm_q("cpu", &fine_discrete, "EQ.SPOT.XYZ", s0, r, q, sigma, n_paths, seed).unwrap();
-            let c = price_payoff_gbm_q("cpu", &fine_continuous, "EQ.SPOT.XYZ", s0, r, q, sigma, n_paths, seed).unwrap();
+            let d = price_payoff_gbm_q("cpu", &fine_discrete, "EQ.SPOT.XYZ", s0, r, q, sigma, n_paths, seed, 0.0).unwrap();
+            let c = price_payoff_gbm_q("cpu", &fine_continuous, "EQ.SPOT.XYZ", s0, r, q, sigma, n_paths, seed, 0.0).unwrap();
             (c.mean - d.mean, c.std_error + d.std_error)
         };
 
@@ -1043,7 +1082,7 @@ mod tests {
             .replace("{strike}", &strike.to_string());
         let (n_paths, seed) = (200_000, 7);
 
-        let price = price_payoff_gbm_q("cpu", &spec, "EQ.SPOT.XYZ", s0, r, q, sigma, n_paths, seed).unwrap();
+        let price = price_payoff_gbm_q("cpu", &spec, "EQ.SPOT.XYZ", s0, r, q, sigma, n_paths, seed, 0.0).unwrap();
         let profile = payoff_exposure_profile_gbm_q(
             "cpu", &spec, "EQ.SPOT.XYZ", s0, r, q, sigma, &[0.0, maturity], n_paths, seed,
         )
@@ -1246,7 +1285,7 @@ mod tests {
         let european_spec = european_vanilla_json("put", strike, maturity);
         let bermuda_spec = bermuda_json("put", strike, maturity, &[0.25, 0.5, 0.75]);
 
-        let european = price_payoff_gbm_q("cpu", &european_spec, "EQ.SPOT.XYZ", s0, r, q, sigma, n_paths, seed).unwrap();
+        let european = price_payoff_gbm_q("cpu", &european_spec, "EQ.SPOT.XYZ", s0, r, q, sigma, n_paths, seed, 0.0).unwrap();
         let bermuda =
             price_payoff_exercise_gbm_q("cpu", &bermuda_spec, "EQ.SPOT.XYZ", s0, r, q, sigma, n_paths, seed + 1).unwrap();
 
@@ -1301,7 +1340,7 @@ mod tests {
         let european_spec = european_vanilla_json("call", strike, maturity);
         let bermuda_spec = bermuda_json("call", strike, maturity, &[0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]);
 
-        let european = price_payoff_gbm_q("cpu", &european_spec, "EQ.SPOT.XYZ", s0, r, q, sigma, n_paths, seed).unwrap();
+        let european = price_payoff_gbm_q("cpu", &european_spec, "EQ.SPOT.XYZ", s0, r, q, sigma, n_paths, seed, 0.0).unwrap();
         let bermuda =
             price_payoff_exercise_gbm_q("cpu", &bermuda_spec, "EQ.SPOT.XYZ", s0, r, q, sigma, n_paths, seed + 1).unwrap();
 
@@ -1507,7 +1546,7 @@ mod tests {
         let spec = up_and_in_call_json(barrier, strike, maturity, &monitoring_times);
         let (n_paths, seed) = (200_000, 7);
 
-        let cpu = price_payoff_gbm_q("cpu", &spec, "EQ.SPOT.XYZ", s0, r, q, sigma, n_paths, seed).unwrap();
+        let cpu = price_payoff_gbm_q("cpu", &spec, "EQ.SPOT.XYZ", s0, r, q, sigma, n_paths, seed, 0.0).unwrap();
         let gpu = price_payoff_gbm_q("gpu", &spec, "EQ.SPOT.XYZ", s0, r, q, sigma, n_paths, seed).unwrap();
 
         let tolerance = 8.0 * (cpu.std_error + gpu.std_error);

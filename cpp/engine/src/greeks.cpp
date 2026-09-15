@@ -72,6 +72,21 @@ double default_model_parameter_bump(double base_value) {
 // absoluto, mismo default histórico de `Dv01Measure::bump_`.
 double default_curve_bump() { return 0.0001; }
 
+// Política de bump por defecto para Theta (PLAN_GREEKS.md §4.3): un día, absoluto.
+double default_time_shift_bump() { return 1.0 / 365.0; }
+
+// Metricas que ya honran `PricingContext::pricing_date()` como `valuation_time` (Fase 5): "PV"
+// (IrSwapProduct via `compute_npv`, PayoffProduct via `present_value_from_market_snapshot`) y
+// "PayoffPriceQ" (Monte Carlo GBM via `risk_neutral_price_gbm`). Cualquier otra metrica lo
+// ignora todavia -- pedir `time.theta` sobre ella daria un Theta silenciosamente nulo (las dos
+// evaluaciones +dt/base serian identicas), asi que `compute_greek` lo rechaza explicito en vez de
+// aproximar (mismo principio que PLAN_GREEKS.md §4.5 aplica a pathwise sobre metricas
+// indicador). Lista cerrada, ampliada a mano en cada fase que cablee una metrica nueva -- nunca
+// inferida por reflexion (mismo criterio que la tabla de capacidades de §5.4).
+bool metric_supports_time_shift(const std::string& metric_name) {
+    return metric_name == "PV" || metric_name == "PayoffPriceQ";
+}
+
 // Heurística de trazabilidad Q/P (PLAN_GREEKS.md §3.4/§6), documentada como limitación de Fase 1
 // en el doc-comment de GreekResult::measure en greeks.hpp: se infiere del sufijo Q/P que ya sigue
 // toda medida de payoff registrada en measure.hpp -- "PV"/"DV01"/"ExposureProfile"/"UnilateralCVA"
@@ -194,11 +209,20 @@ GreekResult compute_greek(
         request.risk_factor.kind == RiskFactorKind::CurveParallel || request.risk_factor.kind == RiskFactorKind::CurvePillar;
     const bool is_credit_factor = request.risk_factor.kind == RiskFactorKind::CreditParameter;
     const bool is_market_factor = is_curve_factor || is_credit_factor;
-    if (request.risk_factor.kind != RiskFactorKind::ModelParameter && !is_market_factor) {
+    const bool is_time_factor = request.risk_factor.kind == RiskFactorKind::TimeShift;
+    if (request.risk_factor.kind != RiskFactorKind::ModelParameter && !is_market_factor && !is_time_factor) {
         throw std::invalid_argument(
             "compute_greek: RiskFactorKind de '" + to_string(request.risk_factor) +
-            "' no soportado todavia (Fase 4 soporta model.*/curve.parallel/curve.pillar:<i>/"
-            "credit.hazard_rate/credit.recovery_rate; tiempo llega en Fase 5)"
+            "' no soportado todavia (Fase 5 soporta model.*/curve.parallel/curve.pillar:<i>/"
+            "credit.hazard_rate/credit.recovery_rate/time.theta)"
+        );
+    }
+    if (is_time_factor && !metric_supports_time_shift(request.metric_name)) {
+        throw std::invalid_argument(
+            "compute_greek: 'time.theta' todavia no esta cableado para la metrica '" + request.metric_name +
+            "' (Fase 5 solo honra PricingContext::pricing_date() en 'PV' y 'PayoffPriceQ'; pedirlo "
+            "sobre otra metrica daria un Theta silenciosamente nulo, asi que se rechaza explicito "
+            "en vez de aproximar)"
         );
     }
     if (request.method == GreekMethod::Pathwise || request.method == GreekMethod::AadReverse) {
@@ -215,7 +239,22 @@ GreekResult compute_greek(
     MeasureResult down;
     double h;
 
-    if (is_market_factor) {
+    if (is_time_factor) {
+        // Theta puro (PLAN_GREEKS.md §7.1): diferencia UNIDIRECCIONAL Metric(t+dt) - Metric(t),
+        // nunca centrada (el tiempo no "retrocede") -- misma convencion que `Dv01Measure`
+        // (`bumped - base`, sin dividir por `h`, ver measure.cpp). `market`/`model` quedan
+        // intactos; solo se desplaza `PricingContext::pricing_date()`, la unica via por la que
+        // las metricas cableadas (`metric_supports_time_shift`) leen `valuation_time`.
+        h = request.bump_override.value_or(default_time_shift_bump());
+        PricingContext pricing_shifted(Params{
+            {"pricing_date", pricing.pricing_date() + h},
+            {"n_paths", static_cast<double>(pricing.n_paths())},
+            {"n_steps", static_cast<double>(pricing.n_steps())},
+            {"seed", static_cast<double>(pricing.seed())},
+        });
+        up = metric->evaluate(model, product, market, pricing_shifted, execution);
+        down = metric->evaluate(model, product, market, pricing, execution);
+    } else if (is_market_factor) {
         if (request.risk_factor.kind == RiskFactorKind::CurvePillar) {
             const std::size_t pillar_index = request.risk_factor.pillar_index.value_or(0);
             if (pillar_index >= market.pillars().size()) {
@@ -295,17 +334,24 @@ GreekResult compute_greek(
         );
     }
 
+    // Theta (§7.1) es una diferencia CRUDA sin normalizar (`Metric(t+dt) - Metric(t)`, denominador
+    // `1.0`) -- misma convencion no-derivada que `Dv01Measure` (`bumped - base`, measure.cpp),
+    // fijada literalmente por la ADR de §7.1, NO la diferencia central `(up-down)/(2h)` que usa
+    // toda otra combinacion de §4.1. `bump_used` sigue reportando `h` (el `dt` aplicado) para que
+    // el llamante nunca tenga que adivinarlo, aunque no participe en el propio calculo de `value`.
+    const double denominator = is_time_factor ? 1.0 : (2.0 * h);
+
     GreekResult result;
     result.has_scalar = up.has_scalar;
-    if (up.has_scalar) result.value = (up.scalar - down.scalar) / (2.0 * h);
+    if (up.has_scalar) result.value = (up.scalar - down.scalar) / denominator;
     result.times = up.times; // mismo eje temporal que la metrica base (no depende del parametro bumpeado)
     result.primary.reserve(up.primary.size());
     for (std::size_t i = 0; i < up.primary.size(); ++i) {
-        result.primary.push_back((up.primary[i] - down.primary[i]) / (2.0 * h));
+        result.primary.push_back((up.primary[i] - down.primary[i]) / denominator);
     }
     result.secondary.reserve(up.secondary.size());
     for (std::size_t i = 0; i < up.secondary.size(); ++i) {
-        result.secondary.push_back((up.secondary[i] - down.secondary[i]) / (2.0 * h));
+        result.secondary.push_back((up.secondary[i] - down.secondary[i]) / denominator);
     }
     result.order = request.order;
     result.risk_factor = request.risk_factor;
@@ -374,6 +420,11 @@ GreeksReport compute_all_greeks(
     // respuesta valida, distinta de "no aplica", y se reporta como tal en vez de omitirse.
     try_candidate(RiskFactor{RiskFactorKind::CreditParameter, "credit", "hazard_rate", std::nullopt});
     try_candidate(RiskFactor{RiskFactorKind::CreditParameter, "credit", "recovery_rate", std::nullopt});
+
+    // Politica de enumeracion de §8.5, punto 4 (Fase 5): "time.theta" siempre -- si la metrica no
+    // esta cableada todavia (`metric_supports_time_shift`) o `dt` cruza un instante sin historico,
+    // `compute_greek` lanza y el candidato cae en `skipped`, nunca se omite en silencio.
+    try_candidate(RiskFactor{RiskFactorKind::TimeShift, "time", "", std::nullopt});
 
     return report;
 }

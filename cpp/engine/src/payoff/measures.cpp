@@ -180,14 +180,16 @@ double bump_and_reval_fixing(
 }
 
 QValuationResult risk_neutral_price_gbm(
-    const PayoffProgram& program, const GbmModel& model, std::uint64_t n_paths, std::uint64_t seed
+    const PayoffProgram& program, const GbmModel& model, std::uint64_t n_paths, std::uint64_t seed,
+    double valuation_time
 ) {
     preflight_gbm_capabilities(program, model.capabilities(), ProbabilityMeasure::RiskNeutralQ);
 
     std::string spec_json = CanonicalVisitor::to_json(program.id, program.contract);
     try {
         ffi::PayoffQPriceResult result = ffi::price_payoff_gbm_q(
-            spec_json, model.observable().value, model.s0(), model.r(), model.q(), model.sigma(), n_paths, seed
+            spec_json, model.observable().value, model.s0(), model.r(), model.q(), model.sigma(), n_paths, seed,
+            valuation_time
         );
         QValuationResult out;
         out.mean = result.mean;

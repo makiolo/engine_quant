@@ -132,8 +132,16 @@ struct QValuationResult {
 // Rust (`engine_core::payoff`) -- un error de compilacion del JSON (p.ej. un nodo no soportado
 // en Fase 5, ver `docs/schema/engine.payoff/v1.schema.json`) llega como excepcion de Rust y se
 // relanza aqui como `EvaluationError`.
+//
+// `valuation_time` (PLAN_GREEKS.md §7.2/Fase 5, aditivo, default `0.0`): desplaza "hoy" hacia
+// adelante manteniendo `model`/`market` intactos -- Theta puro (`engine::greeks::compute_greek`,
+// `RiskFactorKind::TimeShift`) es la unica llamante que pasa un valor distinto de `0.0`, via
+// `PricingContext::pricing_date()`. Un `valuation_time` que alcanza o supera un instante
+// requerido por el contrato lanza `EvaluationError` explicito (este motor no modela un
+// `FixingStore` para la ruta Monte Carlo, PLAN_GREEKS.md §7.4) -- nunca aproxima en silencio.
 QValuationResult risk_neutral_price_gbm(
-    const PayoffProgram& program, const GbmModel& model, std::uint64_t n_paths, std::uint64_t seed
+    const PayoffProgram& program, const GbmModel& model, std::uint64_t n_paths, std::uint64_t seed,
+    double valuation_time = 0.0
 );
 
 // Resultado de HitProbability bajo Q (PLAN_PRODUCTS.md §12 Fase 6: "hit probability Q como

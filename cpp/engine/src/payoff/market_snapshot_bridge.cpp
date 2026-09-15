@@ -51,30 +51,43 @@ Currency single_currency_of(const CashflowLedger& ledger) {
 }
 
 // `MarketPath` poblado con el discount factor de `market` en cada fecha de pago de `ledger`
-// (más t=0, por si algún cashflow se paga ahí) bajo `single_curve_id()`.
-MarketPath market_path_from_snapshot(const MarketSnapshot& market, const CashflowLedger& ledger) {
+// (más `valuation_time`, por si algún cashflow se paga ahí) bajo `single_curve_id()`, como
+// "valor EN `valuation_time`" (`discount_factor(t) / discount_factor(valuation_time)`, misma
+// curva absoluta -- PLAN_GREEKS.md §7.2/Fase 5). `valuation_time == 0.0` (default) reproduce la
+// forma previa byte a byte (`market.discount_factor(0.0) == 1.0`).
+//
+// Un cashflow con `entry.payment_time < valuation_time` NO se registra a propósito: ya habría
+// sido pagado respecto del nuevo valuation_time y este puente no tiene un `FixingStore` para
+// sustituirlo por su valor histórico -- `present_value` lo encontrará ausente y lanzará
+// `EvaluationError` explícito (§7.4), nunca lo aproxima como si aún estuviera pendiente.
+MarketPath market_path_from_snapshot(const MarketSnapshot& market, const CashflowLedger& ledger, double valuation_time) {
     MarketPath path;
-    const TimePoint origin{0.0};
-    path.set_discount_factor(single_curve_id(), origin, origin, market.discount_factor(0.0));
+    const TimePoint origin{valuation_time};
+    const double discount_at_valuation = market.discount_factor(valuation_time);
+    path.set_discount_factor(single_curve_id(), origin, origin, 1.0);
     for (const LedgerEntry& entry : ledger) {
-        path.set_discount_factor(single_curve_id(), origin, entry.payment_time, market.discount_factor(entry.payment_time.year_fraction));
+        if (entry.payment_time.year_fraction < valuation_time) continue;
+        path.set_discount_factor(
+            single_curve_id(), origin, entry.payment_time,
+            market.discount_factor(entry.payment_time.year_fraction) / discount_at_valuation
+        );
     }
     return path;
 }
 
 } // namespace
 
-ValuationResult present_value_from_market_snapshot(const ContractPtr& root, const MarketSnapshot& market) {
+ValuationResult present_value_from_market_snapshot(const ContractPtr& root, const MarketSnapshot& market, double valuation_time) {
     CashflowLedger probe_ledger = evaluate_ledger_currency_probe(root);
     Currency currency = single_currency_of(probe_ledger);
 
-    MarketPath path = market_path_from_snapshot(market, probe_ledger);
+    MarketPath path = market_path_from_snapshot(market, probe_ledger, valuation_time);
     FixingStore historical;
     RuntimeState state;
     EvaluationContext context{path, historical, state};
     DiscountingPolicy discounting(currency, single_curve_id());
 
-    return present_value(root, context, discounting, currency);
+    return present_value(root, context, discounting, currency, TimePoint{valuation_time});
 }
 
 double bump_and_reval_from_market_snapshot(const ContractPtr& root, const MarketSnapshot& market, double zero_rate_bump) {
