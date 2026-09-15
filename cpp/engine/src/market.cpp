@@ -92,4 +92,22 @@ MarketSnapshot MarketSnapshot::synthetic_from_hull_white_2f(
     return MarketSnapshot(curve.pillars(), curve.zero_rates(), hazard_rate, recovery_rate);
 }
 
+MarketSnapshot bump_market_parallel(const MarketSnapshot& market, double bump) {
+    std::vector<double> bumped_rates = market.zero_rates();
+    for (double& z : bumped_rates) z += bump;
+    return MarketSnapshot(market.pillars(), std::move(bumped_rates), market.hazard_rate(), market.recovery_rate());
+}
+
+MarketSnapshot bump_market_pillar(const MarketSnapshot& market, std::size_t pillar_index, double bump) {
+    if (pillar_index >= market.pillars().size()) {
+        throw std::invalid_argument(
+            "bump_market_pillar: indice de pillar " + std::to_string(pillar_index) +
+            " fuera de rango (la curva tiene " + std::to_string(market.pillars().size()) + " pillars)"
+        );
+    }
+    std::vector<double> bumped_rates = market.zero_rates();
+    bumped_rates[pillar_index] += bump;
+    return MarketSnapshot(market.pillars(), std::move(bumped_rates), market.hazard_rate(), market.recovery_rate());
+}
+
 } // namespace engine

@@ -231,7 +231,9 @@ TEST(GreeksFase1Test, GreekResultReportsBumpUsedMethodUsedAndInferredMeasure) {
     EXPECT_EQ(result.order.order, 1);
 }
 
-TEST(GreeksFase1Test, ComputeAllGreeksOnGbmReturnsExactlyTheFourModelParameters) {
+// Actualizado en Fase 3 (PLAN_GREEKS.md §8.5 punto 2): "curve.parallel" ahora se enumera SIEMPRE,
+// además de los 4 parámetros de modelo -- 5 candidatos en vez de 4, ninguno en skipped.
+TEST(GreeksFase1Test, ComputeAllGreeksOnGbmReturnsTheFourModelParametersPlusCurveParallel) {
     Registries registries;
     register_builtins(registries);
     const pf::ObservableId spot{"EQ.SPOT.XYZ"};
@@ -243,18 +245,31 @@ TEST(GreeksFase1Test, ComputeAllGreeksOnGbmReturnsExactlyTheFourModelParameters)
     );
 
     EXPECT_TRUE(report.skipped.empty());
-    ASSERT_EQ(report.greeks.size(), 4u);
-    std::vector<std::string> names;
-    for (const auto& greek : report.greeks) names.push_back(greek.risk_factor.name);
-    std::sort(names.begin(), names.end());
-    EXPECT_EQ(names, (std::vector<std::string>{"dividend_yield", "rate", "spot", "volatility"}));
+    ASSERT_EQ(report.greeks.size(), 5u);
+    std::vector<std::string> factors;
+    for (const auto& greek : report.greeks) factors.push_back(engine::greeks::to_string(greek.risk_factor));
+    std::sort(factors.begin(), factors.end());
+    EXPECT_EQ(
+        factors,
+        (std::vector<std::string>{"curve.parallel", "model.dividend_yield", "model.rate", "model.spot", "model.volatility"})
+    );
+
+    // PayoffPriceQMeasure ignora `market` (measure.cpp) -- ambas evaluaciones +-h usan
+    // exactamente el mismo modelo/paths, así que la derivada respecto de la curva es 0 exacto,
+    // no una aproximación de Monte Carlo.
+    for (const auto& greek : report.greeks) {
+        if (greek.risk_factor.kind == engine::greeks::RiskFactorKind::CurveParallel) {
+            EXPECT_DOUBLE_EQ(greek.value, 0.0);
+        }
+    }
 }
 
-TEST(GreeksFase1Test, ComputeAllGreeksOnIrsPvIsZeroForEveryHullWhiteParameter) {
-    // PresentValueMeasure::evaluate para IrSwapProduct replica la curva de MarketSnapshot y no
-    // usa el modelo en absoluto (measure.cpp, PLAN_REAPI.md §6 Fase 4) -- una derivada nula es la
-    // respuesta correcta aqui, no un fallo (PLAN_GREEKS.md §8.5: "una derivada nula es una
-    // respuesta valida, distinta de 'no aplica'").
+// Actualizado en Fase 3: además de los 4 parámetros de Hull-White (derivada nula, sin cambios --
+// PresentValueMeasure::evaluate para IrSwapProduct no usa el modelo en absoluto), "curve.parallel"
+// se enumera SIEMPRE y su valor SÍ depende de la curva (PLAN_GREEKS.md §8.5: "una derivada nula es
+// una respuesta valida, distinta de 'no aplica'" -- aquí, al revés, una derivada no nula es la
+// respuesta correcta porque PV de un IRS es, por construcción, función de la curva de descuento).
+TEST(GreeksFase1Test, ComputeAllGreeksOnIrsPvIsZeroForHullWhiteButNonZeroForCurveParallel) {
     Registries registries;
     register_builtins(registries);
     engine::IrSwapProduct swap(Params{
@@ -264,20 +279,38 @@ TEST(GreeksFase1Test, ComputeAllGreeksOnIrsPvIsZeroForEveryHullWhiteParameter) {
         {"accruals", std::vector<double>{1.0, 1.0, 1.0}},
     });
     engine::HullWhite1FModel model = make_hull_white();
+    MarketSnapshot market = flat_market();
 
     engine::greeks::GreeksReport report = engine::greeks::compute_all_greeks(
-        registries, "PV", Params{}, model, swap, flat_market(), pricing_context(1'000, 7), cpu_execution()
+        registries, "PV", Params{}, model, swap, market, pricing_context(1'000, 7), cpu_execution()
     );
 
     EXPECT_TRUE(report.skipped.empty());
-    ASSERT_EQ(report.greeks.size(), 4u);
-    std::vector<std::string> names;
+    ASSERT_EQ(report.greeks.size(), 5u);
+
+    auto pv = registries.measures.create("PV", Params{});
+    const double h = 0.0001; // default de curva (PLAN_GREEKS.md §4.3)
+    MarketSnapshot market_up = engine::bump_market_parallel(market, h);
+    MarketSnapshot market_down = engine::bump_market_parallel(market, -h);
+    double manual_curve_parallel = (pv->evaluate(model, swap, market_up, pricing_context(1'000, 7), cpu_execution()).scalar -
+                                     pv->evaluate(model, swap, market_down, pricing_context(1'000, 7), cpu_execution()).scalar) /
+                                    (2.0 * h);
+
+    std::vector<std::string> model_param_names;
+    bool saw_curve_parallel = false;
     for (const auto& greek : report.greeks) {
-        names.push_back(greek.risk_factor.name);
-        EXPECT_DOUBLE_EQ(greek.value, 0.0);
+        if (greek.risk_factor.kind == engine::greeks::RiskFactorKind::ModelParameter) {
+            model_param_names.push_back(greek.risk_factor.name);
+            EXPECT_DOUBLE_EQ(greek.value, 0.0);
+        } else {
+            ASSERT_EQ(greek.risk_factor.kind, engine::greeks::RiskFactorKind::CurveParallel);
+            saw_curve_parallel = true;
+            EXPECT_NEAR(greek.value, manual_curve_parallel, 1e-6);
+        }
     }
-    std::sort(names.begin(), names.end());
-    EXPECT_EQ(names, (std::vector<std::string>{"a", "b", "r0", "sigma"}));
+    EXPECT_TRUE(saw_curve_parallel);
+    std::sort(model_param_names.begin(), model_param_names.end());
+    EXPECT_EQ(model_param_names, (std::vector<std::string>{"a", "b", "r0", "sigma"}));
 }
 
 TEST(GreeksFase1Test, ForecastPVegaOfDriftMatchesAnalyticDerivative) {
@@ -374,20 +407,27 @@ TEST(GreeksFase1Test, ComputeGreekRejectsPathwiseMethodExplicitly) {
     );
 }
 
-TEST(GreeksFase1Test, ComputeGreekRejectsNonModelParameterRiskFactorKinds) {
+// Actualizado en Fase 3: "curve.parallel"/"curve.pillar:<i>" ya son soportados (ver
+// GreeksFase3Test más abajo) -- este test se mueve a los dos RiskFactorKind que siguen
+// pendientes de las Fases 4-5 ("credit.*"/"time.theta").
+TEST(GreeksFase1Test, ComputeGreekRejectsCreditAndTimeRiskFactorKindsStillPending) {
     Registries registries;
     register_builtins(registries);
     const pf::ObservableId spot{"EQ.SPOT.XYZ"};
     pf::PayoffProduct product("CALL", european_call(spot, 100.0, 1.0));
     engine::GbmModel model = make_gbm_q(100.0, 0.05, 0.0, 0.2, spot.value);
 
-    GreekRequest request = payoff_price_q_request("spot");
-    request.risk_factor = engine::greeks::parse_risk_factor("curve.parallel");
+    for (const std::string& factor : {"credit.hazard_rate", "time.theta"}) {
+        GreekRequest request = payoff_price_q_request("spot");
+        request.risk_factor = engine::greeks::parse_risk_factor(factor);
 
-    EXPECT_THROW(
-        engine::greeks::compute_greek(registries, request, model, product, flat_market(), pricing_context(1'000, 7), cpu_execution()),
-        std::invalid_argument
-    );
+        EXPECT_THROW(
+            engine::greeks::compute_greek(
+                registries, request, model, product, flat_market(), pricing_context(1'000, 7), cpu_execution()
+            ),
+            std::invalid_argument
+        ) << factor;
+    }
 }
 
 TEST(GreeksFase1Test, ComputeGreekRejectsAnUnknownModelParameterName) {
@@ -624,4 +664,189 @@ TEST(GreeksFase2Test, GreekMeasureRejectsWhenTheInnerMetricIsMissingAMandatoryPa
     EXPECT_THROW(
         measure->evaluate(model, product, flat_market(), pricing_context(1'000, 7), cpu_execution()), std::out_of_range
     );
+}
+
+// --- Fase 3: RiskFactorKind::CurveParallel/CurvePillar genéricos -------------------------------
+//
+// A diferencia de Fase 1-2 (RiskFactor de MODELO: bumpea `model`, `market` fijo), aquí se bumpea
+// `market` y el modelo queda fijo -- aplicable a CUALQUIER producto que descuenta con
+// `MarketSnapshot` (IrSwapProduct directamente, PayoffProduct vía `market_snapshot_bridge`),
+// quitando la limitación previa de `Dv01Measure::evaluate` ("bucketed=true no soportado para
+// PayoffProduct"). Los oráculos de estos tests son bump-and-reval MANUAL con
+// `engine::bump_market_parallel`/`bump_market_pillar` -- las mismas dos funciones que ahora usa
+// `compute_greek` internamente (engine/market.hpp).
+
+MarketSnapshot upward_sloping_market() { return MarketSnapshot({1.0, 2.0, 3.0}, {0.02, 0.021, 0.022}); }
+
+engine::IrSwapProduct make_irs(double notional, double fixed_rate) {
+    return engine::IrSwapProduct(Params{
+        {"notional", notional},
+        {"fixed_rate", fixed_rate},
+        {"payment_times", std::vector<double>{1.0, 2.0, 3.0}},
+        {"accruals", std::vector<double>{1.0, 1.0, 1.0}},
+    });
+}
+
+TEST(GreeksFase3Test, CurveParallelGreekOfIrsPvMatchesManualBumpAndReval) {
+    Registries registries;
+    register_builtins(registries);
+    engine::IrSwapProduct swap = make_irs(1'000'000.0, 0.02);
+    engine::HullWhite1FModel model = make_hull_white();
+    MarketSnapshot market = upward_sloping_market();
+    const double h = 0.0002;
+
+    GreekRequest request;
+    request.metric_name = "PV";
+    request.risk_factor = RiskFactor{RiskFactorKind::CurveParallel, "curve", "", std::nullopt};
+    request.order = GreekOrder{1, std::nullopt};
+    request.method = GreekMethod::Auto;
+    request.bump_override = h;
+
+    engine::greeks::GreekResult via_greek =
+        engine::greeks::compute_greek(registries, request, model, swap, market, pricing_context(1'000, 7), cpu_execution());
+
+    auto pv = registries.measures.create("PV", Params{});
+    MarketSnapshot market_up = engine::bump_market_parallel(market, h);
+    MarketSnapshot market_down = engine::bump_market_parallel(market, -h);
+    double manual = (pv->evaluate(model, swap, market_up, pricing_context(1'000, 7), cpu_execution()).scalar -
+                      pv->evaluate(model, swap, market_down, pricing_context(1'000, 7), cpu_execution()).scalar) /
+                     (2.0 * h);
+
+    EXPECT_TRUE(via_greek.has_scalar);
+    EXPECT_EQ(via_greek.bump_used, h);
+    EXPECT_NEAR(via_greek.value, manual, 1e-9) << "Greek=" << via_greek.value << " manual=" << manual;
+}
+
+TEST(GreeksFase3Test, CurvePillarGreekOfIrsPvMatchesManualBumpAndReval) {
+    Registries registries;
+    register_builtins(registries);
+    engine::IrSwapProduct swap = make_irs(1'000'000.0, 0.02);
+    engine::HullWhite1FModel model = make_hull_white();
+    MarketSnapshot market = upward_sloping_market();
+    const double h = 0.0002;
+
+    GreekRequest request;
+    request.metric_name = "PV";
+    request.risk_factor = RiskFactor{RiskFactorKind::CurvePillar, "curve", "", std::size_t{1}};
+    request.order = GreekOrder{1, std::nullopt};
+    request.method = GreekMethod::Auto;
+    request.bump_override = h;
+
+    engine::greeks::GreekResult via_greek =
+        engine::greeks::compute_greek(registries, request, model, swap, market, pricing_context(1'000, 7), cpu_execution());
+
+    auto pv = registries.measures.create("PV", Params{});
+    MarketSnapshot market_up = engine::bump_market_pillar(market, 1, h);
+    MarketSnapshot market_down = engine::bump_market_pillar(market, 1, -h);
+    double manual = (pv->evaluate(model, swap, market_up, pricing_context(1'000, 7), cpu_execution()).scalar -
+                      pv->evaluate(model, swap, market_down, pricing_context(1'000, 7), cpu_execution()).scalar) /
+                     (2.0 * h);
+
+    EXPECT_TRUE(via_greek.has_scalar);
+    EXPECT_EQ(via_greek.risk_factor.pillar_index, 1u);
+    EXPECT_NEAR(via_greek.value, manual, 1e-9) << "Greek=" << via_greek.value << " manual=" << manual;
+}
+
+TEST(GreeksFase3Test, CurveParallelGreekOfPayoffProductPvMatchesManualBumpAndReval) {
+    // "aplicable a CUALQUIER producto que descuenta con MarketSnapshot" (PLAN_GREEKS.md §11 Fase
+    // 3): antes de esta fase, `Dv01Measure` era la ÚNICA forma de obtener una sensibilidad de
+    // curva para un PayoffProduct, y solo en su variante paralela. Aquí se pide vía "Greek"
+    // genérico, sin ningún código nuevo por producto.
+    Registries registries;
+    register_builtins(registries);
+    pf::PayoffProduct bond("ZERO_COUPON_BOND", pf::when(tp(3.0), pf::cashflow(pf::Currency{"USD"}, pf::constant(500'000.0))));
+    engine::GbmModel model = make_gbm_q(100.0, 0.05, 0.0, 0.2, "EQ.SPOT.XYZ"); // ignorado por "PV" para PayoffProduct
+    MarketSnapshot market = upward_sloping_market();
+    const double h = 0.0002;
+
+    GreekRequest request;
+    request.metric_name = "PV";
+    request.risk_factor = RiskFactor{RiskFactorKind::CurveParallel, "curve", "", std::nullopt};
+    request.order = GreekOrder{1, std::nullopt};
+    request.method = GreekMethod::Auto;
+    request.bump_override = h;
+
+    engine::greeks::GreekResult via_greek =
+        engine::greeks::compute_greek(registries, request, model, bond, market, pricing_context(1'000, 7), cpu_execution());
+
+    auto pv = registries.measures.create("PV", Params{});
+    MarketSnapshot market_up = engine::bump_market_parallel(market, h);
+    MarketSnapshot market_down = engine::bump_market_parallel(market, -h);
+    double manual = (pv->evaluate(model, bond, market_up, pricing_context(1'000, 7), cpu_execution()).scalar -
+                      pv->evaluate(model, bond, market_down, pricing_context(1'000, 7), cpu_execution()).scalar) /
+                     (2.0 * h);
+
+    EXPECT_TRUE(via_greek.has_scalar);
+    EXPECT_LT(via_greek.value, 0.0); // subir la curva de descuento baja el PV de un cashflow futuro
+    EXPECT_NEAR(via_greek.value, manual, 1e-6) << "Greek=" << via_greek.value << " manual=" << manual;
+}
+
+TEST(GreeksFase3Test, ComputeGreekRejectsAnOutOfRangePillarIndex) {
+    Registries registries;
+    register_builtins(registries);
+    engine::IrSwapProduct swap = make_irs(1'000'000.0, 0.02);
+    engine::HullWhite1FModel model = make_hull_white();
+    MarketSnapshot market = upward_sloping_market(); // 3 pillars: indices 0..2
+
+    GreekRequest request;
+    request.metric_name = "PV";
+    request.risk_factor = RiskFactor{RiskFactorKind::CurvePillar, "curve", "", std::size_t{5}};
+    request.order = GreekOrder{1, std::nullopt};
+    request.method = GreekMethod::Auto;
+
+    EXPECT_THROW(
+        engine::greeks::compute_greek(registries, request, model, swap, market, pricing_context(1'000, 7), cpu_execution()),
+        std::invalid_argument
+    );
+}
+
+TEST(GreeksFase3Test, ComputeAllGreeksWithIncludeCurveBucketsAddsOnePillarCandidatePerPillar) {
+    Registries registries;
+    register_builtins(registries);
+    engine::IrSwapProduct swap = make_irs(1'000'000.0, 0.02);
+    engine::HullWhite1FModel model = make_hull_white();
+    MarketSnapshot market = upward_sloping_market(); // 3 pillars
+
+    engine::greeks::GreeksReport without_buckets = engine::greeks::compute_all_greeks(
+        registries, "PV", Params{}, model, swap, market, pricing_context(1'000, 7), cpu_execution(),
+        /*include_curve_buckets=*/false
+    );
+    EXPECT_TRUE(without_buckets.skipped.empty());
+    ASSERT_EQ(without_buckets.greeks.size(), 5u); // 4 params HW1F + curve.parallel
+
+    engine::greeks::GreeksReport with_buckets = engine::greeks::compute_all_greeks(
+        registries, "PV", Params{}, model, swap, market, pricing_context(1'000, 7), cpu_execution(),
+        /*include_curve_buckets=*/true
+    );
+    EXPECT_TRUE(with_buckets.skipped.empty());
+    ASSERT_EQ(with_buckets.greeks.size(), 8u); // + curve.pillar:0/1/2
+
+    std::vector<std::string> pillar_factors;
+    for (const auto& greek : with_buckets.greeks) {
+        if (greek.risk_factor.kind == engine::greeks::RiskFactorKind::CurvePillar) {
+            pillar_factors.push_back(engine::greeks::to_string(greek.risk_factor));
+        }
+    }
+    std::sort(pillar_factors.begin(), pillar_factors.end());
+    EXPECT_EQ(pillar_factors, (std::vector<std::string>{"curve.pillar:0", "curve.pillar:1", "curve.pillar:2"}));
+}
+
+TEST(GreeksFase3Test, GreekMeasureReachesCurveParallelThroughEnginePrice) {
+    Registries registries;
+    register_builtins(registries);
+    engine::IrSwapProduct swap = make_irs(1'000'000.0, 0.02);
+    engine::HullWhite1FModel model = make_hull_white();
+    MarketSnapshot market = upward_sloping_market();
+
+    engine::PriceResult result = engine::price(
+        registries, swap,
+        std::vector<engine::MeasureSpec>{
+            {"Greek", Params{{"metric", std::string("PV")}, {"risk_factor", std::string("curve.parallel")}}}
+        },
+        model, market, pricing_context(1'000, 7), cpu_execution()
+    );
+
+    ASSERT_EQ(result.size(), 1u);
+    ASSERT_TRUE(result[0].result.has_scalar);
+    EXPECT_TRUE(std::isfinite(result[0].result.scalar));
 }

@@ -31,12 +31,6 @@ std::optional<WhenCashflow> extract_when_cashflow(const ContractPtr& node) {
     return WhenCashflow{when_node->time(), cf->currency(), amount_const->value()};
 }
 
-MarketSnapshot bump_curve(const MarketSnapshot& market, double bump) {
-    std::vector<double> bumped_rates = market.zero_rates();
-    for (double& z : bumped_rates) z += bump;
-    return MarketSnapshot(market.pillars(), std::move(bumped_rates), market.hazard_rate(), market.recovery_rate());
-}
-
 } // namespace
 
 std::optional<RecognizedIrsSwap> recognize_irs_swap(const ContractPtr& root) {
@@ -84,7 +78,7 @@ double specialized_present_value(const RecognizedIrsSwap& irs, const MarketSnaps
 
 double specialized_dv01(const RecognizedIrsSwap& irs, const MarketSnapshot& market, double bump) {
     double base = specialized_present_value(irs, market);
-    double bumped = specialized_present_value(irs, bump_curve(market, bump));
+    double bumped = specialized_present_value(irs, bump_market_parallel(market, bump));
     return bumped - base;
 }
 

@@ -62,12 +62,6 @@ MarketPath market_path_from_snapshot(const MarketSnapshot& market, const Cashflo
     return path;
 }
 
-MarketSnapshot bump_curve(const MarketSnapshot& market, double bump) {
-    std::vector<double> bumped_rates = market.zero_rates();
-    for (double& z : bumped_rates) z += bump;
-    return MarketSnapshot(market.pillars(), std::move(bumped_rates), market.hazard_rate(), market.recovery_rate());
-}
-
 } // namespace
 
 ValuationResult present_value_from_market_snapshot(const ContractPtr& root, const MarketSnapshot& market) {
@@ -85,7 +79,16 @@ ValuationResult present_value_from_market_snapshot(const ContractPtr& root, cons
 
 double bump_and_reval_from_market_snapshot(const ContractPtr& root, const MarketSnapshot& market, double zero_rate_bump) {
     double base = present_value_from_market_snapshot(root, market).present_value;
-    double bumped = present_value_from_market_snapshot(root, bump_curve(market, zero_rate_bump)).present_value;
+    double bumped = present_value_from_market_snapshot(root, bump_market_parallel(market, zero_rate_bump)).present_value;
+    return bumped - base;
+}
+
+double bump_and_reval_pillar_from_market_snapshot(
+    const ContractPtr& root, const MarketSnapshot& market, std::size_t pillar_index, double zero_rate_bump
+) {
+    double base = present_value_from_market_snapshot(root, market).present_value;
+    double bumped =
+        present_value_from_market_snapshot(root, bump_market_pillar(market, pillar_index, zero_rate_bump)).present_value;
     return bumped - base;
 }
 

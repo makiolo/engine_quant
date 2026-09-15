@@ -34,9 +34,9 @@ public:
 
     // Copia con `curve` desplazada en paralelo por `zero_rate_bump` (tipo cero, PLAN_PRODUCTS.md
     // §12 Fase 4 "bump-and-reval generico por observable/curva", mismo bump de zero_rate que
-    // `bump_curve`/`compute_dv01` en measure.cpp): cada entrada registrada de `curve` se
-    // reescala por exp(-zero_rate_bump * (to - from)). Curvas distintas y todos los
-    // fixings/fx_rates quedan intactos.
+    // `bump_market_parallel`/`compute_dv01` en measure.cpp -- ver engine/market.hpp): cada
+    // entrada registrada de `curve` se reescala por exp(-zero_rate_bump * (to - from)). Curvas
+    // distintas y todos los fixings/fx_rates quedan intactos.
     MarketPath with_curve_bump(const CurveId& curve, double zero_rate_bump) const;
 
     // Copia con todos los fixings registrados de `observable` desplazados aditivamente por

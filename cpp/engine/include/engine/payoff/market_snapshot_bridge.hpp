@@ -34,5 +34,14 @@ ValuationResult present_value_from_market_snapshot(const ContractPtr& root, cons
 // `compute_dv01`/`Dv01Measure::evaluate` en measure.cpp).
 double bump_and_reval_from_market_snapshot(const ContractPtr& root, const MarketSnapshot& market, double zero_rate_bump);
 
+// Bump-and-reval de un ÚNICO pillar de la curva de `market` (PLAN_GREEKS.md §11 Fase 3: DV01
+// bucketed de un PayoffProduct, antes explícitamente no soportado -- "Fase 8" pendiente en
+// `Dv01Measure::evaluate`). Misma convención que `bump_and_reval_from_market_snapshot` (bump
+// unidireccional, no diferencia central): `bumped - base`, MISMO tipo de cambio que la versión
+// paralela.
+double bump_and_reval_pillar_from_market_snapshot(
+    const ContractPtr& root, const MarketSnapshot& market, std::size_t pillar_index, double zero_rate_bump
+);
+
 } // namespace payoff
 } // namespace engine

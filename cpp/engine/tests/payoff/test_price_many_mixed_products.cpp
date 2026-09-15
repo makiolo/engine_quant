@@ -133,4 +133,39 @@ TEST(PriceManyMixedProductsTest, Dv01MatchesAcrossLegacyAndPayoffAst) {
     EXPECT_NEAR(results[1].measures[0].result.scalar, results[0].measures[0].result.scalar, 1e-6);
 }
 
+// PLAN_GREEKS.md §11 Fase 3: quita la limitación previa de `Dv01Measure::evaluate`
+// ("bucketed=true no soportado para PayoffProduct", measure.cpp) -- mismo criterio de
+// consistencia que `Price.BucketedDv01SumsToTheParallelDv01` (test_registry.cpp) ya verifica para
+// `IrSwapProduct`, aquí para un `PayoffProduct` que envuelve el mismo AST de swap.
+TEST(PriceManyMixedProductsTest, BucketedDv01OfAPayoffProductSumsToItsParallelDv01) {
+    MixedBatchFixture fx;
+    MarketSnapshot market({1.0, 2.0, 3.0}, {0.02, 0.021, 0.022});
+    const double bump = 0.0001;
+
+    pf::PayoffProduct irs_as_payoff("IRS_AS_AST", fx.irs_ast());
+
+    auto model = fx.registries.models.create("HullWhite1F", Params{{"a", 0.1}, {"b", 0.03}, {"sigma", 0.01}, {"r0", 0.02}});
+    PricingContext pricing(Params{{"pricing_date", 0.0}, {"n_paths", 1.0}, {"n_steps", 1.0}, {"seed", 1.0}});
+    ExecutionContext execution(Params{{"backend", std::string("cpu")}, {"precision", std::string("fp64")}});
+
+    engine::PriceResult result = engine::price(
+        fx.registries, irs_as_payoff,
+        std::vector<engine::MeasureSpec>{
+            {"DV01", Params{{"bump", bump}}},                     // escalar, bump paralelo
+            {"DV01", Params{{"bump", bump}, {"bucketed", true}}}, // vector de deltas por pillar
+        },
+        *model, market, pricing, execution
+    );
+
+    ASSERT_EQ(result.size(), 2u);
+    ASSERT_TRUE(result[0].result.has_scalar);
+    ASSERT_FALSE(result[1].result.has_scalar);
+    ASSERT_EQ(result[1].result.times, market.pillars());
+    ASSERT_EQ(result[1].result.primary.size(), market.pillars().size());
+
+    double bucketed_sum = 0.0;
+    for (double delta : result[1].result.primary) bucketed_sum += delta;
+    EXPECT_NEAR(bucketed_sum, result[0].result.scalar, 1e-6);
+}
+
 } // namespace

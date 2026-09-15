@@ -116,4 +116,16 @@ private:
     double recovery_rate_;
 };
 
+// Curva paralela-bumpeada en `bump` (PLAN_GREEKS.md §4.2/Fase 3): mismos pillars/hazard_rate/
+// recovery_rate, cada zero_rate desplazado en `bump`. Único punto de esta operación en todo el
+// motor -- antes duplicada de forma idéntica en measure.cpp (Dv01Measure/IrSwapProduct) y
+// payoff/market_snapshot_bridge.cpp (Dv01Measure/PayoffProduct); `engine::greeks::compute_greek`
+// (RiskFactorKind::CurveParallel) la reutiliza igual que las dos anteriores.
+MarketSnapshot bump_market_parallel(const MarketSnapshot& market, double bump);
+
+// Curva con un ÚNICO pillar bumpeado en `bump`, el resto sin tocar (PLAN_GREEKS.md §4.2/Fase 3,
+// generaliza el "bucketed" de PLAN_REAPI.md §6 Fase 5 a cualquier consumidor de MarketSnapshot).
+// Lanza std::invalid_argument si `pillar_index >= market.pillars().size()`.
+MarketSnapshot bump_market_pillar(const MarketSnapshot& market, std::size_t pillar_index, double bump);
+
 } // namespace engine

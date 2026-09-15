@@ -133,30 +133,16 @@ double compute_npv(const MarketSnapshot& market, const IrSwapProduct& irs_produc
     return npv_from_market(market, irs_product, effective_fixed_rate(market, irs_product));
 }
 
-// Curva paralela-bumpeada en `bump` (PLAN_REAPI.md §6 Fase 4): mismos pillars/hazard_rate/
-// recovery_rate, cada zero_rate desplazado en `bump`.
-MarketSnapshot bump_curve(const MarketSnapshot& market, double bump) {
-    std::vector<double> bumped_rates = market.zero_rates();
-    for (double& z : bumped_rates) z += bump;
-    return MarketSnapshot(market.pillars(), std::move(bumped_rates), market.hazard_rate(), market.recovery_rate());
-}
-
 // DV01 = NPV(curva bumpeada en `bump`) - NPV(curva base), MISMO tipo fijo efectivo (fijado UNA
 // vez bajo la curva base: el contrato no se re-estructura al mover el mercado) en ambas
-// revaloraciones -- bump-and-reval, no AAD.
+// revaloraciones -- bump-and-reval, no AAD. `bump_market_parallel` (PLAN_GREEKS.md §4.2/Fase 3,
+// engine/market.hpp) es el único punto del motor que construye esta curva desplazada -- antes
+// duplicado aquí y en payoff/market_snapshot_bridge.cpp.
 double compute_dv01(const MarketSnapshot& market, const IrSwapProduct& irs_product, double bump) {
     double fixed_rate = effective_fixed_rate(market, irs_product);
     double base = npv_from_market(market, irs_product, fixed_rate);
-    double bumped = npv_from_market(bump_curve(market, bump), irs_product, fixed_rate);
+    double bumped = npv_from_market(bump_market_parallel(market, bump), irs_product, fixed_rate);
     return bumped - base;
-}
-
-// Curva con un ÚNICO pillar bumpeado en `bump` (PLAN_REAPI.md §6 Fase 5), el resto sin tocar
-// -- construida sobre bump_curve() de la Fase 4 (bump paralelo), aquí pillar a pillar.
-MarketSnapshot bump_pillar(const MarketSnapshot& market, std::size_t pillar_index, double bump) {
-    std::vector<double> bumped_rates = market.zero_rates();
-    bumped_rates[pillar_index] += bump;
-    return MarketSnapshot(market.pillars(), std::move(bumped_rates), market.hazard_rate(), market.recovery_rate());
 }
 
 // Bucketed DV01 (PLAN_REAPI.md §6 Fase 5): un delta por pillar, MISMO tipo fijo efectivo
@@ -172,7 +158,7 @@ std::vector<double> dv01_bucketed_from_market(const MarketSnapshot& market, cons
     std::vector<double> deltas;
     deltas.reserve(market.pillars().size());
     for (std::size_t i = 0; i < market.pillars().size(); ++i) {
-        double bumped = npv_from_market(bump_pillar(market, i, bump), irs_product, fixed_rate);
+        double bumped = npv_from_market(bump_market_pillar(market, i, bump), irs_product, fixed_rate);
         deltas.push_back(bumped - base);
     }
     return deltas;
@@ -257,7 +243,7 @@ std::vector<double> compute_npv_batch(const MarketSnapshot& market, const std::v
 std::vector<double> compute_dv01_batch(
     const MarketSnapshot& market, const std::vector<const IrSwapProduct*>& irs_products, double bump
 ) {
-    MarketSnapshot bumped_market = bump_curve(market, bump);
+    MarketSnapshot bumped_market = bump_market_parallel(market, bump);
     std::vector<double> results;
     results.reserve(irs_products.size());
     for (const IrSwapProduct* irs : irs_products) {
@@ -360,15 +346,25 @@ MeasureResult Dv01Measure::evaluate(
         }
         return result;
     }
-    // Misma rama genérica que PresentValueMeasure (ver ahí). Solo bump paralelo -- bucketed por
-    // pillar no está implementado para `PayoffProduct` en este incremento (el bridge no expone
-    // los pillars de la curva por separado), pedirlo lanza explícito en vez de ignorarlo.
+    // Misma rama genérica que PresentValueMeasure (ver ahí). `bucketed` (PLAN_GREEKS.md §11 Fase
+    // 3, generaliza la Fase 5 de PLAN_REAPI.md a PayoffProduct): un delta por pillar vía
+    // `bump_and_reval_pillar_from_market_snapshot`, misma convención unidireccional que el bump
+    // paralelo de abajo -- la suma de los deltas coincide con el DV01 paralelo (mismo argumento
+    // que `dv01_bucketed_from_market` para IrSwapProduct, verificado en
+    // test_price_many_mixed_products.cpp).
     if (const auto* payoff_product = dynamic_cast<const payoff::PayoffProduct*>(&product)) {
+        const auto& contract = payoff_product->payoff_program()->contract;
         if (bucketed_) {
-            throw std::invalid_argument("Dv01Measure: bucketed=true no soportado para PayoffProduct (Fase 8)");
+            result.times = market.pillars();
+            result.primary.reserve(market.pillars().size());
+            for (std::size_t i = 0; i < market.pillars().size(); ++i) {
+                result.primary.push_back(payoff::bump_and_reval_pillar_from_market_snapshot(contract, market, i, bump_));
+            }
+            result.has_scalar = false;
+            return result;
         }
         result.has_scalar = true;
-        result.scalar = payoff::bump_and_reval_from_market_snapshot(payoff_product->payoff_program()->contract, market, bump_);
+        result.scalar = payoff::bump_and_reval_from_market_snapshot(contract, market, bump_);
         return result;
     }
     throw std::invalid_argument("Dv01Measure: producto no soportado: " + product.type_name());
