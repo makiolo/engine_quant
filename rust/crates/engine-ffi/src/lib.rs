@@ -168,6 +168,26 @@ mod ffi {
         residual_greeks_vega: f64,
     }
 
+    /// Las cuatro derivadas de primer orden del NPV determinista de Hull-White 1F en una unica
+    /// pasada AAD reverse-mode (PLAN_GREEKS.md §5.2/§11 Fase 7), ver
+    /// `engine_core::api::HullWhite1FGreeks`/`irs_hull_white_npv_all_greeks`.
+    struct HullWhite1FGreeksResult {
+        d_a: f64,
+        d_b: f64,
+        d_sigma: f64,
+        d_r0: f64,
+    }
+
+    /// Equivalente de dos factores de `HullWhite1FGreeksResult` -- sin `d_rho` (`rho` no es un
+    /// tensor diferenciable en `HullWhite2F`, ver `engine_core::api::HullWhite2FGreeks`).
+    struct HullWhite2FGreeksResult {
+        d_a: f64,
+        d_b: f64,
+        d_sigma: f64,
+        d_eta: f64,
+        d_r0: f64,
+    }
+
     extern "Rust" {
         fn ping() -> f64;
 
@@ -261,6 +281,23 @@ mod ffi {
             payment_times: Vec<f64>,
             accruals: Vec<f64>,
         ) -> f64;
+
+        // Las cuatro derivadas de irs_hull_white_npv_delta_r0 (a/b/sigma/r0) en una UNICA pasada
+        // backward() (PLAN_GREEKS.md §5.2/§11 Fase 7), ver
+        // engine_core::api::irs_hull_white_npv_all_greeks. Generaliza el bridge de arriba, que
+        // sigue existiendo sin cambios (fachada retrocompatible, PLAN_GREEKS.md §10).
+        fn irs_hull_white_npv_all_greeks(
+            a: f64,
+            b: f64,
+            sigma: f64,
+            r0: f64,
+            notional: f64,
+            fixed_rate: f64,
+            use_par_rate: bool,
+            start: f64,
+            payment_times: Vec<f64>,
+            accruals: Vec<f64>,
+        ) -> HullWhite1FGreeksResult;
 
         // Lote homogéneo (PLAN.md §7.17/§7.19): las cinco medidas de ENGINE.PRICE vectorizadas
         // sobre N trades del mismo tipo/calendario, sin bucle escalar en la frontera C++ --
@@ -395,6 +432,23 @@ mod ffi {
             payment_times: Vec<f64>,
             accruals: Vec<f64>,
         ) -> f64;
+
+        // Equivalente 2F de irs_hull_white_npv_all_greeks -- a/b/sigma/eta/r0 en una unica
+        // pasada backward() (sin d_rho, ver HullWhite2FGreeksResult).
+        fn irs_hull_white_2f_npv_all_greeks(
+            a: f64,
+            b: f64,
+            sigma: f64,
+            eta: f64,
+            rho: f64,
+            r0: f64,
+            notional: f64,
+            fixed_rate: f64,
+            use_par_rate: bool,
+            start: f64,
+            payment_times: Vec<f64>,
+            accruals: Vec<f64>,
+        ) -> HullWhite2FGreeksResult;
 
         // Equivalentes de lote de las cuatro funciones 2F de arriba -- ver las versiones de 1
         // factor para el porqué de cada una (PLAN.md §7.19).
@@ -628,6 +682,30 @@ mod ffi {
             seed: u64,
         ) -> Result<PayoffSensitivityResult>;
 
+        // PLAN_GREEKS.md §5.1/§11 Fase 7: extension bajo P de payoff_sensitivity_gbm_q, mismo
+        // metodo pathwise (Dual), sin fallback bump-and-reval (GbmP nunca declara soporte de
+        // Exercise, ver engine_core::payoff::api_p::payoff_sensitivity_gbm_p) y sin descuento
+        // (mismo criterio que forecast_gbm_p). `greek` fuera de "spot"/"mu"/"volatility" es un
+        // error de preflight. Reutiliza PayoffSensitivityResult (misma forma, "value" es una
+        // derivada bajo P en vez de bajo Q).
+        #[allow(clippy::too_many_arguments)]
+        fn payoff_sensitivity_gbm_p(
+            spec_json: String,
+            observable: String,
+            greek: String,
+            s0: f64,
+            mu: f64,
+            sigma: f64,
+            n_paths: u64,
+            seed: u64,
+        ) -> Result<PayoffSensitivityResult>;
+
+        // PLAN_GREEKS.md §5.1/§11 Fase 7: `true` si spec_json contiene al menos un
+        // ContractOp::Exercise -- consulta de capacidad que engine::greeks::compute_greek (C++)
+        // usa ANTES de intentar pathwise, para reportar GreekResult::method_used correctamente
+        // (ver engine_core::payoff::payoff_contains_exercise para el porque).
+        fn payoff_contains_exercise(spec_json: String) -> Result<bool>;
+
         // PLAN_PRODUCTS.md §11/§12 Fase 11 (item pendiente): sintetiza una cobertura bajo GBM/Q
         // para target_spec_json con el universo instrument_specs_json -- ver
         // engine_core::payoff::synthesize_hedge_gbm_q/HedgeConstraints. Convenciones de
@@ -785,6 +863,25 @@ fn irs_hull_white_npv_delta_r0(
     engine_core::api::irs_hull_white_npv_delta_r0(
         a, b, sigma, r0, notional, fixed_rate, use_par_rate, start, payment_times, accruals,
     )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn irs_hull_white_npv_all_greeks(
+    a: f64,
+    b: f64,
+    sigma: f64,
+    r0: f64,
+    notional: f64,
+    fixed_rate: f64,
+    use_par_rate: bool,
+    start: f64,
+    payment_times: Vec<f64>,
+    accruals: Vec<f64>,
+) -> ffi::HullWhite1FGreeksResult {
+    let greeks = engine_core::api::irs_hull_white_npv_all_greeks(
+        a, b, sigma, r0, notional, fixed_rate, use_par_rate, start, payment_times, accruals,
+    );
+    ffi::HullWhite1FGreeksResult { d_a: greeks.d_a, d_b: greeks.d_b, d_sigma: greeks.d_sigma, d_r0: greeks.d_r0 }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -961,6 +1058,33 @@ fn irs_hull_white_2f_npv_delta_r0(
     engine_core::api::irs_hull_white_2f_npv_delta_r0(
         a, b, sigma, eta, rho, r0, notional, fixed_rate, use_par_rate, start, payment_times, accruals,
     )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn irs_hull_white_2f_npv_all_greeks(
+    a: f64,
+    b: f64,
+    sigma: f64,
+    eta: f64,
+    rho: f64,
+    r0: f64,
+    notional: f64,
+    fixed_rate: f64,
+    use_par_rate: bool,
+    start: f64,
+    payment_times: Vec<f64>,
+    accruals: Vec<f64>,
+) -> ffi::HullWhite2FGreeksResult {
+    let greeks = engine_core::api::irs_hull_white_2f_npv_all_greeks(
+        a, b, sigma, eta, rho, r0, notional, fixed_rate, use_par_rate, start, payment_times, accruals,
+    );
+    ffi::HullWhite2FGreeksResult {
+        d_a: greeks.d_a,
+        d_b: greeks.d_b,
+        d_sigma: greeks.d_sigma,
+        d_eta: greeks.d_eta,
+        d_r0: greeks.d_r0,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1300,6 +1424,31 @@ fn payoff_sensitivity_gbm_q(
         ci_high: estimate.ci_high,
         n_paths: estimate.n_paths,
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn payoff_sensitivity_gbm_p(
+    spec_json: String,
+    observable: String,
+    greek: String,
+    s0: f64,
+    mu: f64,
+    sigma: f64,
+    n_paths: u64,
+    seed: u64,
+) -> Result<ffi::PayoffSensitivityResult, String> {
+    let estimate = engine_core::payoff::payoff_sensitivity_gbm_p(&spec_json, &observable, &greek, s0, mu, sigma, n_paths, seed)?;
+    Ok(ffi::PayoffSensitivityResult {
+        value: estimate.mean,
+        std_error: estimate.std_error,
+        ci_low: estimate.ci_low,
+        ci_high: estimate.ci_high,
+        n_paths: estimate.n_paths,
+    })
+}
+
+fn payoff_contains_exercise(spec_json: String) -> Result<bool, String> {
+    engine_core::payoff::payoff_contains_exercise(&spec_json)
 }
 
 #[allow(clippy::too_many_arguments)]

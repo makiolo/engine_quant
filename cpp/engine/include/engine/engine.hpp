@@ -94,6 +94,22 @@ double irs_hull_white_npv_delta_r0(
     const std::vector<double>& payment_times, const std::vector<double>& accruals
 );
 
+// Las cuatro derivadas de primer orden del NPV determinista respecto de a/b/sigma/r0, en una
+// única pasada AAD reverse-mode (PLAN_GREEKS.md §5.2/§11 Fase 7) -- ver
+// `engine_core::api::irs_hull_white_npv_all_greeks`. Generaliza `irs_hull_white_npv_delta_r0`
+// (que sigue existiendo sin cambios, fachada retrocompatible).
+struct HullWhite1FGreeks {
+    double d_a = 0.0;
+    double d_b = 0.0;
+    double d_sigma = 0.0;
+    double d_r0 = 0.0;
+};
+HullWhite1FGreeks irs_hull_white_npv_all_greeks(
+    double a, double b, double sigma, double r0,
+    double notional, double fixed_rate, bool use_par_rate, double start,
+    const std::vector<double>& payment_times, const std::vector<double>& accruals
+);
+
 // Lote homogéneo (PLAN.md §7.17/§7.19): las mismas cuatro medidas de arriba vectorizadas sobre
 // N trades del mismo calendario -- notionals/fixed_rates son columnas (un valor por trade), sin
 // use_par_rate (cada trade del lote debe traer su fixed_rate explícito). irs_hull_white_npv_
@@ -159,6 +175,25 @@ double irs_hull_white_2f_npv(
     const std::vector<double>& payment_times, const std::vector<double>& accruals
 );
 double irs_hull_white_2f_npv_delta_r0(
+    double a, double b, double sigma, double eta, double rho, double r0,
+    double notional, double fixed_rate, bool use_par_rate, double start,
+    const std::vector<double>& payment_times, const std::vector<double>& accruals
+);
+
+// Equivalente 2F de HullWhite1FGreeks/irs_hull_white_npv_all_greeks -- SIN d_rho: `rho` no es
+// un tensor diferenciable en `HullWhite2F` (parámetro `f64` plano del lado Rust, ver
+// `engine_core::api::HullWhite2FGreeks`), así que no hay gradiente reverse-mode que leer para
+// él con la implementación actual del modelo. Sigue siendo una `RiskFactor::ModelParameter`
+// válida vía bump-and-reval (la tabla de capacidades de `engine::greeks` no declara
+// `aad_supported` para `rho`, ver greeks.cpp).
+struct HullWhite2FGreeks {
+    double d_a = 0.0;
+    double d_b = 0.0;
+    double d_sigma = 0.0;
+    double d_eta = 0.0;
+    double d_r0 = 0.0;
+};
+HullWhite2FGreeks irs_hull_white_2f_npv_all_greeks(
     double a, double b, double sigma, double eta, double rho, double r0,
     double notional, double fixed_rate, bool use_par_rate, double start,
     const std::vector<double>& payment_times, const std::vector<double>& accruals

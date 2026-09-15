@@ -4,8 +4,13 @@
 #include <cmath>
 #include <map>
 #include <memory>
+#include <set>
 #include <stdexcept>
 #include <variant>
+#include <vector>
+
+#include "engine/payoff/measures.hpp"
+#include "engine/payoff/payoff_product.hpp"
 
 namespace engine {
 namespace greeks {
@@ -16,9 +21,9 @@ namespace {
 // strings de RiskFactor usa "model.spot"/"model.rate"/"model.dividend_yield"/"model.volatility"
 // para Gbm, pero el propio modelo se construye/serializa con "s0"/"r"/"q"/"sigma" -- mismos
 // nombres que ya usa `PayoffSensitivityQMeasure::greek_`, criterio de aceptación de Fase 1: "Delta/
-// Vega/Rho ... coinciden ... con PayoffSensitivityQ existente"). Ningún otro modelo de esta fase
-// (HullWhite1F/2F, GBM_P) necesita esta traducción: sus claves de `to_params()` YA son el nombre
-// de RiskFactor que se quiere exponer (a/b/sigma/r0/eta/rho; s0/mu/sigma).
+// Vega/Rho ... coinciden ... con PayoffSensitivityQ existente"). HullWhite1F/2F no necesita esta
+// traducción: sus claves de `to_params()` YA son el nombre de RiskFactor que se quiere exponer
+// (a/b/sigma/r0/eta/rho).
 const std::map<std::string, std::string>& gbm_risk_factor_to_param_key() {
     static const std::map<std::string, std::string> aliases = {
         {"spot", "s0"}, {"rate", "r"}, {"dividend_yield", "q"}, {"volatility", "sigma"}
@@ -30,6 +35,23 @@ const std::map<std::string, std::string>& gbm_param_key_to_risk_factor() {
     static const std::map<std::string, std::string> aliases = {
         {"s0", "spot"}, {"r", "rate"}, {"q", "dividend_yield"}, {"sigma", "volatility"}
     };
+    return aliases;
+}
+
+// Equivalente de `gbm_risk_factor_to_param_key`/`gbm_param_key_to_risk_factor` para `GbmPModel`
+// (PLAN_GREEKS.md §11 Fase 7): mismo nombre "amigable" `volatility`/`spot` que Gbm/Q para los
+// parametros que comparten significado economico -- "mu" (drift fisico) no tiene equivalente en
+// Gbm/Q, se expone tal cual (coincide con su propia clave de `to_params()`, no necesita alias).
+// Mismas cadenas que acepta `engine_core::payoff::sensitivity::GbmPGreek::parse` del lado Rust --
+// deben coincidir para que `method=auto` pueda alternar entre bump-and-reval y pathwise sobre el
+// MISMO `RiskFactor` sin que el nombre cambie de significado segun el metodo.
+const std::map<std::string, std::string>& gbm_p_risk_factor_to_param_key() {
+    static const std::map<std::string, std::string> aliases = {{"spot", "s0"}, {"volatility", "sigma"}};
+    return aliases;
+}
+
+const std::map<std::string, std::string>& gbm_p_param_key_to_risk_factor() {
+    static const std::map<std::string, std::string> aliases = {{"s0", "spot"}, {"sigma", "volatility"}};
     return aliases;
 }
 
@@ -48,15 +70,27 @@ std::string resolve_model_parameter_key(const std::string& model_type, const std
         }
         return it->second;
     }
+    if (model_type == "GBM_P") {
+        const auto& aliases = gbm_p_risk_factor_to_param_key();
+        auto it = aliases.find(risk_factor_name);
+        if (it != aliases.end()) return it->second;
+        // "mu" (y cualquier otra clave de to_params() sin alias) se expone tal cual.
+        return risk_factor_name;
+    }
     return risk_factor_name;
 }
 
 // Inversa de resolve_model_parameter_key, usada por compute_all_greeks para enumerar candidatos
 // (PLAN_GREEKS.md §8.5, punto 1): una clave `double` de `to_params()` que no tenga alias
-// declarado se expone tal cual (caso HullWhite1F/2F, GBM_P).
+// declarado se expone tal cual (caso HullWhite1F/2F, y "mu" de GBM_P).
 std::string risk_factor_name_for_param_key(const std::string& model_type, const std::string& param_key) {
     if (model_type == "GBM") {
         const auto& aliases = gbm_param_key_to_risk_factor();
+        auto it = aliases.find(param_key);
+        if (it != aliases.end()) return it->second;
+    }
+    if (model_type == "GBM_P") {
+        const auto& aliases = gbm_p_param_key_to_risk_factor();
         auto it = aliases.find(param_key);
         if (it != aliases.end()) return it->second;
     }
@@ -216,6 +250,207 @@ void require_same_shape(const MeasureResult& a, const MeasureResult& b, const st
     }
 }
 
+// --- Tabla de capacidades (PLAN_GREEKS.md §5.4, Fase 7) --------------------------------------
+// Poblada explícitamente, nunca inferida por reflexión (mismo criterio que
+// `payoff::ModelCapabilities` en PLAN_PRODUCTS.md §6): cada entrada requiere un test diferencial
+// contra bump-and-reval en verde ANTES de añadirse aquí (§5.3), ver test_greeks.cpp
+// (`GreeksFase7Test`). Solo cubre `RiskFactorKind::ModelParameter`, `order=1`, sin
+// `cross_factor` -- Gamma/derivadas cruzadas siguen sirviéndose por bump-and-reval incluso para
+// un (modelo, métrica) que aquí aparezca (§5.2: "AAD de segundo orden... fuera de alcance").
+struct SpecializedCapability {
+    std::string model_type;
+    std::string metric_name;
+};
+
+bool capability_listed(
+    const std::vector<SpecializedCapability>& table, const std::string& model_type, const std::string& metric_name
+) {
+    for (const auto& c : table) {
+        if (c.model_type == model_type && c.metric_name == metric_name) return true;
+    }
+    return false;
+}
+
+// Pathwise (`Dual`, forward-mode): generaliza `payoff::sensitivity` (PLAN_GREEKS.md §5.1) a
+// `PayoffPriceQ` sobre `GbmModel` y, Fase 7, a `PayoffForecastP` sobre `GbmPModel`. Verificado
+// contra bump-and-reval en `GreeksFase7Test.PathwiseDeltaVegaRhoDividendYieldOfACallMatch...`/
+// `...UnderPMatch...` (test_greeks.cpp).
+const std::vector<SpecializedCapability>& pathwise_capabilities() {
+    static const std::vector<SpecializedCapability> table = {
+        {"GBM", "PayoffPriceQ"},
+        {"GBM_P", "PayoffForecastP"},
+    };
+    return table;
+}
+
+// AAD reverse-mode (`Autodiff<CpuBackend>` de Burn): generaliza `irs_hull_white_npv_delta_r0` a
+// las cuatro/cinco Greeks de una sola pasada `backward()` (PLAN_GREEKS.md §5.2), sobre la métrica
+// nueva `"HullWhiteModelNpv"` (measure.hpp) -- NO sobre `"PV"`, que desde PLAN_REAPI.md §6 Fase 4
+// descuenta por la curva observada y ya no depende del modelo (ver el doc-comment de
+// `HullWhiteModelNpvMeasure`). Verificado contra bump-and-reval en
+// `GreeksFase7Test.AadMatchesBumpAndRevalForHullWhite1F/2F` (test_greeks.cpp). `rho` de
+// HullWhite2F queda fuera (no es un tensor diferenciable en el modelo actual, ver
+// `engine::HullWhite2FGreeks`) -- sigue sirviéndose por bump-and-reval, nunca por AAD.
+const std::vector<SpecializedCapability>& aad_capabilities() {
+    static const std::vector<SpecializedCapability> table = {
+        {"HullWhite1F", "HullWhiteModelNpv"},
+        {"HullWhite2F", "HullWhiteModelNpv"},
+    };
+    return table;
+}
+
+// Métricas de tipo indicador/probabilidad (PLAN_GREEKS.md §4.5): la derivada pathwise EXACTA de
+// una función indicador es 0 en casi todo punto y no informa nada -- NUNCA declaran soporte
+// pathwise, ni aquí ni en ninguna fase futura sin cambiar de método (verosimilitud/Malliavin,
+// fuera de alcance, §15). Solo informativo/documental por ahora: `pathwise_capabilities()` ya no
+// lista ninguna de estas métricas, así que `try_pathwise` nunca las alcanza -- este conjunto
+// existe para que un mensaje de error explícito (`method=pathwise` pedido a mano) pueda nombrar
+// la razón exacta en vez de un genérico "no soportado".
+const std::set<std::string>& indicator_type_metrics() {
+    static const std::set<std::string> metrics = {"PayoffHitProbabilityQ", "PayoffHitProbabilityP"};
+    return metrics;
+}
+
+// Intenta la ruta pathwise para `request` (PLAN_GREEKS.md §5.1). Devuelve `std::nullopt` si la
+// combinación (modelo, métrica) no está en la tabla de capacidades O si el contrato de payoff
+// contiene `ContractOp::Exercise` (chequeo DINÁMICO, no estático -- un mismo `model_type`/
+// `metric_name` puede o no soportar pathwise según el contrato concreto, §5.1: "un contrato con
+// Exercise sigue cayendo al fallback bump-and-reval"). El llamante decide qué significa ese
+// `nullopt`: bajo `method=Auto`, caer a `BumpAndReval` en silencio (comportamiento correcto,
+// documentado); bajo `method=Pathwise` explícito, es un error -- por eso `try_pathwise` no lanza
+// nunca, solo informa "no aplica" y dejar que compute_greek decida el mensaje según el método
+// pedido.
+std::optional<GreekResult> try_pathwise(
+    const GreekRequest& request, const IModel& model, const IProduct& product, const PricingContext& pricing
+) {
+    const std::string model_type = model.type_name();
+    if (!capability_listed(pathwise_capabilities(), model_type, request.metric_name)) return std::nullopt;
+
+    const auto* payoff_product = dynamic_cast<const payoff::PayoffProduct*>(&product);
+    if (!payoff_product) return std::nullopt; // defensivo: la tabla solo lista modelos de PayoffProduct
+
+    if (payoff::payoff_contains_exercise(*payoff_product->payoff_program())) return std::nullopt;
+
+    payoff::SensitivityResult sensitivity;
+    if (model_type == "GBM") {
+        sensitivity = payoff::payoff_sensitivity_gbm(
+            *payoff_product->payoff_program(), dynamic_cast<const GbmModel&>(model), request.risk_factor.name,
+            pricing.n_paths(), pricing.seed()
+        );
+    } else if (model_type == "GBM_P") {
+        sensitivity = payoff::payoff_sensitivity_gbm_p(
+            *payoff_product->payoff_program(), dynamic_cast<const GbmPModel&>(model), request.risk_factor.name,
+            pricing.n_paths(), pricing.seed()
+        );
+    } else {
+        return std::nullopt; // inalcanzable dada pathwise_capabilities(), defensivo
+    }
+
+    GreekResult result;
+    result.has_scalar = true;
+    result.value = sensitivity.value;
+    result.std_error = sensitivity.std_error;
+    result.order = request.order;
+    result.risk_factor = request.risk_factor;
+    result.method_used = GreekMethod::Pathwise;
+    result.measure = sensitivity.measure;
+    return result;
+}
+
+// Intenta la ruta AAD reverse-mode (PLAN_GREEKS.md §5.2). A diferencia de `try_pathwise`, el
+// único chequeo dinámico es "¿el modelo declara este parámetro?" -- `resolve_model_parameter_key`
+// ya lanza un error explícito antes de llegar aquí si no (ver compute_greek), así que
+// `try_aad_reverse` solo devuelve `nullopt` cuando la combinación (modelo, métrica) no está en la
+// tabla de capacidades, o cuando el parámetro concreto pedido (p.ej. `rho` de HullWhite2F) no
+// tiene gradiente disponible aunque el (modelo, métrica) sí esté en la tabla.
+std::optional<GreekResult> try_aad_reverse(
+    const GreekRequest& request, const IModel& model, const IProduct& product
+) {
+    const std::string model_type = model.type_name();
+    if (!capability_listed(aad_capabilities(), model_type, request.metric_name)) return std::nullopt;
+
+    const auto* irs_product = dynamic_cast<const IrSwapProduct*>(&product);
+    if (!irs_product) return std::nullopt; // defensivo: la tabla solo lista IrSwapProduct
+
+    double value = 0.0;
+    if (model_type == "HullWhite1F") {
+        const auto& hw1f = dynamic_cast<const HullWhite1FModel&>(model);
+        HullWhite1FGreeks greeks = irs_hull_white_npv_all_greeks(
+            hw1f.a(), hw1f.b(), hw1f.sigma(), hw1f.r0(), irs_product->notional(), irs_product->fixed_rate(),
+            irs_product->use_par_rate(), irs_product->start(), irs_product->payment_times(), irs_product->accruals()
+        );
+        if (request.risk_factor.name == "a") value = greeks.d_a;
+        else if (request.risk_factor.name == "b") value = greeks.d_b;
+        else if (request.risk_factor.name == "sigma") value = greeks.d_sigma;
+        else if (request.risk_factor.name == "r0") value = greeks.d_r0;
+        else return std::nullopt; // inalcanzable: resolve_model_parameter_key ya validó el nombre
+    } else if (model_type == "HullWhite2F") {
+        const auto& hw2f = dynamic_cast<const HullWhite2FModel&>(model);
+        if (request.risk_factor.name == "rho") return std::nullopt; // §5.2: rho no es diferenciable via AAD
+        HullWhite2FGreeks greeks = irs_hull_white_2f_npv_all_greeks(
+            hw2f.a(), hw2f.b(), hw2f.sigma(), hw2f.eta(), hw2f.rho(), hw2f.r0(), irs_product->notional(),
+            irs_product->fixed_rate(), irs_product->use_par_rate(), irs_product->start(),
+            irs_product->payment_times(), irs_product->accruals()
+        );
+        if (request.risk_factor.name == "a") value = greeks.d_a;
+        else if (request.risk_factor.name == "b") value = greeks.d_b;
+        else if (request.risk_factor.name == "sigma") value = greeks.d_sigma;
+        else if (request.risk_factor.name == "eta") value = greeks.d_eta;
+        else if (request.risk_factor.name == "r0") value = greeks.d_r0;
+        else return std::nullopt; // inalcanzable: resolve_model_parameter_key ya validó el nombre
+    } else {
+        return std::nullopt; // inalcanzable dada aad_capabilities(), defensivo
+    }
+
+    GreekResult result;
+    result.has_scalar = true;
+    result.value = value;
+    result.order = request.order;
+    result.risk_factor = request.risk_factor;
+    result.method_used = GreekMethod::AadReverse;
+    result.measure = payoff::ProbabilityMeasure::DeterministicScenario;
+    return result;
+}
+
+// Mensaje explícito para `method='pathwise'` pedido a mano sobre una combinación no soportada
+// (§4.5/§5.1: nunca aproxima en silencio, siempre nombra la razón exacta).
+std::string pathwise_unsupported_reason(const GreekRequest& request, const IModel& model, const IProduct& product) {
+    if (indicator_type_metrics().count(request.metric_name) != 0) {
+        return "compute_greek: metodo 'pathwise' no soportado para '" + request.metric_name +
+               "' (metrica de tipo indicador/probabilidad -- su derivada pathwise exacta es 0 en casi todo "
+               "punto y no informa nada, PLAN_GREEKS.md §4.5; usa method='auto' o 'bump_and_reval')";
+    }
+    if (!capability_listed(pathwise_capabilities(), model.type_name(), request.metric_name)) {
+        return "compute_greek: metodo 'pathwise' no soportado para (modelo='" + model.type_name() +
+               "', metrica='" + request.metric_name + "') -- combinacion no verificada contra "
+               "bump-and-reval todavia (PLAN_GREEKS.md §5.3)";
+    }
+    const auto* payoff_product = dynamic_cast<const payoff::PayoffProduct*>(&product);
+    if (payoff_product != nullptr && payoff::payoff_contains_exercise(*payoff_product->payoff_program())) {
+        return "compute_greek: metodo 'pathwise' no soportado para un contrato con ContractOp::Exercise "
+               "(re-decidir Longstaff-Schwartz bajo el parametro perturbado no es pathwise-diferenciable, "
+               "PLAN_GREEKS.md §5.1; usa method='auto' o 'bump_and_reval')";
+    }
+    return "compute_greek: metodo 'pathwise' no soportado para (modelo='" + model.type_name() + "', metrica='" +
+           request.metric_name + "')";
+}
+
+// Equivalente de `pathwise_unsupported_reason` para `method='aad'`.
+std::string aad_unsupported_reason(const GreekRequest& request, const IModel& model) {
+    if (!capability_listed(aad_capabilities(), model.type_name(), request.metric_name)) {
+        return "compute_greek: metodo 'aad' no soportado para (modelo='" + model.type_name() + "', metrica='" +
+               request.metric_name + "') -- combinacion no verificada contra bump-and-reval todavia "
+               "(PLAN_GREEKS.md §5.3)";
+    }
+    if (model.type_name() == "HullWhite2F" && request.risk_factor.name == "rho") {
+        return "compute_greek: metodo 'aad' no soportado para 'model.rho' de HullWhite2F ('rho' no es un "
+               "tensor diferenciable en la implementacion actual del modelo, PLAN_GREEKS.md §5.2; usa "
+               "method='auto' o 'bump_and_reval')";
+    }
+    return "compute_greek: metodo 'aad' no soportado para (modelo='" + model.type_name() + "', metrica='" +
+           request.metric_name + "')";
+}
+
 } // namespace
 
 RiskFactor parse_risk_factor(const std::string& text) {
@@ -360,11 +595,21 @@ GreekResult compute_greek(
         }
     }
     if (request.method == GreekMethod::Pathwise || request.method == GreekMethod::AadReverse) {
-        throw std::invalid_argument(
-            "compute_greek: metodo '" + to_string(request.method) +
-            "' no soportado todavia (Fase 1 solo implementa BumpAndReval; pedir 'auto' o "
-            "'bump_and_reval')"
-        );
+        // PLAN_GREEKS.md §5.4: las rutas especializadas SOLO cubren order=1 sin cross_factor
+        // sobre un ModelParameter -- pedirlas explicitamente fuera de ese alcance es un error
+        // inmediato (nunca se degrada en silencio a BumpAndReval).
+        if (request.risk_factor.kind != RiskFactorKind::ModelParameter) {
+            throw std::invalid_argument(
+                "compute_greek: metodo '" + to_string(request.method) + "' solo soporta "
+                "RiskFactorKind::ModelParameter (pedido: '" + to_string(request.risk_factor) + "')"
+            );
+        }
+        if (request.order.order != 1 || request.order.cross_factor.has_value()) {
+            throw std::invalid_argument(
+                "compute_greek: metodo '" + to_string(request.method) + "' solo soporta order=1 sin "
+                "cross_factor (Gamma/derivadas cruzadas se sirven por bump-and-reval, PLAN_GREEKS.md §5.2)"
+            );
+        }
     }
 
     auto metric = registries.measures.create(request.metric_name, request.metric_params);
@@ -408,6 +653,32 @@ GreekResult compute_greek(
     }
 
     const double h1 = resolve_bump(model, market, request.risk_factor, request.bump_override);
+
+    // Rutas especializadas (PLAN_GREEKS.md §5, Fase 7): solo order=1 sin cross_factor sobre un
+    // ModelParameter -- la validacion de arriba ya garantiza esa forma para method=Pathwise/
+    // AadReverse explicito; para method=Auto se comprueba aqui mismo antes de intentar nada.
+    if (request.order.order == 1 && !request.order.cross_factor.has_value() &&
+        request.risk_factor.kind == RiskFactorKind::ModelParameter) {
+        if (request.method == GreekMethod::Pathwise) {
+            std::optional<GreekResult> specialized = try_pathwise(request, model, product, pricing);
+            if (specialized.has_value()) return *specialized;
+            throw std::invalid_argument(pathwise_unsupported_reason(request, model, product));
+        }
+        if (request.method == GreekMethod::AadReverse) {
+            std::optional<GreekResult> specialized = try_aad_reverse(request, model, product);
+            if (specialized.has_value()) return *specialized;
+            throw std::invalid_argument(aad_unsupported_reason(request, model));
+        }
+        if (request.method == GreekMethod::Auto) {
+            // §3.3: la especializacion mas rapida VERIFICADA si existe (pathwise antes que AAD,
+            // sin que eso implique una prioridad economica -- hoy nunca coinciden (modelo,
+            // metrica) en ambas tablas a la vez); si ninguna aplica, cae a BumpAndReval sin que
+            // el llamante lo note salvo por GreekResult::method_used.
+            std::optional<GreekResult> specialized = try_pathwise(request, model, product, pricing);
+            if (!specialized.has_value()) specialized = try_aad_reverse(request, model, product);
+            if (specialized.has_value()) return *specialized;
+        }
+    }
 
     if (request.order.cross_factor.has_value()) {
         // Derivada cruzada de primer orden (Vanna, cross-gamma -- PLAN_GREEKS.md §3.2/§11 Fase 6):

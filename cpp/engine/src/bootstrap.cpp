@@ -17,6 +17,7 @@ void register_builtins(Registries& registries) {
     registries.measures.register_type<ExposureProfileMeasure>("ExposureProfile");
     registries.measures.register_type<UnilateralCvaMeasure>("UnilateralCVA");
     registries.measures.register_type<PresentValueMeasure>("PV");
+    registries.measures.register_type<HullWhiteModelNpvMeasure>("HullWhiteModelNpv");
     registries.measures.register_type<Dv01Measure>("DV01");
     registries.measures.register_type<PayoffPriceQMeasure>("PayoffPriceQ");
     registries.measures.register_type<PayoffExerciseQMeasure>("PayoffExerciseQ");

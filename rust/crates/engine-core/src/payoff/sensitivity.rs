@@ -73,6 +73,33 @@ impl GbmGreek {
     }
 }
 
+/// Los tres parametros de `models::gbm_p::GbmP` (PLAN_GREEKS.md §11 Fase 7: "extender [el metodo
+/// pathwise] a GbmP -- mismo mecanismo, mismos 3 parametros s0/mu/sigma, para PayoffForecastP").
+/// Enum separado de `GbmGreek` (no una union de 4+3 variantes con algunas invalidas segun el
+/// modelo) porque Gbm/Q y GbmP/P son modelos distintos con parametros distintos -- unificarlos en
+/// un solo tipo perderia la garantia en tiempo de compilacion de "esta variante no aplica a este
+/// modelo" a cambio de nada (la traduccion real a un `RiskFactor::ModelParameter` unico ya ocurre
+/// en la frontera de `engine::greeks::compute_greek`, ver greeks.cpp).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum GbmPGreek {
+    Spot,
+    Drift,
+    Volatility,
+}
+
+impl GbmPGreek {
+    pub(crate) fn parse(name: &str) -> Result<Self, String> {
+        match name {
+            "spot" => Ok(GbmPGreek::Spot),
+            "mu" => Ok(GbmPGreek::Drift),
+            "volatility" => Ok(GbmPGreek::Volatility),
+            other => Err(format!(
+                "payoff: greek '{other}' desconocido bajo P (valores soportados: 'spot', 'mu', 'volatility')"
+            )),
+        }
+    }
+}
+
 /// `true` si `payoff` contiene al menos un `ContractOp::Exercise` -- puerta de entrada de
 /// `payoff::api::payoff_sensitivity_gbm_q` para decidir entre la pasada pathwise de este modulo y
 /// el fallback bump-and-reval (ver el doc-comment del modulo).
@@ -104,6 +131,22 @@ impl<'a> GbmDualPath<'a> {
             .map(|(&t, &s)| ((s / s0).ln() - drift_no_diffusion * t) / sigma)
             .collect();
         Self { times, w, s0, r, q, sigma, greek }
+    }
+
+    /// Equivalente de `new` bajo P (PLAN_GREEKS.md §11 Fase 7): `GbmP` tiene drift fisico `mu` en
+    /// vez de `r-q`, sin dividendo -- se reutiliza el mismo campo interno `r` para `mu` y se fija
+    /// `q=0.0` (el Browniano realizado recuperado en `new` solo depende de `r-q` como UNA
+    /// cantidad, `drift_no_diffusion`, nunca de `r`/`q` por separado, asi que la sustitucion es
+    /// exacta). `GbmPGreek::Drift` mapea al slot interno `GbmGreek::Rate` -- mismo mecanismo de
+    /// `Dual`, distinto significado economico (nunca se llama a `rate_dual()` desde el lado P,
+    /// que no descuenta, ver el doc-comment del modulo `api_p`).
+    pub(crate) fn new_p(times: &'a [f64], values: &[f64], s0: f64, mu: f64, sigma: f64, greek: GbmPGreek) -> Self {
+        let internal_greek = match greek {
+            GbmPGreek::Spot => GbmGreek::Spot,
+            GbmPGreek::Drift => GbmGreek::Rate,
+            GbmPGreek::Volatility => GbmGreek::Volatility,
+        };
+        Self::new(times, values, s0, mu, 0.0, sigma, internal_greek)
     }
 
     fn param_duals(&self) -> (Dual, Dual, Dual, Dual) {
@@ -402,5 +445,29 @@ mod tests {
         assert_eq!(GbmGreek::parse("dividend_yield").unwrap(), GbmGreek::DividendYield);
         assert_eq!(GbmGreek::parse("volatility").unwrap(), GbmGreek::Volatility);
         assert!(GbmGreek::parse("theta").is_err());
+    }
+
+    #[test]
+    fn p_greek_parse_accepts_the_three_gbm_p_parameters_and_rejects_others() {
+        assert_eq!(GbmPGreek::parse("spot").unwrap(), GbmPGreek::Spot);
+        assert_eq!(GbmPGreek::parse("mu").unwrap(), GbmPGreek::Drift);
+        assert_eq!(GbmPGreek::parse("volatility").unwrap(), GbmPGreek::Volatility);
+        assert!(GbmPGreek::parse("rate").is_err());
+        assert!(GbmPGreek::parse("dividend_yield").is_err());
+    }
+
+    #[test]
+    fn gbm_dual_path_new_p_recovers_s0_derivative_matching_finite_difference() {
+        // Misma identidad que gbm_dual_path_recovers_s0_derivative_matching_finite_difference,
+        // pero via el constructor bajo P (drift fisico mu, sin dividendo).
+        let (s0, mu, sigma, t) = (100.0, 0.08, 0.2, 1.0);
+        let times = [t];
+        let s_t = 121.0;
+        let values = [s_t];
+        let path = GbmDualPath::new_p(&times, &values, s0, mu, sigma, GbmPGreek::Spot);
+        let dual = path.value_at(0, t);
+        assert!((dual.value - s_t).abs() < 1e-9);
+        let expected_deriv = s_t / s0;
+        assert!((dual.deriv - expected_deriv).abs() < 1e-9, "deriv={} expected={}", dual.deriv, expected_deriv);
     }
 }

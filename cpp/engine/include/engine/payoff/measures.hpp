@@ -314,6 +314,26 @@ SensitivityResult payoff_sensitivity_gbm(
     std::uint64_t seed
 );
 
+// Extension bajo P de `payoff_sensitivity_gbm` (PLAN_GREEKS.md §5.1/§11 Fase 7): `greek` en
+// {"spot", "mu", "volatility"} (los tres parametros de `GbmPModel`, ver
+// `engine_core::payoff::sensitivity::GbmPGreek`), sin descuento (misma convencion que
+// `forecast_gbm_p`: `value` es la derivada del cashflow NO descontado). Mismo preflight que
+// `forecast_gbm_p` (capacidades PhysicalP); un contrato con `ContractOp::Exercise` es rechazado
+// (Rust, `payoff_sensitivity_gbm_p`) porque `GbmPModel::capabilities()` nunca declara
+// `supports_early_exercise_regression` -- no hay fallback bump-and-reval bajo P (a diferencia de
+// Q, ver §5.1).
+SensitivityResult payoff_sensitivity_gbm_p(
+    const PayoffProgram& program, const GbmPModel& model, const std::string& greek, std::uint64_t n_paths,
+    std::uint64_t seed
+);
+
+// `true` si `program` contiene al menos un `ContractOp::Exercise` (PLAN_GREEKS.md §5.1/§11 Fase
+// 7): consulta de capacidad usada por `engine::greeks::compute_greek` para decidir, ANTES de
+// llamar a `payoff_sensitivity_gbm`, si esa llamada resolvera pathwise o el fallback
+// bump-and-reval interno de Rust -- sin este chequeo `GreekResult::method_used` podria reportar
+// "Pathwise" incluso cuando Rust decidio bump-and-reval por su cuenta.
+bool payoff_contains_exercise(const PayoffProgram& program);
+
 // Restricciones opcionales sobre los pesos de `synthesize_hedge_gbm` (PLAN_PRODUCTS.md §12
 // Fase 11, items pendientes "liquidez" y "restricciones de tipo LP/QP (posiciones
 // minimas/maximas)"). Espejo de `engine_core::payoff::HedgeConstraints` -- ver su doc-comment en

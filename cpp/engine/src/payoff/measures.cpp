@@ -393,6 +393,39 @@ SensitivityResult payoff_sensitivity_gbm(
     }
 }
 
+SensitivityResult payoff_sensitivity_gbm_p(
+    const PayoffProgram& program, const GbmPModel& model, const std::string& greek, std::uint64_t n_paths,
+    std::uint64_t seed
+) {
+    preflight_gbm_capabilities(program, model.capabilities(), ProbabilityMeasure::PhysicalP);
+
+    std::string spec_json = CanonicalVisitor::to_json(program.id, program.contract);
+    try {
+        ffi::PayoffSensitivityResult result = ffi::payoff_sensitivity_gbm_p(
+            spec_json, model.observable().value, greek, model.s0(), model.mu(), model.sigma(), n_paths, seed
+        );
+        SensitivityResult out;
+        out.value = result.value;
+        out.std_error = result.std_error;
+        out.ci_low = result.ci_low;
+        out.ci_high = result.ci_high;
+        out.n_paths = result.n_paths;
+        out.measure = ProbabilityMeasure::PhysicalP;
+        return out;
+    } catch (const std::exception& e) {
+        throw EvaluationError(e.what(), NodePath::root());
+    }
+}
+
+bool payoff_contains_exercise(const PayoffProgram& program) {
+    std::string spec_json = CanonicalVisitor::to_json(program.id, program.contract);
+    try {
+        return ffi::payoff_contains_exercise(spec_json);
+    } catch (const std::exception& e) {
+        throw EvaluationError(e.what(), NodePath::root());
+    }
+}
+
 HedgeResult synthesize_hedge_gbm(
     const PayoffProgram& target, const std::vector<const PayoffProgram*>& instruments, const GbmModel& model,
     const std::optional<std::vector<double>>& instrument_prices, double ridge, const HedgeConstraints& constraints,

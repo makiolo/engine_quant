@@ -220,14 +220,22 @@ TEST(GreeksFase1Test, DividendYieldSensitivityMatchesPayoffSensitivityQ) {
 }
 
 TEST(GreeksFase1Test, GreekResultReportsBumpUsedMethodUsedAndInferredMeasure) {
+    // Actualizado en Fase 7: (GBM, "PayoffPriceQ") ya esta en la tabla de capacidades pathwise
+    // (greeks.cpp), asi que `method=auto` sobre "spot" ya NO resuelve por BumpAndReval (ver
+    // GreeksFase7Test.AutoSelectsPathwiseForPayoffPriceQOnGbmWhenTheContractHasNoExercise, mas
+    // abajo, para ese caso). Este test sigue verificando el reporte de `bump_used`/`method_used`
+    // para BumpAndReval, ahora pidiendolo EXPLICITO en vez de depender de que Auto no encuentre
+    // una especializacion.
     Registries registries;
     register_builtins(registries);
     const pf::ObservableId spot{"EQ.SPOT.XYZ"};
     pf::PayoffProduct product("CALL", european_call(spot, 100.0, 1.0));
     engine::GbmModel model = make_gbm_q(100.0, 0.05, 0.0, 0.2, spot.value);
 
+    GreekRequest request = payoff_price_q_request("spot");
+    request.method = GreekMethod::BumpAndReval;
     engine::greeks::GreekResult result = engine::greeks::compute_greek(
-        registries, payoff_price_q_request("spot"), model, product, flat_market(), pricing_context(1'000, 7), cpu_execution()
+        registries, request, model, product, flat_market(), pricing_context(1'000, 7), cpu_execution()
     );
 
     EXPECT_EQ(result.method_used, GreekMethod::BumpAndReval);
@@ -426,7 +434,13 @@ TEST(GreeksFase1Test, ComputeGreekRejectsAnOrderOutsideOneOrTwo) {
     );
 }
 
-TEST(GreeksFase1Test, ComputeGreekRejectsPathwiseMethodExplicitly) {
+// Renombrado/actualizado en Fase 7 (PLAN_GREEKS.md §11): (GBM, "PayoffPriceQ") ya es una
+// combinacion pathwise VERIFICADA (ver pathwise_capabilities() en greeks.cpp) -- pedir
+// method=pathwise sobre ella ya NO lanza, la tabla de capacidades ahora la sirve. La forma "pedir
+// method=pathwise sobre una combinacion no soportada lanza explicito" sigue vigente, solo que
+// ahora se prueba sobre una combinacion que de verdad no esta en la tabla (ver
+// GreeksFase7Test.ExplicitPathwiseRejectsAnUnverifiedCombination, mas abajo).
+TEST(GreeksFase1Test, ComputeGreekAcceptsPathwiseMethodExplicitlyForAVerifiedCombination) {
     Registries registries;
     register_builtins(registries);
     const pf::ObservableId spot{"EQ.SPOT.XYZ"};
@@ -436,10 +450,11 @@ TEST(GreeksFase1Test, ComputeGreekRejectsPathwiseMethodExplicitly) {
     GreekRequest request = payoff_price_q_request("spot");
     request.method = GreekMethod::Pathwise;
 
-    EXPECT_THROW(
-        engine::greeks::compute_greek(registries, request, model, product, flat_market(), pricing_context(1'000, 7), cpu_execution()),
-        std::invalid_argument
+    engine::greeks::GreekResult result = engine::greeks::compute_greek(
+        registries, request, model, product, flat_market(), pricing_context(1'000, 7), cpu_execution()
     );
+    EXPECT_EQ(result.method_used, GreekMethod::Pathwise);
+    EXPECT_FALSE(result.bump_used.has_value());
 }
 
 // Actualizado en Fase 5: los cinco RiskFactorKind del catálogo (§3.1) ya están soportados --
@@ -1303,4 +1318,378 @@ TEST(GreeksFase6Test, GreekMeasureReachesGammaThroughEnginePrice) {
     ASSERT_EQ(result.size(), 1u);
     ASSERT_TRUE(result[0].result.has_scalar);
     EXPECT_GT(result[0].result.scalar, 0.0);
+}
+
+// Fase 7 de PLAN_GREEKS.md (§11): rutas especializadas verificadas -- pathwise extendido
+// (GbmGreek -> RiskFactor unificado, mas GbmP para "PayoffForecastP") y AAD reverse-mode
+// (`irs_hull_white_npv_all_greeks`/`_2f_`, sobre la metrica nueva "HullWhiteModelNpv" -- "PV" NO
+// depende del modelo desde PLAN_REAPI.md §6 Fase 4, ver el doc-comment de
+// `HullWhiteModelNpvMeasure`). Criterio de aceptacion explicito: `method=auto` elige pathwise/AAD
+// cuando existe y coincide con BumpAndReval dentro de tolerancia; pedir `method=pathwise` sobre
+// `PayoffHitProbabilityQ` (u otra combinacion no verificada) falla explicito, nunca aproxima en
+// silencio.
+
+engine::HullWhite2FModel make_hull_white_2f() {
+    return engine::HullWhite2FModel(
+        Params{{"a", 0.1}, {"b", 0.2}, {"sigma", 0.01}, {"eta", 0.012}, {"rho", -0.7}, {"r0", 0.03}}
+    );
+}
+
+pf::ContractPtr bermuda_put(
+    const pf::ObservableId& spot, double strike, double maturity, const std::vector<pf::TimePoint>& dates
+) {
+    pf::ScalarExprPtr exercise_value = pf::maximum(pf::sub(pf::constant(strike), pf::current(spot)), pf::constant(0.0));
+    return pf::exercise(pf::EventId{"EX"}, dates, exercise_value, european_call(spot, strike, maturity));
+}
+
+TEST(GreeksFase7Test, AutoSelectsPathwiseForPayoffPriceQOnGbmWhenTheContractHasNoExercise) {
+    Registries registries;
+    register_builtins(registries);
+    const pf::ObservableId spot{"EQ.SPOT.XYZ"};
+    pf::PayoffProduct product("CALL", european_call(spot, 100.0, 1.0));
+    engine::GbmModel model = make_gbm_q(100.0, 0.05, 0.0, 0.2, spot.value);
+
+    engine::greeks::GreekResult result = engine::greeks::compute_greek(
+        registries, payoff_price_q_request("spot"), model, product, flat_market(), pricing_context(50'000, 7),
+        cpu_execution()
+    );
+
+    EXPECT_EQ(result.method_used, GreekMethod::Pathwise);
+    EXPECT_FALSE(result.bump_used.has_value());
+    EXPECT_TRUE(result.std_error.has_value()); // McEstimate::std_error real, a diferencia de BumpAndReval
+    EXPECT_EQ(result.measure, pf::ProbabilityMeasure::RiskNeutralQ);
+}
+
+TEST(GreeksFase7Test, PathwiseMatchesExplicitBumpAndRevalForVegaRhoDividendYield) {
+    Registries registries;
+    register_builtins(registries);
+    const pf::ObservableId spot{"EQ.SPOT.XYZ"};
+    pf::PayoffProduct product("CALL", european_call(spot, 100.0, 1.0));
+    engine::GbmModel model = make_gbm_q(100.0, 0.05, 0.0, 0.2, spot.value);
+
+    for (const auto& [risk_factor_name, tolerance] :
+         std::vector<std::pair<std::string, double>>{{"volatility", 0.5}, {"rate", 1.0}, {"dividend_yield", 1.0}}) {
+        GreekRequest bump_request = payoff_price_q_request(risk_factor_name);
+        bump_request.method = GreekMethod::BumpAndReval;
+        engine::greeks::GreekResult bump_and_reval = engine::greeks::compute_greek(
+            registries, bump_request, model, product, flat_market(), pricing_context(200'000, 7), cpu_execution()
+        );
+        engine::greeks::GreekResult pathwise = engine::greeks::compute_greek(
+            registries, payoff_price_q_request(risk_factor_name), model, product, flat_market(),
+            pricing_context(200'000, 7), cpu_execution()
+        );
+
+        EXPECT_EQ(pathwise.method_used, GreekMethod::Pathwise);
+        EXPECT_EQ(bump_and_reval.method_used, GreekMethod::BumpAndReval);
+        EXPECT_NEAR(pathwise.value, bump_and_reval.value, tolerance)
+            << "risk_factor=" << risk_factor_name << " pathwise=" << pathwise.value
+            << " bump_and_reval=" << bump_and_reval.value;
+    }
+}
+
+TEST(GreeksFase7Test, AutoFallsBackToBumpAndRevalForAContractWithExercise) {
+    Registries registries;
+    register_builtins(registries);
+    const pf::ObservableId spot{"EQ.SPOT.XYZ"};
+    pf::PayoffProduct product("BERMUDA_PUT", bermuda_put(spot, 100.0, 1.0, {tp(0.25), tp(0.5), tp(0.75)}));
+    engine::GbmModel model = make_gbm_q(100.0, 0.05, 0.0, 0.2, spot.value);
+
+    engine::greeks::GreekResult result = engine::greeks::compute_greek(
+        registries, payoff_price_q_request("spot"), model, product, flat_market(), pricing_context(20'000, 41),
+        cpu_execution()
+    );
+
+    EXPECT_EQ(result.method_used, GreekMethod::BumpAndReval)
+        << "un contrato con Exercise cae al fallback bump-and-reval, PLAN_GREEKS.md §5.1";
+    ASSERT_TRUE(result.bump_used.has_value());
+}
+
+TEST(GreeksFase7Test, ExplicitPathwiseRejectsAContractWithExercise) {
+    Registries registries;
+    register_builtins(registries);
+    const pf::ObservableId spot{"EQ.SPOT.XYZ"};
+    pf::PayoffProduct product("BERMUDA_PUT", bermuda_put(spot, 100.0, 1.0, {tp(0.25), tp(0.5), tp(0.75)}));
+    engine::GbmModel model = make_gbm_q(100.0, 0.05, 0.0, 0.2, spot.value);
+
+    GreekRequest request = payoff_price_q_request("spot");
+    request.method = GreekMethod::Pathwise;
+
+    try {
+        engine::greeks::compute_greek(
+            registries, request, model, product, flat_market(), pricing_context(20'000, 41), cpu_execution()
+        );
+        FAIL() << "se esperaba std::invalid_argument";
+    } catch (const std::invalid_argument& e) {
+        EXPECT_NE(std::string(e.what()).find("Exercise"), std::string::npos) << e.what();
+    }
+}
+
+TEST(GreeksFase7Test, ExplicitPathwiseRejectsAnIndicatorMetric) {
+    Registries registries;
+    register_builtins(registries);
+    const pf::ObservableId spot{"EQ.SPOT.XYZ"};
+    pf::PayoffProduct product(
+        "UP_AND_IN", up_and_in_call(spot, 120.0, 100.0, 1.0, {tp(0.25), tp(0.5), tp(0.75), tp(1.0)})
+    );
+    engine::GbmModel model = make_gbm_q(100.0, 0.05, 0.0, 0.2, spot.value);
+
+    GreekRequest request;
+    request.metric_name = "PayoffHitProbabilityQ";
+    request.metric_params = Params{{"event", std::string("UI")}};
+    request.risk_factor = RiskFactor{RiskFactorKind::ModelParameter, "model", "volatility", std::nullopt};
+    request.order = GreekOrder{1, std::nullopt};
+    request.method = GreekMethod::Pathwise;
+
+    try {
+        engine::greeks::compute_greek(
+            registries, request, model, product, flat_market(), pricing_context(20'000, 7), cpu_execution()
+        );
+        FAIL() << "se esperaba std::invalid_argument";
+    } catch (const std::invalid_argument& e) {
+        EXPECT_NE(std::string(e.what()).find("indicador"), std::string::npos) << e.what();
+    }
+}
+
+TEST(GreeksFase7Test, ExplicitPathwiseRejectsAnUnverifiedCombination) {
+    Registries registries;
+    register_builtins(registries);
+    engine::IrSwapProduct swap = make_irs(1'000'000.0, 0.02);
+    engine::HullWhite1FModel model = make_hull_white();
+
+    GreekRequest request;
+    request.metric_name = "PV";
+    request.risk_factor = RiskFactor{RiskFactorKind::ModelParameter, "model", "r0", std::nullopt};
+    request.order = GreekOrder{1, std::nullopt};
+    request.method = GreekMethod::Pathwise;
+
+    try {
+        engine::greeks::compute_greek(
+            registries, request, model, swap, upward_sloping_market(), pricing_context(1'000, 7), cpu_execution()
+        );
+        FAIL() << "se esperaba std::invalid_argument";
+    } catch (const std::invalid_argument& e) {
+        EXPECT_NE(std::string(e.what()).find("no verificada"), std::string::npos) << e.what();
+    }
+}
+
+TEST(GreeksFase7Test, PathwiseSpotDeltaUnderPMatchesExplicitBumpAndRevalForForecastP) {
+    Registries registries;
+    register_builtins(registries);
+    const pf::ObservableId spot{"EQ.SPOT.XYZ"};
+    pf::PayoffProduct product("CALL", european_call(spot, 100.0, 1.0));
+    engine::GbmPModel model = make_gbm_p(100.0, 0.08, 0.2, spot.value);
+
+    GreekRequest request;
+    request.metric_name = "PayoffForecastP";
+    request.risk_factor = RiskFactor{RiskFactorKind::ModelParameter, "model", "spot", std::nullopt};
+    request.order = GreekOrder{1, std::nullopt};
+    request.method = GreekMethod::Auto;
+
+    engine::greeks::GreekResult pathwise = engine::greeks::compute_greek(
+        registries, request, model, product, flat_market(), pricing_context(200'000, 7), cpu_execution()
+    );
+    EXPECT_EQ(pathwise.method_used, GreekMethod::Pathwise);
+    EXPECT_EQ(pathwise.measure, pf::ProbabilityMeasure::PhysicalP);
+
+    GreekRequest bump_request = request;
+    bump_request.method = GreekMethod::BumpAndReval;
+    engine::greeks::GreekResult bump_and_reval = engine::greeks::compute_greek(
+        registries, bump_request, model, product, flat_market(), pricing_context(200'000, 7), cpu_execution()
+    );
+    EXPECT_EQ(bump_and_reval.method_used, GreekMethod::BumpAndReval);
+
+    EXPECT_NEAR(pathwise.value, bump_and_reval.value, 0.05)
+        << "pathwise=" << pathwise.value << " bump_and_reval=" << bump_and_reval.value;
+}
+
+TEST(GreeksFase7Test, HullWhiteModelNpvMeasureMatchesTheFreeFunctions) {
+    Registries registries;
+    register_builtins(registries);
+    engine::IrSwapProduct swap = make_irs(1'000'000.0, 0.02);
+
+    auto measure = registries.measures.create("HullWhiteModelNpv", Params{});
+
+    engine::HullWhite1FModel hw1f = make_hull_white();
+    engine::MeasureResult result_1f =
+        measure->evaluate(hw1f, swap, upward_sloping_market(), pricing_context(1'000, 7), cpu_execution());
+    ASSERT_TRUE(result_1f.has_scalar);
+    double expected_1f = engine::irs_hull_white_npv(
+        hw1f.a(), hw1f.b(), hw1f.sigma(), hw1f.r0(), swap.notional(), swap.fixed_rate(), swap.use_par_rate(),
+        swap.start(), swap.payment_times(), swap.accruals()
+    );
+    EXPECT_DOUBLE_EQ(result_1f.scalar, expected_1f);
+
+    engine::HullWhite2FModel hw2f = make_hull_white_2f();
+    engine::MeasureResult result_2f =
+        measure->evaluate(hw2f, swap, upward_sloping_market(), pricing_context(1'000, 7), cpu_execution());
+    ASSERT_TRUE(result_2f.has_scalar);
+    double expected_2f = engine::irs_hull_white_2f_npv(
+        hw2f.a(), hw2f.b(), hw2f.sigma(), hw2f.eta(), hw2f.rho(), hw2f.r0(), swap.notional(), swap.fixed_rate(),
+        swap.use_par_rate(), swap.start(), swap.payment_times(), swap.accruals()
+    );
+    EXPECT_DOUBLE_EQ(result_2f.scalar, expected_2f);
+}
+
+TEST(GreeksFase7Test, AadMatchesExplicitBumpAndRevalForHullWhite1FModelNpvAllParameters) {
+    Registries registries;
+    register_builtins(registries);
+    engine::IrSwapProduct swap = make_irs(1'000'000.0, 0.02);
+    engine::HullWhite1FModel model = make_hull_white();
+
+    for (const std::string& risk_factor_name : {"a", "b", "sigma", "r0"}) {
+        GreekRequest request;
+        request.metric_name = "HullWhiteModelNpv";
+        request.risk_factor = RiskFactor{RiskFactorKind::ModelParameter, "model", risk_factor_name, std::nullopt};
+        request.order = GreekOrder{1, std::nullopt};
+        request.method = GreekMethod::Auto;
+
+        engine::greeks::GreekResult aad = engine::greeks::compute_greek(
+            registries, request, model, swap, upward_sloping_market(), pricing_context(1'000, 7), cpu_execution()
+        );
+        EXPECT_EQ(aad.method_used, GreekMethod::AadReverse) << "risk_factor=" << risk_factor_name;
+
+        GreekRequest bump_request = request;
+        bump_request.method = GreekMethod::BumpAndReval;
+        engine::greeks::GreekResult bump_and_reval = engine::greeks::compute_greek(
+            registries, bump_request, model, swap, upward_sloping_market(), pricing_context(1'000, 7), cpu_execution()
+        );
+        EXPECT_EQ(bump_and_reval.method_used, GreekMethod::BumpAndReval);
+
+        // Tolerancia relativa (no el 1e-6 con h=1e-4 de
+        // irs_hull_white_npv_all_greeks_matches_bump_and_reval_for_a_b_sigma en Rust): aqui el
+        // bump-and-reval usa la politica de bump POR DEFECTO de §4.3 (1% relativo, no 1e-4), asi
+        // que el error de truncamiento de la diferencia central es mayor -- 1e-3 sigue siendo
+        // mucho mas ajustado que el error observado (~1e-5 relativo).
+        const double tolerance = 1e-3 * std::max(1.0, std::abs(bump_and_reval.value));
+        EXPECT_NEAR(aad.value, bump_and_reval.value, tolerance)
+            << "risk_factor=" << risk_factor_name << " aad=" << aad.value << " bump_and_reval=" << bump_and_reval.value;
+    }
+}
+
+TEST(GreeksFase7Test, AadMatchesExplicitBumpAndRevalForHullWhite2FModelNpvExcludingRho) {
+    Registries registries;
+    register_builtins(registries);
+    engine::IrSwapProduct swap = make_irs(1'000'000.0, 0.02);
+    engine::HullWhite2FModel model = make_hull_white_2f();
+
+    for (const std::string& risk_factor_name : {"a", "b", "sigma", "eta", "r0"}) {
+        GreekRequest request;
+        request.metric_name = "HullWhiteModelNpv";
+        request.risk_factor = RiskFactor{RiskFactorKind::ModelParameter, "model", risk_factor_name, std::nullopt};
+        request.order = GreekOrder{1, std::nullopt};
+        request.method = GreekMethod::Auto;
+
+        engine::greeks::GreekResult aad = engine::greeks::compute_greek(
+            registries, request, model, swap, upward_sloping_market(), pricing_context(1'000, 7), cpu_execution()
+        );
+        EXPECT_EQ(aad.method_used, GreekMethod::AadReverse) << "risk_factor=" << risk_factor_name;
+
+        GreekRequest bump_request = request;
+        bump_request.method = GreekMethod::BumpAndReval;
+        engine::greeks::GreekResult bump_and_reval = engine::greeks::compute_greek(
+            registries, bump_request, model, swap, upward_sloping_market(), pricing_context(1'000, 7), cpu_execution()
+        );
+
+        const double tolerance = 1e-3 * std::max(1.0, std::abs(bump_and_reval.value)); // ver el comentario del test 1F
+        EXPECT_NEAR(aad.value, bump_and_reval.value, tolerance)
+            << "risk_factor=" << risk_factor_name << " aad=" << aad.value << " bump_and_reval=" << bump_and_reval.value;
+    }
+}
+
+TEST(GreeksFase7Test, AutoFallsBackToBumpAndRevalForRhoOfHullWhite2FModelNpv) {
+    Registries registries;
+    register_builtins(registries);
+    engine::IrSwapProduct swap = make_irs(1'000'000.0, 0.02);
+    engine::HullWhite2FModel model = make_hull_white_2f();
+
+    GreekRequest request;
+    request.metric_name = "HullWhiteModelNpv";
+    request.risk_factor = RiskFactor{RiskFactorKind::ModelParameter, "model", "rho", std::nullopt};
+    request.order = GreekOrder{1, std::nullopt};
+    request.method = GreekMethod::Auto;
+
+    engine::greeks::GreekResult result = engine::greeks::compute_greek(
+        registries, request, model, swap, upward_sloping_market(), pricing_context(1'000, 7), cpu_execution()
+    );
+    EXPECT_EQ(result.method_used, GreekMethod::BumpAndReval)
+        << "'rho' de HullWhite2F no es diferenciable via AAD (no es un tensor en el modelo), PLAN_GREEKS.md §5.2";
+    ASSERT_TRUE(result.bump_used.has_value());
+}
+
+TEST(GreeksFase7Test, ExplicitAadRejectsRhoOfHullWhite2F) {
+    Registries registries;
+    register_builtins(registries);
+    engine::IrSwapProduct swap = make_irs(1'000'000.0, 0.02);
+    engine::HullWhite2FModel model = make_hull_white_2f();
+
+    GreekRequest request;
+    request.metric_name = "HullWhiteModelNpv";
+    request.risk_factor = RiskFactor{RiskFactorKind::ModelParameter, "model", "rho", std::nullopt};
+    request.order = GreekOrder{1, std::nullopt};
+    request.method = GreekMethod::AadReverse;
+
+    try {
+        engine::greeks::compute_greek(
+            registries, request, model, swap, upward_sloping_market(), pricing_context(1'000, 7), cpu_execution()
+        );
+        FAIL() << "se esperaba std::invalid_argument";
+    } catch (const std::invalid_argument& e) {
+        EXPECT_NE(std::string(e.what()).find("rho"), std::string::npos) << e.what();
+    }
+}
+
+TEST(GreeksFase7Test, ExplicitMethodRejectsOrderTwoAndCrossFactor) {
+    Registries registries;
+    register_builtins(registries);
+    engine::IrSwapProduct swap = make_irs(1'000'000.0, 0.02);
+    engine::HullWhite1FModel model = make_hull_white();
+
+    GreekRequest order_two_request;
+    order_two_request.metric_name = "HullWhiteModelNpv";
+    order_two_request.risk_factor = RiskFactor{RiskFactorKind::ModelParameter, "model", "r0", std::nullopt};
+    order_two_request.order = GreekOrder{2, std::nullopt};
+    order_two_request.method = GreekMethod::AadReverse;
+    EXPECT_THROW(
+        engine::greeks::compute_greek(
+            registries, order_two_request, model, swap, upward_sloping_market(), pricing_context(1'000, 7), cpu_execution()
+        ),
+        std::invalid_argument
+    );
+
+    GreekRequest cross_factor_request;
+    cross_factor_request.metric_name = "HullWhiteModelNpv";
+    cross_factor_request.risk_factor = RiskFactor{RiskFactorKind::ModelParameter, "model", "r0", std::nullopt};
+    cross_factor_request.order =
+        GreekOrder{1, RiskFactor{RiskFactorKind::ModelParameter, "model", "a", std::nullopt}};
+    cross_factor_request.method = GreekMethod::AadReverse;
+    EXPECT_THROW(
+        engine::greeks::compute_greek(
+            registries, cross_factor_request, model, swap, upward_sloping_market(), pricing_context(1'000, 7),
+            cpu_execution()
+        ),
+        std::invalid_argument
+    );
+}
+
+TEST(GreeksFase7Test, GreekMeasureReachesHullWhiteModelNpvAadThroughEnginePrice) {
+    Registries registries;
+    register_builtins(registries);
+    engine::IrSwapProduct swap = make_irs(1'000'000.0, 0.02);
+    engine::HullWhite1FModel model = make_hull_white();
+
+    engine::PriceResult result = engine::price(
+        registries, swap,
+        std::vector<engine::MeasureSpec>{
+            {"Greek",
+             Params{
+                 {"metric", std::string("HullWhiteModelNpv")}, {"risk_factor", std::string("model.r0")},
+                 {"method", std::string("aad")}
+             }}
+        },
+        model, upward_sloping_market(), pricing_context(1'000, 7), cpu_execution()
+    );
+
+    ASSERT_EQ(result.size(), 1u);
+    ASSERT_TRUE(result[0].result.has_scalar);
+    EXPECT_NE(result[0].result.scalar, 0.0);
 }

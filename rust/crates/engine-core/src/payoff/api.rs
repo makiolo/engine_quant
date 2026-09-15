@@ -729,6 +729,20 @@ fn payoff_exposure_profile_gbm_q_on<B: Backend<FloatElem = f64>>(
     Ok(ExposureProfile { times: exposure_times.to_vec(), ee, pfe_95 })
 }
 
+/// `true` si `spec_json` compila y contiene al menos un `ContractOp::Exercise` (PLAN_GREEKS.md
+/// §11 Fase 7): consulta de capacidad usada por `engine::greeks::compute_greek` (C++) para decidir
+/// ANTES de llamar a `payoff_sensitivity_gbm_q` si esa llamada va a resolverse via pathwise o via
+/// el fallback bump-and-reval interno de esa funcion -- sin esto, `GreekResult::method_used`
+/// reportaria "Pathwise" incluso cuando Rust decidio bump-and-reval por su cuenta (§5.1: "un
+/// contrato con ContractOp::Exercise sigue cayendo al fallback"), violando la garantia de
+/// trazabilidad de §13 ("ningun resultado de Greek se sirve sin saber de donde salio"). Mismo
+/// preflight de compilacion que el resto de funciones publicas de este modulo (`Err` si
+/// `spec_json` no compila), nunca oculta un JSON invalido detras de un `false`.
+pub fn payoff_contains_exercise(spec_json: &str) -> Result<bool, String> {
+    let payoff = compile(spec_json)?;
+    Ok(contains_exercise(&payoff))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

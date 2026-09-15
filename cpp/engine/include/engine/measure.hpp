@@ -98,6 +98,33 @@ public:
     ) const override;
 };
 
+// NPV determinista del IRS bajo el MODELO Hull-White (PLAN_GREEKS.md §11 Fase 7), a diferencia
+// de `PresentValueMeasure` ("PV"), que desde PLAN_REAPI.md §6 Fase 4 descuenta por la curva
+// OBSERVADA de `MarketSnapshot` y ya NO depende del modelo en absoluto -- por eso `model.r0`/
+// `model.a`/`model.b`/`model.sigma` son sistematicamente CERO via bump-and-reval sobre "PV"
+// (ver `GreeksFase1Test.ComputeAllGreeksOnIrsPvIsZeroForHullWhiteAndCreditButNonZeroForCurveParallel`
+// en test_greeks.cpp), un resultado correcto pero que deja sin metrica registrada alguna que SI
+// dependa del modelo para adjuntarle una Greek. `HullWhiteModelNpvMeasure` llena ese hueco:
+// `evaluate()` ignora `market` (sin nombre, mismo patron que `PresentValueMeasure` ignora
+// `model`) y reprecia el swap directamente con los parametros del modelo (`a`/`b`/`sigma`/`r0`,
+// mas `eta`/`rho` si es HullWhite2F) vía `engine::irs_hull_white_npv`/`irs_hull_white_2f_npv` --
+// la misma funcion determinista que ya usan `irs_hull_white_npv_delta_r0`/
+// `irs_hull_white_npv_all_greeks` (Rust, AAD reverse-mode) para construir el grafo diferenciable
+// que la tabla de capacidades de `engine::greeks` cablea como `method=aad` (greeks.cpp). Solo
+// `IrSwapProduct` + `HullWhite1FModel`/`HullWhite2FModel` -- cualquier otra combinacion lanza
+// `std::invalid_argument`, mismo criterio que el resto de medidas de este archivo.
+class HullWhiteModelNpvMeasure : public IMeasure {
+public:
+    explicit HullWhiteModelNpvMeasure(const Params&) {}
+
+    std::string type_name() const override { return "HullWhiteModelNpv"; }
+
+    MeasureResult evaluate(
+        const IModel& model, const IProduct& product, const MarketSnapshot& market,
+        const PricingContext& pricing, const ExecutionContext& execution
+    ) const override;
+};
+
 // Sensibilidad del NPV (misma réplica que PresentValueMeasure, PLAN_REAPI.md §6 Fase 4) a un
 // bump PARALELO de `bump` en todos los `zero_rates` de la curva -- bump-and-reval, no AAD: se
 // calcula el tipo fijo efectivo UNA vez bajo la curva base (el contrato del swap no cambia al

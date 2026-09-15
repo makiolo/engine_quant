@@ -58,9 +58,14 @@ struct GreekOrder {
     std::optional<RiskFactor> cross_factor;
 };
 
-// Método de cálculo (PLAN_GREEKS.md §3.3). Fase 1 solo implementa BumpAndReval; Auto resuelve
-// siempre a BumpAndReval porque todavía no existe tabla de capacidades (§5.4, Fase 7). Pedir
-// Pathwise/AadReverse explícitamente lanza std::invalid_argument -- nunca degrada en silencio.
+// Método de cálculo (PLAN_GREEKS.md §3.3). Fase 7 puebla la tabla de capacidades (§5.4,
+// `pathwise_capabilities()`/`aad_capabilities()` en greeks.cpp): `Auto` usa Pathwise/AadReverse
+// cuando (modelo, métrica) está verificado contra bump-and-reval y, para Pathwise, el contrato
+// concreto no contiene `ContractOp::Exercise` (§5.1) -- si ninguna especialización aplica, cae a
+// BumpAndReval sin que el llamante lo note salvo por `GreekResult::method_used`. Pedir
+// Pathwise/AadReverse explícitamente sobre una combinación no verificada (o sobre `order=2`/
+// `cross_factor`, que ninguna especialización cubre todavía) lanza std::invalid_argument
+// nombrando la razón exacta -- nunca degrada en silencio.
 enum class GreekMethod { Auto, BumpAndReval, Pathwise, AadReverse };
 
 GreekMethod parse_greek_method(const std::string& text);

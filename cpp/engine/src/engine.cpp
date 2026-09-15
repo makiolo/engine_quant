@@ -138,6 +138,18 @@ double irs_hull_white_npv_delta_r0(
     );
 }
 
+HullWhite1FGreeks irs_hull_white_npv_all_greeks(
+    double a, double b, double sigma, double r0,
+    double notional, double fixed_rate, bool use_par_rate, double start,
+    const std::vector<double>& payment_times, const std::vector<double>& accruals
+) {
+    ffi::HullWhite1FGreeksResult result = ffi::irs_hull_white_npv_all_greeks(
+        a, b, sigma, r0, notional, fixed_rate, use_par_rate, start,
+        to_rust_vec(payment_times), to_rust_vec(accruals)
+    );
+    return HullWhite1FGreeks{result.d_a, result.d_b, result.d_sigma, result.d_r0};
+}
+
 std::vector<double> irs_hull_white_npv_batch(
     double a, double b, double sigma, double r0,
     const std::vector<double>& notionals, const std::vector<double>& fixed_rates, double start,
@@ -257,6 +269,18 @@ double irs_hull_white_2f_npv_delta_r0(
         a, b, sigma, eta, rho, r0, notional, fixed_rate, use_par_rate, start,
         to_rust_vec(payment_times), to_rust_vec(accruals)
     );
+}
+
+HullWhite2FGreeks irs_hull_white_2f_npv_all_greeks(
+    double a, double b, double sigma, double eta, double rho, double r0,
+    double notional, double fixed_rate, bool use_par_rate, double start,
+    const std::vector<double>& payment_times, const std::vector<double>& accruals
+) {
+    ffi::HullWhite2FGreeksResult result = ffi::irs_hull_white_2f_npv_all_greeks(
+        a, b, sigma, eta, rho, r0, notional, fixed_rate, use_par_rate, start,
+        to_rust_vec(payment_times), to_rust_vec(accruals)
+    );
+    return HullWhite2FGreeks{result.d_a, result.d_b, result.d_sigma, result.d_eta, result.d_r0};
 }
 
 std::vector<double> irs_hull_white_2f_npv_batch(

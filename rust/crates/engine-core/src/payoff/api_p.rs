@@ -21,8 +21,9 @@ use crate::mc::{self, McEstimate};
 use crate::models::gbm_p::GbmP;
 use crate::payoff::api::check_single_observable;
 use crate::payoff::compile::compile;
-use crate::payoff::eval::{evaluate_with_events_seeded, ObservablePath};
+use crate::payoff::eval::{evaluate_with_events_seeded, resolve_trigger_states, ObservablePath};
 use crate::payoff::ir::CompiledPayoff;
+use crate::payoff::sensitivity::{contains_exercise, evaluate_dual, GbmDualPath, GbmPGreek};
 use burn::tensor::backend::Backend;
 use burn::tensor::{Tensor, TensorData};
 
@@ -218,6 +219,53 @@ pub fn pnl_distribution_gbm_p(
     Ok(PnlDistribution { mean: estimate.mean, std_error: estimate.std_error, var, es, n_paths: estimate.n_paths })
 }
 
+/// Sensibilidad ("Greek") pathwise bajo P de `spec_json` respecto de uno de los tres parametros
+/// de `GbmP` (`"spot"`/`"mu"`/`"volatility"`) -- extension de `api::payoff_sensitivity_gbm_q` a P
+/// (PLAN_GREEKS.md §5.1/§11 Fase 7: "se EXTIENDE a GbmP -- mismo mecanismo, mismos 3 parametros
+/// s0/mu/sigma, para PayoffForecastP"). A diferencia de la version Q, `GbmPModel::capabilities()`
+/// NUNCA declara `supports_early_exercise_regression` (ver `cpp/engine/src/model.cpp`), asi que un
+/// contrato con `ContractOp::Exercise` ya deberia haber sido rechazado en el preflight de
+/// capacidades del lado C++ antes de llegar aqui -- el chequeo de `contains_exercise` de abajo es
+/// defensa en profundidad (mismo principio que `api::payoff_sensitivity_gbm_q`: nunca asumir que
+/// el preflight de otra capa es la unica linea de defensa), no un fallback a bump-and-reval como
+/// en Q (no hay ningun mecanismo LSM bajo P que perturbar). Sin descuento (ver el doc-comment del
+/// modulo): la derivada es la del PROPIO cashflow no descontado, igual que `forecast_gbm_p`.
+pub fn payoff_sensitivity_gbm_p(
+    spec_json: &str,
+    observable: &str,
+    greek: &str,
+    s0: f64,
+    mu: f64,
+    sigma: f64,
+    n_paths: u64,
+    seed: u64,
+) -> Result<McEstimate, String> {
+    let payoff = compile(spec_json)?;
+    check_single_observable(&payoff, observable, n_paths)?;
+    if contains_exercise(&payoff) {
+        return Err(
+            "payoff: sensibilidad pathwise bajo P no soportada para contratos con Exercise (GbmP no declara \
+             supports_early_exercise_regression, no existe fallback bump-and-reval bajo P para este caso)"
+                .to_string(),
+        );
+    }
+    let greek_kind = GbmPGreek::parse(greek)?;
+    let (times, columns) = simulate_gbm_p_columns(&payoff, s0, mu, sigma, n_paths, seed)?;
+    let n_paths_usize = n_paths as usize;
+
+    let mut samples = Vec::with_capacity(n_paths_usize);
+    for path_idx in 0..n_paths_usize {
+        let values: Vec<f64> = columns.iter().map(|col| col[path_idx]).collect();
+        let f64_path = SinglePath { times: &times, values: &values, sigma };
+        let states = resolve_trigger_states(&payoff, &f64_path, bridge_seed_for_path(seed, path_idx));
+        let dual_path = GbmDualPath::new_p(&times, &values, s0, mu, sigma, greek_kind);
+        let ledger = evaluate_dual(&payoff, &dual_path, &f64_path, &states);
+        samples.push(ledger.iter().map(|cf| cf.amount.deriv).sum());
+    }
+
+    Ok(mc::aggregate(&samples, mc::Z_95))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -347,5 +395,47 @@ mod tests {
         let spec = tp_sl_json(100.0, 1.0, 0.20, 0.10, &[0.25, 0.5, 0.75, 1.0]);
         assert!(pnl_distribution_gbm_p(&spec, "EQ.SPOT.XYZ", 100.0, 0.05, 0.2, 1_000, 7, 1.0).is_err());
         assert!(pnl_distribution_gbm_p(&spec, "EQ.SPOT.XYZ", 100.0, 0.05, 0.2, 1_000, 7, -0.1).is_err());
+    }
+
+    const CALL_JSON: &str = r#"{
+        "schema": "engine.payoff/v1", "id": "CALL",
+        "contract": {"type": "when", "time": 1.0, "child": {"type": "cashflow", "currency": "USD",
+            "amount": {"type": "max",
+                "left": {"type": "sub",
+                    "left": {"type": "fixing", "observable": "EQ.SPOT.XYZ", "time": 1.0},
+                    "right": {"type": "constant", "value": 100.0}},
+                "right": {"type": "constant", "value": 0.0}}}}
+    }"#;
+
+    #[test]
+    fn sensitivity_spot_delta_under_p_matches_finite_difference_of_forecast() {
+        // Criterio de aceptacion de Fase 7 (PLAN_GREEKS.md §11): pathwise bajo P coincide con
+        // bump-and-reval dentro de tolerancia -- aqui el "bump-and-reval" de referencia es una
+        // diferencia central de `forecast_gbm_p` (no descontada), MISMO seed en ambas evaluaciones
+        // (numeros aleatorios comunes, PLAN_GREEKS.md §4.4).
+        let (s0, mu, sigma) = (100.0, 0.05, 0.2);
+        let (n_paths, seed) = (200_000, 7);
+        let h = 0.5;
+
+        let pathwise = payoff_sensitivity_gbm_p(CALL_JSON, "EQ.SPOT.XYZ", "spot", s0, mu, sigma, n_paths, seed).unwrap();
+        let up = forecast_gbm_p(CALL_JSON, "EQ.SPOT.XYZ", s0 + h, mu, sigma, n_paths, seed).unwrap();
+        let down = forecast_gbm_p(CALL_JSON, "EQ.SPOT.XYZ", s0 - h, mu, sigma, n_paths, seed).unwrap();
+        let finite_difference = (up.mean - down.mean) / (2.0 * h);
+
+        let tolerance = 8.0 * pathwise.std_error;
+        assert!(
+            (pathwise.mean - finite_difference).abs() < tolerance,
+            "pathwise={} (se={}) finite_difference={} deberian coincidir dentro de tolerancia",
+            pathwise.mean,
+            pathwise.std_error,
+            finite_difference
+        );
+    }
+
+    #[test]
+    fn sensitivity_rejects_an_unknown_p_greek() {
+        let err = payoff_sensitivity_gbm_p(CALL_JSON, "EQ.SPOT.XYZ", "rate", 100.0, 0.05, 0.2, 1_000, 7)
+            .expect_err("'rate' no es un parametro de GbmP");
+        assert!(err.contains("rate"));
     }
 }

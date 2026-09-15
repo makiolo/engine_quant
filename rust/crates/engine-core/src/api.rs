@@ -488,6 +488,65 @@ pub fn irs_hull_white_npv_delta_r0_batch(
         .collect()
 }
 
+/// Las cuatro derivadas de primer orden del NPV determinista de Hull-White 1F respecto de sus
+/// cuatro parametros (PLAN_GREEKS.md §5.2/§11 Fase 7): resultado de `irs_hull_white_npv_all_greeks`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct HullWhite1FGreeks {
+    pub d_a: f64,
+    pub d_b: f64,
+    pub d_sigma: f64,
+    pub d_r0: f64,
+}
+
+/// `d(NPV)/d(a)`, `d(NPV)/d(b)`, `d(NPV)/d(sigma)` y `d(NPV)/d(r0)` del IRS a `t=0` bajo
+/// Hull-White 1F, TODAS en una unica pasada `backward()` (PLAN_GREEKS.md §5.2: "el coste de una
+/// pasada backward() no depende de CUANTOS parametros se piden ... una sola llamada puede devolver
+/// Delta+Rho+Vega+... de Hull-White de una vez"). Generaliza `irs_hull_white_npv_delta_r0`
+/// marcando `a`/`b`/`sigma` como variables del grafo ademas de `r0`, en vez de constantes.
+///
+/// El swap (y, si `use_par_rate`, el tipo fijo a la par) se construye con un modelo "plano" (sin
+/// gradiente, `a`/`b`/`sigma`/`r0` tal cual se recibieron) -- mismo motivo que documenta
+/// `build_irs_swap`: el cupon fijo de un swap ya emitido no debe moverse cuando se shockea
+/// CUALQUIERA de los cuatro parametros para medir una sensibilidad, solo el descuento/proyeccion
+/// con el que se revalora debe depender del grafo diferenciable. El NPV que SI se diferencia se
+/// recalcula sobre una segunda instancia del modelo (`diff_model`) cuyos cuatro tensores llevan
+/// `require_grad()`.
+#[allow(clippy::too_many_arguments)]
+pub fn irs_hull_white_npv_all_greeks(
+    a: f64,
+    b: f64,
+    sigma: f64,
+    r0: f64,
+    notional: f64,
+    fixed_rate: f64,
+    use_par_rate: bool,
+    start: f64,
+    payment_times: Vec<f64>,
+    accruals: Vec<f64>,
+) -> HullWhite1FGreeks {
+    type AD = Autodiff<CpuBackend>;
+    let device = burn::tensor::Device::<AD>::default();
+
+    let plain_model: HullWhite1F<AD> =
+        HullWhite1F::new(scalar(a, &device), scalar(b, &device), scalar(sigma, &device));
+    let swap = build_irs_swap(&device, &plain_model, r0, notional, fixed_rate, use_par_rate, start, &payment_times, &accruals);
+
+    let a_var: Tensor<AD, 1> = scalar(a, &device).require_grad();
+    let b_var: Tensor<AD, 1> = scalar(b, &device).require_grad();
+    let sigma_var: Tensor<AD, 1> = scalar(sigma, &device).require_grad();
+    let r0_var: Tensor<AD, 1> = scalar(r0, &device).require_grad();
+    let diff_model: HullWhite1F<AD> = HullWhite1F::new(a_var.clone(), b_var.clone(), sigma_var.clone());
+
+    let price = swap.npv(r0_var.clone(), 0.0, &diff_model);
+    let grads = price.backward();
+    HullWhite1FGreeks {
+        d_a: a_var.grad(&grads).unwrap().into_scalar(),
+        d_b: b_var.grad(&grads).unwrap().into_scalar(),
+        d_sigma: sigma_var.grad(&grads).unwrap().into_scalar(),
+        d_r0: r0_var.grad(&grads).unwrap().into_scalar(),
+    }
+}
+
 /// Construye el IRS del caso base bajo `HullWhite2F` (PLAN.md §7.16), mismo rol que
 /// `build_irs_swap` para `HullWhite1F`: si `use_par_rate`, el tipo fijo se calcula a la par
 /// en `start` a partir del estado inicial `(0, 0)` -- a diferencia de `HullWhite1F`, aquí no
@@ -916,6 +975,68 @@ pub fn irs_hull_white_2f_npv_delta_r0_batch(
         .collect()
 }
 
+/// Equivalente de `HullWhite1FGreeks` para Hull-White 2 factores (PLAN_GREEKS.md §11 Fase 7).
+/// NO incluye `d_rho`: `HullWhite2F::new` recibe `rho` como `f64` PLANO (no como `Tensor`, ver
+/// `models::hull_white_2f::HullWhite2F::new`), asi que no forma parte del grafo de autodiff -- no
+/// hay gradiente reverse-mode que leer para `rho` con la implementacion actual del modelo.
+/// `rho` sigue siendo una `RiskFactor::ModelParameter` valida, solo que unicamente via
+/// bump-and-reval (la tabla de capacidades de `engine::greeks` en C++ simplemente no declara
+/// `aad_supported` para `rho`, ver greeks.cpp).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct HullWhite2FGreeks {
+    pub d_a: f64,
+    pub d_b: f64,
+    pub d_sigma: f64,
+    pub d_eta: f64,
+    pub d_r0: f64,
+}
+
+/// Equivalente de `irs_hull_white_npv_all_greeks` para Hull-White 2 factores -- una unica pasada
+/// `backward()` para `a`/`b`/`sigma`/`eta`/`r0` (`rho` queda fuera, ver `HullWhite2FGreeks`).
+/// Mismo patron modelo "plano" (construccion del swap) / modelo "diff" (NPV diferenciado) que
+/// `irs_hull_white_2f_npv_delta_r0` generaliza de un parametro a cinco.
+#[allow(clippy::too_many_arguments)]
+pub fn irs_hull_white_2f_npv_all_greeks(
+    a: f64,
+    b: f64,
+    sigma: f64,
+    eta: f64,
+    rho: f64,
+    r0: f64,
+    notional: f64,
+    fixed_rate: f64,
+    use_par_rate: bool,
+    start: f64,
+    payment_times: Vec<f64>,
+    accruals: Vec<f64>,
+) -> HullWhite2FGreeks {
+    type AD = Autodiff<CpuBackend>;
+    let device = burn::tensor::Device::<AD>::default();
+
+    let plain_model: HullWhite2F<AD> =
+        HullWhite2F::new(scalar(a, &device), scalar(b, &device), scalar(sigma, &device), scalar(eta, &device), rho, scalar(r0, &device));
+    let swap = build_irs_swap_2f(&device, &plain_model, notional, fixed_rate, use_par_rate, start, &payment_times, &accruals);
+
+    let a_var: Tensor<AD, 1> = scalar(a, &device).require_grad();
+    let b_var: Tensor<AD, 1> = scalar(b, &device).require_grad();
+    let sigma_var: Tensor<AD, 1> = scalar(sigma, &device).require_grad();
+    let eta_var: Tensor<AD, 1> = scalar(eta, &device).require_grad();
+    let r0_var: Tensor<AD, 1> = scalar(r0, &device).require_grad();
+    let diff_model: HullWhite2F<AD> =
+        HullWhite2F::new(a_var.clone(), b_var.clone(), sigma_var.clone(), eta_var.clone(), rho, r0_var.clone());
+
+    let state0 = (scalar(0.0, &device), scalar(0.0, &device));
+    let price = swap.npv(state0, 0.0, &diff_model);
+    let grads = price.backward();
+    HullWhite2FGreeks {
+        d_a: a_var.grad(&grads).unwrap().into_scalar(),
+        d_b: b_var.grad(&grads).unwrap().into_scalar(),
+        d_sigma: sigma_var.grad(&grads).unwrap().into_scalar(),
+        d_eta: eta_var.grad(&grads).unwrap().into_scalar(),
+        d_r0: r0_var.grad(&grads).unwrap().into_scalar(),
+    }
+}
+
 /// Calibra `a`/`b` de `HullWhite1F` a una curva de mercado (`pillars`/`zero_rates`, mismo
 /// largo, `pillars` estrictamente creciente) partiendo de `(initial_a, initial_b)`; `sigma`/
 /// `r0` no se calibran, ver `crate::calibration` para el porqué. Traduce
@@ -1144,6 +1265,66 @@ mod tests {
     }
 
     #[test]
+    fn irs_hull_white_npv_all_greeks_d_r0_matches_the_single_greek_function() {
+        // La derivada d_r0 de la pasada unica debe coincidir EXACTAMENTE (mismo grafo, mismo
+        // backward, ninguna aproximacion de por medio) con irs_hull_white_npv_delta_r0.
+        let (a, b, sigma, r0) = (0.1, 0.03, 0.01, 0.02);
+        let (notional, fixed_rate, start) = (1_000_000.0, 0.0, 0.0);
+        let payment_times = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+        let accruals = vec![1.0; 5];
+
+        let all_greeks = irs_hull_white_npv_all_greeks(
+            a, b, sigma, r0, notional, fixed_rate, true, start, payment_times.clone(), accruals.clone(),
+        );
+        let single_delta = irs_hull_white_npv_delta_r0(
+            a, b, sigma, r0, notional, fixed_rate, true, start, payment_times, accruals,
+        );
+        assert!(
+            (all_greeks.d_r0 - single_delta).abs() < 1e-9,
+            "d_r0={} single={single_delta}", all_greeks.d_r0
+        );
+    }
+
+    #[test]
+    fn irs_hull_white_npv_all_greeks_matches_bump_and_reval_for_a_b_sigma() {
+        // Test diferencial obligatorio de PLAN_GREEKS.md §5.3: AAD reverse-mode vs bump-and-reval
+        // (diferencia central) para CADA parametro. Tolerancia RELATIVA (1e-6): el notional
+        // (1e6) escala tanto el NPV como sus derivadas, asi que una tolerancia absoluta fija no
+        // es comparable entre fixtures de distinto tamano -- el error de truncamiento de la
+        // diferencia central es del orden de la propia magnitud, no una constante.
+        let (a, b, sigma, r0) = (0.1, 0.03, 0.01, 0.02);
+        let (notional, fixed_rate, start) = (1_000_000.0, 0.02, 0.0);
+        let payment_times = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+        let accruals = vec![1.0; 5];
+        let h = 1e-4;
+
+        let greeks = irs_hull_white_npv_all_greeks(
+            a, b, sigma, r0, notional, fixed_rate, false, start, payment_times.clone(), accruals.clone(),
+        );
+
+        let npv = |a: f64, b: f64, sigma: f64, r0: f64| {
+            irs_hull_white_npv(a, b, sigma, r0, notional, fixed_rate, false, start, payment_times.clone(), accruals.clone())
+        };
+        let bump_and_reval_a = (npv(a + h, b, sigma, r0) - npv(a - h, b, sigma, r0)) / (2.0 * h);
+        let bump_and_reval_b = (npv(a, b + h, sigma, r0) - npv(a, b - h, sigma, r0)) / (2.0 * h);
+        let bump_and_reval_sigma = (npv(a, b, sigma + h, r0) - npv(a, b, sigma - h, r0)) / (2.0 * h);
+
+        let tol = |reference: f64| 1e-6 * reference.abs().max(1.0);
+        assert!(
+            (greeks.d_a - bump_and_reval_a).abs() < tol(bump_and_reval_a),
+            "d_a={} bump_and_reval={bump_and_reval_a}", greeks.d_a
+        );
+        assert!(
+            (greeks.d_b - bump_and_reval_b).abs() < tol(bump_and_reval_b),
+            "d_b={} bump_and_reval={bump_and_reval_b}", greeks.d_b
+        );
+        assert!(
+            (greeks.d_sigma - bump_and_reval_sigma).abs() < tol(bump_and_reval_sigma),
+            "d_sigma={} bump_and_reval={bump_and_reval_sigma}", greeks.d_sigma
+        );
+    }
+
+    #[test]
     fn irs_hull_white_2f_npv_batch_matches_a_loop_of_scalar_calls() {
         let (a, b, sigma, eta, rho, r0) = (0.1, 0.2, 0.01, 0.012, -0.7, 0.03);
         let start = 0.0;
@@ -1195,6 +1376,61 @@ mod tests {
                 "swap {i}: batch={} escalar={scalar_delta}", batch[i]
             );
         }
+    }
+
+    #[test]
+    fn irs_hull_white_2f_npv_all_greeks_d_r0_matches_the_single_greek_function() {
+        let (a, b, sigma, eta, rho, r0) = (0.1, 0.2, 0.01, 0.012, -0.7, 0.03);
+        let (notional, fixed_rate, start) = (1_000_000.0, 0.0, 0.0);
+        let payment_times = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+        let accruals = vec![1.0; 5];
+
+        let all_greeks = irs_hull_white_2f_npv_all_greeks(
+            a, b, sigma, eta, rho, r0, notional, fixed_rate, true, start, payment_times.clone(), accruals.clone(),
+        );
+        let single_delta = irs_hull_white_2f_npv_delta_r0(
+            a, b, sigma, eta, rho, r0, notional, fixed_rate, true, start, payment_times, accruals,
+        );
+        assert!(
+            (all_greeks.d_r0 - single_delta).abs() < 1e-9,
+            "d_r0={} single={single_delta}", all_greeks.d_r0
+        );
+    }
+
+    #[test]
+    fn irs_hull_white_2f_npv_all_greeks_matches_bump_and_reval_for_a_b_sigma_eta() {
+        let (a, b, sigma, eta, rho, r0) = (0.1, 0.2, 0.01, 0.012, -0.7, 0.03);
+        let (notional, fixed_rate, start) = (1_000_000.0, 0.02, 0.0);
+        let payment_times = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+        let accruals = vec![1.0; 5];
+        let h = 1e-4;
+
+        let greeks = irs_hull_white_2f_npv_all_greeks(
+            a, b, sigma, eta, rho, r0, notional, fixed_rate, false, start, payment_times.clone(), accruals.clone(),
+        );
+
+        let npv = |a: f64, b: f64, sigma: f64, eta: f64| {
+            irs_hull_white_2f_npv(
+                a, b, sigma, eta, rho, r0, notional, fixed_rate, false, start, payment_times.clone(), accruals.clone(),
+            )
+        };
+        let bump_and_reval_a = (npv(a + h, b, sigma, eta) - npv(a - h, b, sigma, eta)) / (2.0 * h);
+        let bump_and_reval_b = (npv(a, b + h, sigma, eta) - npv(a, b - h, sigma, eta)) / (2.0 * h);
+        let bump_and_reval_sigma = (npv(a, b, sigma + h, eta) - npv(a, b, sigma - h, eta)) / (2.0 * h);
+        let bump_and_reval_eta = (npv(a, b, sigma, eta + h) - npv(a, b, sigma, eta - h)) / (2.0 * h);
+
+        // Misma tolerancia relativa que irs_hull_white_npv_all_greeks_matches_bump_and_reval_for_a_b_sigma.
+        let tol = |reference: f64| 1e-6 * reference.abs().max(1.0);
+        assert!((greeks.d_a - bump_and_reval_a).abs() < tol(bump_and_reval_a), "d_a={} bump_and_reval={bump_and_reval_a}", greeks.d_a);
+        assert!((greeks.d_b - bump_and_reval_b).abs() < tol(bump_and_reval_b), "d_b={} bump_and_reval={bump_and_reval_b}", greeks.d_b);
+        assert!(
+            (greeks.d_sigma - bump_and_reval_sigma).abs() < tol(bump_and_reval_sigma),
+            "d_sigma={} bump_and_reval={bump_and_reval_sigma}", greeks.d_sigma
+        );
+        assert!(
+            (greeks.d_eta - bump_and_reval_eta).abs() < tol(bump_and_reval_eta),
+            "d_eta={} bump_and_reval={bump_and_reval_eta}", greeks.d_eta
+        );
     }
 
     #[test]

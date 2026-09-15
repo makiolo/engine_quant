@@ -363,6 +363,37 @@ MeasureResult PresentValueMeasure::evaluate(
     throw std::invalid_argument("PresentValueMeasure: producto no soportado: " + product.type_name());
 }
 
+MeasureResult HullWhiteModelNpvMeasure::evaluate(
+    const IModel& model, const IProduct& product, const MarketSnapshot&,
+    const PricingContext&, const ExecutionContext&
+) const {
+    const auto* irs_product = dynamic_cast<const IrSwapProduct*>(&product);
+    if (!irs_product) {
+        throw std::invalid_argument("HullWhiteModelNpvMeasure: producto no soportado: " + product.type_name());
+    }
+
+    MeasureResult result;
+    result.has_scalar = true;
+
+    if (const auto* hw1f = dynamic_cast<const HullWhite1FModel*>(&model)) {
+        result.scalar = irs_hull_white_npv(
+            hw1f->a(), hw1f->b(), hw1f->sigma(), hw1f->r0(),
+            irs_product->notional(), irs_product->fixed_rate(), irs_product->use_par_rate(), irs_product->start(),
+            irs_product->payment_times(), irs_product->accruals()
+        );
+        return result;
+    }
+    if (const auto* hw2f = dynamic_cast<const HullWhite2FModel*>(&model)) {
+        result.scalar = irs_hull_white_2f_npv(
+            hw2f->a(), hw2f->b(), hw2f->sigma(), hw2f->eta(), hw2f->rho(), hw2f->r0(),
+            irs_product->notional(), irs_product->fixed_rate(), irs_product->use_par_rate(), irs_product->start(),
+            irs_product->payment_times(), irs_product->accruals()
+        );
+        return result;
+    }
+    throw std::invalid_argument("HullWhiteModelNpvMeasure: modelo no soportado: " + model.type_name());
+}
+
 MeasureResult Dv01Measure::evaluate(
     const IModel&, const IProduct& product, const MarketSnapshot& market,
     const PricingContext& pricing, const ExecutionContext&
