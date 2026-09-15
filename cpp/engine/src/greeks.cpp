@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <map>
+#include <memory>
 #include <stdexcept>
 #include <variant>
 
@@ -95,6 +96,124 @@ payoff::ProbabilityMeasure infer_probability_measure(const std::string& metric_n
     if (!metric_name.empty() && metric_name.back() == 'Q') return payoff::ProbabilityMeasure::RiskNeutralQ;
     if (!metric_name.empty() && metric_name.back() == 'P') return payoff::ProbabilityMeasure::PhysicalP;
     return payoff::ProbabilityMeasure::DeterministicScenario;
+}
+
+// RiskFactorKind aceptados por el estencil generico de segundo orden/derivadas cruzadas (Fase 6):
+// `ModelParameter`/`CurveParallel`/`CurvePillar`/`CreditParameter` -- exactamente los que
+// `bump_state` sabe reconstruir. `TimeShift` queda fuera (PLAN_GREEKS.md §15: "AAD de segundo
+// orden... Gamma/cruzadas se sirven por bump-and-reval", pero Theta de segundo orden/cruzada no
+// esta implementada en esta fase -- solo Theta de primer orden puro, §7).
+bool is_second_order_capable_kind(RiskFactorKind kind) {
+    return kind == RiskFactorKind::ModelParameter || kind == RiskFactorKind::CurveParallel ||
+           kind == RiskFactorKind::CurvePillar || kind == RiskFactorKind::CreditParameter;
+}
+
+// Tamaño de bump para `risk_factor` (PLAN_GREEKS.md §4.3): valida que el factor exista (modelo
+// que no declara ese parámetro, o pillar fuera de rango) y aplica la política de defaults por
+// tipo, o `override_h` si está presente. Compartido por el bump simple (orden 1) y por CADA lado
+// de un estencil de orden 2/cruzado -- `override_h` solo se aplica al factor PRIMARIO
+// (`GreekRequest::bump_override` no tiene un campo separado para el `cross_factor`, ver
+// `compute_greek`); el `cross_factor` siempre usa su propio default.
+double resolve_bump(const IModel& model, const MarketSnapshot& market, const RiskFactor& risk_factor, std::optional<double> override_h) {
+    if (risk_factor.kind == RiskFactorKind::ModelParameter) {
+        const std::string param_key = resolve_model_parameter_key(model.type_name(), risk_factor.name);
+        Params params = model.to_params();
+        auto it = params.find(param_key);
+        if (it == params.end() || !std::holds_alternative<double>(it->second)) {
+            throw std::invalid_argument(
+                "compute_greek: el modelo '" + model.type_name() + "' no tiene el parametro de riesgo '" +
+                to_string(risk_factor) + "'"
+            );
+        }
+        return override_h.value_or(default_model_parameter_bump(std::get<double>(it->second)));
+    }
+    if (risk_factor.kind == RiskFactorKind::CurvePillar) {
+        const std::size_t pillar_index = risk_factor.pillar_index.value_or(0);
+        if (pillar_index >= market.pillars().size()) {
+            throw std::invalid_argument(
+                "compute_greek: 'curve.pillar:" + std::to_string(pillar_index) + "' fuera de rango (la curva "
+                "tiene " + std::to_string(market.pillars().size()) + " pillars)"
+            );
+        }
+    }
+    if (risk_factor.kind == RiskFactorKind::CurveParallel || risk_factor.kind == RiskFactorKind::CurvePillar ||
+        risk_factor.kind == RiskFactorKind::CreditParameter) {
+        return override_h.value_or(default_curve_bump());
+    }
+    throw std::invalid_argument(
+        "compute_greek: RiskFactorKind de '" + to_string(risk_factor) + "' no soportado para bump-and-reval"
+    );
+}
+
+// Copia de (model, market) con `risk_factor` desplazado en `h` (PLAN_GREEKS.md §4.2): dueño de un
+// `IModel` reconstruido si el factor es `ModelParameter` (`owned_model`/`model` apuntan a la copia
+// nueva), o `market` reconstruida si es `CurveParallel`/`CurvePillar`/`CreditParameter` (`model`
+// sigue apuntando al original). Componible: pasar `state.market`/`*state.model` como base de una
+// SEGUNDA llamada aplica el segundo bump ENCIMA del primero -- así se arma el estencil de 4 puntos
+// de una derivada cruzada (Vanna, cross-gamma) sin duplicar la lógica de reconstrucción.
+struct BumpedState {
+    std::unique_ptr<IModel> owned_model;
+    const IModel* model;
+    MarketSnapshot market;
+
+    BumpedState(const IModel& base_model, MarketSnapshot base_market) : model(&base_model), market(std::move(base_market)) {}
+};
+
+BumpedState bump_state(
+    const Registries& registries, const IModel& model, const MarketSnapshot& market, const RiskFactor& risk_factor,
+    double h
+) {
+    BumpedState state(model, market);
+    switch (risk_factor.kind) {
+        case RiskFactorKind::ModelParameter: {
+            const std::string param_key = resolve_model_parameter_key(model.type_name(), risk_factor.name);
+            Params params = model.to_params();
+            auto it = params.find(param_key);
+            if (it == params.end() || !std::holds_alternative<double>(it->second)) {
+                throw std::invalid_argument(
+                    "compute_greek: el modelo '" + model.type_name() + "' no tiene el parametro de riesgo '" +
+                    to_string(risk_factor) + "'"
+                );
+            }
+            params[param_key] = std::get<double>(it->second) + h;
+            state.owned_model = registries.models.create(model.type_name(), params);
+            state.model = state.owned_model.get();
+            break;
+        }
+        case RiskFactorKind::CurveParallel:
+            state.market = bump_market_parallel(market, h);
+            break;
+        case RiskFactorKind::CurvePillar:
+            state.market = bump_market_pillar(market, *risk_factor.pillar_index, h);
+            break;
+        case RiskFactorKind::CreditParameter:
+            state.market = bump_market_credit(market, risk_factor.name, h);
+            break;
+        default:
+            throw std::invalid_argument(
+                "compute_greek: RiskFactorKind de '" + to_string(risk_factor) + "' no soportado para bump-and-reval"
+            );
+    }
+    return state;
+}
+
+// Forma compartida entre dos (o más) evaluaciones bumpeadas de la MISMA métrica (PLAN_GREEKS.md
+// §11 Fase 2, generalizado en Fase 6 a más de dos evaluaciones): una discrepancia indica que
+// `metric_params` cambia el tamaño del perfil de forma no determinista, lo que no debería ocurrir
+// nunca -- error explícito, nunca tolerado en silencio.
+void require_same_shape(const MeasureResult& a, const MeasureResult& b, const std::string& metric_name) {
+    if (a.has_scalar != b.has_scalar) {
+        throw std::invalid_argument(
+            "compute_greek: la medida '" + metric_name +
+            "' devolvio formas incompatibles (has_scalar difiere) entre evaluaciones bumpeadas"
+        );
+    }
+    if (a.times.size() != b.times.size() || a.primary.size() != b.primary.size() || a.secondary.size() != b.secondary.size()) {
+        throw std::invalid_argument(
+            "compute_greek: la medida '" + metric_name +
+            "' devolvio perfiles de tamanos distintos entre evaluaciones bumpeadas"
+        );
+    }
 }
 
 } // namespace
@@ -198,32 +317,47 @@ GreekResult compute_greek(
     const IProduct& product, const MarketSnapshot& market, const PricingContext& pricing,
     const ExecutionContext& execution
 ) {
-    if (request.order.order != 1 || request.order.cross_factor.has_value()) {
+    if (request.order.order < 1 || request.order.order > 2) {
         throw std::invalid_argument(
-            "compute_greek: Fase 1 solo soporta order=1 sin cross_factor (pedido: order=" +
-            std::to_string(request.order.order) + ", cross_factor=" +
-            (request.order.cross_factor.has_value() ? to_string(*request.order.cross_factor) : "ninguno") + ")"
+            "compute_greek: order debe ser 1 o 2 (pedido: order=" + std::to_string(request.order.order) + ")"
         );
     }
-    const bool is_curve_factor =
-        request.risk_factor.kind == RiskFactorKind::CurveParallel || request.risk_factor.kind == RiskFactorKind::CurvePillar;
-    const bool is_credit_factor = request.risk_factor.kind == RiskFactorKind::CreditParameter;
-    const bool is_market_factor = is_curve_factor || is_credit_factor;
+    if (request.order.order == 2 && request.order.cross_factor.has_value()) {
+        throw std::invalid_argument(
+            "compute_greek: order=2 con cross_factor no soportado (tercera derivada, fuera de alcance -- "
+            "PLAN_GREEKS.md §3.2/§15)"
+        );
+    }
     const bool is_time_factor = request.risk_factor.kind == RiskFactorKind::TimeShift;
-    if (request.risk_factor.kind != RiskFactorKind::ModelParameter && !is_market_factor && !is_time_factor) {
-        throw std::invalid_argument(
-            "compute_greek: RiskFactorKind de '" + to_string(request.risk_factor) +
-            "' no soportado todavia (Fase 5 soporta model.*/curve.parallel/curve.pillar:<i>/"
-            "credit.hazard_rate/credit.recovery_rate/time.theta)"
-        );
-    }
-    if (is_time_factor && !metric_supports_time_shift(request.metric_name)) {
-        throw std::invalid_argument(
-            "compute_greek: 'time.theta' todavia no esta cableado para la metrica '" + request.metric_name +
-            "' (Fase 5 solo honra PricingContext::pricing_date() en 'PV' y 'PayoffPriceQ'; pedirlo "
-            "sobre otra metrica daria un Theta silenciosamente nulo, asi que se rechaza explicito "
-            "en vez de aproximar)"
-        );
+    if (is_time_factor) {
+        if (request.order.order != 1 || request.order.cross_factor.has_value()) {
+            throw std::invalid_argument(
+                "compute_greek: 'time.theta' solo soporta order=1 sin cross_factor (Theta de segundo orden/"
+                "cruzada fuera de alcance -- PLAN_GREEKS.md §15)"
+            );
+        }
+        if (!metric_supports_time_shift(request.metric_name)) {
+            throw std::invalid_argument(
+                "compute_greek: 'time.theta' todavia no esta cableado para la metrica '" + request.metric_name +
+                "' (solo honra PricingContext::pricing_date() en 'PV' y 'PayoffPriceQ'; pedirlo sobre otra "
+                "metrica daria un Theta silenciosamente nulo, asi que se rechaza explicito en vez de aproximar)"
+            );
+        }
+    } else {
+        if (!is_second_order_capable_kind(request.risk_factor.kind)) {
+            throw std::invalid_argument(
+                "compute_greek: RiskFactorKind de '" + to_string(request.risk_factor) +
+                "' no soportado todavia (soporta model.*/curve.parallel/curve.pillar:<i>/"
+                "credit.hazard_rate/credit.recovery_rate, y time.theta solo con order=1 sin cross_factor)"
+            );
+        }
+        if (request.order.cross_factor.has_value() && !is_second_order_capable_kind(request.order.cross_factor->kind)) {
+            throw std::invalid_argument(
+                "compute_greek: cross_factor '" + to_string(*request.order.cross_factor) +
+                "' tiene un RiskFactorKind no soportado para derivadas cruzadas (time.theta excluido, "
+                "PLAN_GREEKS.md §15)"
+            );
+        }
     }
     if (request.method == GreekMethod::Pathwise || request.method == GreekMethod::AadReverse) {
         throw std::invalid_argument(
@@ -235,98 +369,118 @@ GreekResult compute_greek(
 
     auto metric = registries.measures.create(request.metric_name, request.metric_params);
 
-    MeasureResult up;
-    MeasureResult down;
-    double h;
-
     if (is_time_factor) {
         // Theta puro (PLAN_GREEKS.md §7.1): diferencia UNIDIRECCIONAL Metric(t+dt) - Metric(t),
         // nunca centrada (el tiempo no "retrocede") -- misma convencion que `Dv01Measure`
         // (`bumped - base`, sin dividir por `h`, ver measure.cpp). `market`/`model` quedan
         // intactos; solo se desplaza `PricingContext::pricing_date()`, la unica via por la que
         // las metricas cableadas (`metric_supports_time_shift`) leen `valuation_time`.
-        h = request.bump_override.value_or(default_time_shift_bump());
+        const double h = request.bump_override.value_or(default_time_shift_bump());
         PricingContext pricing_shifted(Params{
             {"pricing_date", pricing.pricing_date() + h},
             {"n_paths", static_cast<double>(pricing.n_paths())},
             {"n_steps", static_cast<double>(pricing.n_steps())},
             {"seed", static_cast<double>(pricing.seed())},
         });
-        up = metric->evaluate(model, product, market, pricing_shifted, execution);
-        down = metric->evaluate(model, product, market, pricing, execution);
-    } else if (is_market_factor) {
-        if (request.risk_factor.kind == RiskFactorKind::CurvePillar) {
-            const std::size_t pillar_index = request.risk_factor.pillar_index.value_or(0);
-            if (pillar_index >= market.pillars().size()) {
-                throw std::invalid_argument(
-                    "compute_greek: 'curve.pillar:" + std::to_string(pillar_index) +
-                    "' fuera de rango (la curva tiene " + std::to_string(market.pillars().size()) + " pillars)"
-                );
-            }
-        }
-        h = request.bump_override.value_or(default_curve_bump());
-        MarketSnapshot market_up = market;
-        MarketSnapshot market_down = market;
-        switch (request.risk_factor.kind) {
-            case RiskFactorKind::CurveParallel:
-                market_up = bump_market_parallel(market, h);
-                market_down = bump_market_parallel(market, -h);
-                break;
-            case RiskFactorKind::CurvePillar:
-                market_up = bump_market_pillar(market, *request.risk_factor.pillar_index, h);
-                market_down = bump_market_pillar(market, *request.risk_factor.pillar_index, -h);
-                break;
-            case RiskFactorKind::CreditParameter:
-                market_up = bump_market_credit(market, request.risk_factor.name, h);
-                market_down = bump_market_credit(market, request.risk_factor.name, -h);
-                break;
-            default:
-                break; // inalcanzable: is_market_factor ya descarta ModelParameter/TimeShift
-        }
-        up = metric->evaluate(model, product, market_up, pricing, execution);
-        down = metric->evaluate(model, product, market_down, pricing, execution);
-    } else {
-        const std::string param_key = resolve_model_parameter_key(model.type_name(), request.risk_factor.name);
-        Params base_params = model.to_params();
-        auto it = base_params.find(param_key);
-        if (it == base_params.end() || !std::holds_alternative<double>(it->second)) {
+        MeasureResult up = metric->evaluate(model, product, market, pricing_shifted, execution);
+        MeasureResult down = metric->evaluate(model, product, market, pricing, execution);
+        require_same_shape(up, down, request.metric_name);
+        if (!up.has_scalar && up.times.empty() && up.primary.empty() && up.secondary.empty()) {
             throw std::invalid_argument(
-                "compute_greek: el modelo '" + model.type_name() + "' no tiene el parametro de riesgo '" +
-                to_string(request.risk_factor) + "'"
+                "compute_greek: la medida '" + request.metric_name + "' no produce ningun resultado (ni escalar ni perfil)"
             );
         }
-        const double base_value = std::get<double>(it->second);
-        h = request.bump_override.value_or(default_model_parameter_bump(base_value));
 
-        Params up_params = base_params;
-        up_params[param_key] = base_value + h;
-        Params down_params = base_params;
-        down_params[param_key] = base_value - h;
-
-        auto model_up = registries.models.create(model.type_name(), up_params);
-        auto model_down = registries.models.create(model.type_name(), down_params);
-
-        up = metric->evaluate(*model_up, product, market, pricing, execution);
-        down = metric->evaluate(*model_down, product, market, pricing, execution);
+        GreekResult result;
+        result.has_scalar = up.has_scalar;
+        if (up.has_scalar) result.value = up.scalar - down.scalar; // §7.1: sin normalizar por h
+        result.times = up.times;
+        result.primary.reserve(up.primary.size());
+        for (std::size_t i = 0; i < up.primary.size(); ++i) result.primary.push_back(up.primary[i] - down.primary[i]);
+        result.secondary.reserve(up.secondary.size());
+        for (std::size_t i = 0; i < up.secondary.size(); ++i) result.secondary.push_back(up.secondary[i] - down.secondary[i]);
+        result.order = request.order;
+        result.risk_factor = request.risk_factor;
+        result.method_used = GreekMethod::BumpAndReval;
+        result.measure = infer_probability_measure(request.metric_name);
+        result.bump_used = h;
+        return result;
     }
 
-    // Fase 2 (PLAN_GREEKS.md §11): ya no se exige `has_scalar`; se exige que `up`/`down` tengan
-    // LA MISMA forma -- ambas evaluaciones son la misma medida con el mismo `metric_params`, solo
-    // el modelo cambia, así que un desajuste de forma es un error de la propia medida (perfil que
-    // cambia de tamaño con el parametro bumpeado), no algo que este motor deba tolerar en
-    // silencio.
-    if (up.has_scalar != down.has_scalar) {
-        throw std::invalid_argument(
-            "compute_greek: la medida '" + request.metric_name +
-            "' devolvio formas incompatibles (has_scalar difiere) entre la evaluacion +h y -h"
-        );
+    const double h1 = resolve_bump(model, market, request.risk_factor, request.bump_override);
+
+    if (request.order.cross_factor.has_value()) {
+        // Derivada cruzada de primer orden (Vanna, cross-gamma -- PLAN_GREEKS.md §3.2/§11 Fase 6):
+        // estencil de 4 puntos, cada uno compone DOS bumps (el segundo aplicado ENCIMA del
+        // primero via `bump_state`, ver su doc-comment) -- `(up_up - up_down - down_up +
+        // down_down) / (4*h1*h2)`. El `cross_factor` siempre usa su propio bump por defecto (sin
+        // `bump_override` dedicado, ver `resolve_bump`); se documenta en `warnings` para que el
+        // resultado siga siendo auto-explicativo (§13) aunque `GreekResult` solo tenga un campo
+        // `bump_used`.
+        const RiskFactor& cross = *request.order.cross_factor;
+        const double h2 = resolve_bump(model, market, cross, std::nullopt);
+
+        BumpedState s_up = bump_state(registries, model, market, request.risk_factor, h1);
+        BumpedState s_down = bump_state(registries, model, market, request.risk_factor, -h1);
+        BumpedState s_up_up = bump_state(registries, *s_up.model, s_up.market, cross, h2);
+        BumpedState s_up_down = bump_state(registries, *s_up.model, s_up.market, cross, -h2);
+        BumpedState s_down_up = bump_state(registries, *s_down.model, s_down.market, cross, h2);
+        BumpedState s_down_down = bump_state(registries, *s_down.model, s_down.market, cross, -h2);
+
+        MeasureResult up_up = metric->evaluate(*s_up_up.model, product, s_up_up.market, pricing, execution);
+        MeasureResult up_down = metric->evaluate(*s_up_down.model, product, s_up_down.market, pricing, execution);
+        MeasureResult down_up = metric->evaluate(*s_down_up.model, product, s_down_up.market, pricing, execution);
+        MeasureResult down_down = metric->evaluate(*s_down_down.model, product, s_down_down.market, pricing, execution);
+        require_same_shape(up_up, up_down, request.metric_name);
+        require_same_shape(up_up, down_up, request.metric_name);
+        require_same_shape(up_up, down_down, request.metric_name);
+        if (!up_up.has_scalar && up_up.times.empty() && up_up.primary.empty() && up_up.secondary.empty()) {
+            throw std::invalid_argument(
+                "compute_greek: la medida '" + request.metric_name + "' no produce ningun resultado (ni escalar ni perfil)"
+            );
+        }
+
+        const double denominator = 4.0 * h1 * h2;
+        GreekResult result;
+        result.has_scalar = up_up.has_scalar;
+        if (up_up.has_scalar) {
+            result.value = (up_up.scalar - up_down.scalar - down_up.scalar + down_down.scalar) / denominator;
+        }
+        result.times = up_up.times;
+        result.primary.reserve(up_up.primary.size());
+        for (std::size_t i = 0; i < up_up.primary.size(); ++i) {
+            result.primary.push_back(
+                (up_up.primary[i] - up_down.primary[i] - down_up.primary[i] + down_down.primary[i]) / denominator
+            );
+        }
+        result.secondary.reserve(up_up.secondary.size());
+        for (std::size_t i = 0; i < up_up.secondary.size(); ++i) {
+            result.secondary.push_back(
+                (up_up.secondary[i] - up_down.secondary[i] - down_up.secondary[i] + down_down.secondary[i]) / denominator
+            );
+        }
+        result.order = request.order;
+        result.risk_factor = request.risk_factor;
+        result.method_used = GreekMethod::BumpAndReval;
+        result.measure = infer_probability_measure(request.metric_name);
+        result.bump_used = h1;
+        result.warnings.push_back("cross_factor '" + to_string(cross) + "' bumpeado en +-" + std::to_string(h2));
+        return result;
     }
-    if (up.times.size() != down.times.size() || up.primary.size() != down.primary.size() ||
-        up.secondary.size() != down.secondary.size()) {
-        throw std::invalid_argument(
-            "compute_greek: la medida '" + request.metric_name +
-            "' devolvio perfiles de tamanos distintos entre la evaluacion +h y -h"
-        );
+
+    BumpedState s_up = bump_state(registries, model, market, request.risk_factor, h1);
+    BumpedState s_down = bump_state(registries, model, market, request.risk_factor, -h1);
+    MeasureResult up = metric->evaluate(*s_up.model, product, s_up.market, pricing, execution);
+    MeasureResult down = metric->evaluate(*s_down.model, product, s_down.market, pricing, execution);
+    require_same_shape(up, down, request.metric_name);
+
+    MeasureResult base;
+    if (request.order.order == 2) {
+        // Gamma/Volga (estencil de 3 puntos, PLAN_GREEKS.md §11 Fase 6): reutiliza `up`/`down` ya
+        // computados para orden 1 y añade una única evaluación extra en el punto base -- "da Gamma
+        // 'gratis' con una unica evaluacion extra" (§4.1).
+        base = metric->evaluate(model, product, market, pricing, execution);
+        require_same_shape(up, base, request.metric_name);
     }
     if (!up.has_scalar && up.times.empty() && up.primary.empty() && up.secondary.empty()) {
         throw std::invalid_argument(
@@ -334,30 +488,35 @@ GreekResult compute_greek(
         );
     }
 
-    // Theta (§7.1) es una diferencia CRUDA sin normalizar (`Metric(t+dt) - Metric(t)`, denominador
-    // `1.0`) -- misma convencion no-derivada que `Dv01Measure` (`bumped - base`, measure.cpp),
-    // fijada literalmente por la ADR de §7.1, NO la diferencia central `(up-down)/(2h)` que usa
-    // toda otra combinacion de §4.1. `bump_used` sigue reportando `h` (el `dt` aplicado) para que
-    // el llamante nunca tenga que adivinarlo, aunque no participe en el propio calculo de `value`.
-    const double denominator = is_time_factor ? 1.0 : (2.0 * h);
+    const bool is_gamma = request.order.order == 2;
+    const double denominator = is_gamma ? (h1 * h1) : (2.0 * h1);
 
     GreekResult result;
     result.has_scalar = up.has_scalar;
-    if (up.has_scalar) result.value = (up.scalar - down.scalar) / denominator;
+    if (up.has_scalar) {
+        result.value = is_gamma ? (up.scalar - 2.0 * base.scalar + down.scalar) / denominator
+                                 : (up.scalar - down.scalar) / denominator;
+    }
     result.times = up.times; // mismo eje temporal que la metrica base (no depende del parametro bumpeado)
     result.primary.reserve(up.primary.size());
     for (std::size_t i = 0; i < up.primary.size(); ++i) {
-        result.primary.push_back((up.primary[i] - down.primary[i]) / denominator);
+        result.primary.push_back(
+            is_gamma ? (up.primary[i] - 2.0 * base.primary[i] + down.primary[i]) / denominator
+                     : (up.primary[i] - down.primary[i]) / denominator
+        );
     }
     result.secondary.reserve(up.secondary.size());
     for (std::size_t i = 0; i < up.secondary.size(); ++i) {
-        result.secondary.push_back((up.secondary[i] - down.secondary[i]) / denominator);
+        result.secondary.push_back(
+            is_gamma ? (up.secondary[i] - 2.0 * base.secondary[i] + down.secondary[i]) / denominator
+                     : (up.secondary[i] - down.secondary[i]) / denominator
+        );
     }
     result.order = request.order;
     result.risk_factor = request.risk_factor;
     result.method_used = GreekMethod::BumpAndReval;
     result.measure = infer_probability_measure(request.metric_name);
-    result.bump_used = h;
+    result.bump_used = h1;
     return result;
 }
 
@@ -367,13 +526,17 @@ GreeksReport compute_all_greeks(
     const PricingContext& pricing, const ExecutionContext& execution,
     bool include_curve_buckets, bool include_second_order
 ) {
-    // Fase 6 (segundo orden) sigue pendiente: `include_second_order` se acepta por compatibilidad
-    // con la firma final de §8.5 pero todavia no produce candidatos -- documentado en el
-    // doc-comment de esta funcion en greeks.hpp.
-    (void)include_second_order;
-
     GreeksReport report;
     const Params model_params = model.to_params();
+
+    auto try_request = [&](GreekRequest request) {
+        const RiskFactor risk_factor = request.risk_factor; // copia: request se mueve a compute_greek
+        try {
+            report.greeks.push_back(compute_greek(registries, request, model, product, market, pricing, execution));
+        } catch (const std::exception& e) {
+            report.skipped.push_back(to_string(risk_factor) + " (order=" + std::to_string(request.order.order) + "): " + e.what());
+        }
+    };
 
     auto try_candidate = [&](const RiskFactor& risk_factor) {
         GreekRequest request;
@@ -382,11 +545,22 @@ GreeksReport compute_all_greeks(
         request.risk_factor = risk_factor;
         request.order = GreekOrder{1, std::nullopt};
         request.method = GreekMethod::Auto;
-        try {
-            report.greeks.push_back(compute_greek(registries, request, model, product, market, pricing, execution));
-        } catch (const std::exception& e) {
-            report.skipped.push_back(to_string(risk_factor) + ": " + e.what());
-        }
+        try_request(request);
+    };
+
+    // Politica de enumeracion de §8.5, punto 5 (Fase 6): si `include_second_order`, la Gamma pura
+    // (order=2, sin cross_factor) de cada factor de MODELO (punto 1) -- NUNCA de curva/credito
+    // (fuera del alcance exacto que fija §8.5) ni derivadas cruzadas (Vanna/cross-gamma nunca se
+    // enumeran automaticamente, se piden una a una via compute_greek/GreekOrder::cross_factor).
+    auto try_gamma_candidate = [&](const RiskFactor& risk_factor) {
+        if (!include_second_order) return;
+        GreekRequest request;
+        request.metric_name = metric_name;
+        request.metric_params = metric_params;
+        request.risk_factor = risk_factor;
+        request.order = GreekOrder{2, std::nullopt};
+        request.method = GreekMethod::Auto;
+        try_request(request);
     };
 
     // Candidatos ordenados por clave de `to_params()` para que la enumeracion sea determinista
@@ -400,10 +574,12 @@ GreeksReport compute_all_greeks(
     std::sort(param_keys.begin(), param_keys.end());
 
     for (const std::string& param_key : param_keys) {
-        try_candidate(RiskFactor{
+        RiskFactor risk_factor{
             RiskFactorKind::ModelParameter, "model", risk_factor_name_for_param_key(model.type_name(), param_key),
             std::nullopt
-        });
+        };
+        try_candidate(risk_factor);
+        try_gamma_candidate(risk_factor);
     }
 
     // Politica de enumeracion de §8.5, punto 2 (Fase 3): "curve.parallel" siempre; "curve.pillar:i"

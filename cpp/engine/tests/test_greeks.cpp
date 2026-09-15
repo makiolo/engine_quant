@@ -54,6 +54,13 @@ using engine::greeks::RiskFactorKind;
 pf::TimePoint tp(double t) { return pf::TimePoint{t}; }
 
 double norm_cdf(double x) { return 0.5 * std::erfc(-x / std::sqrt(2.0)); }
+double norm_pdf(double x) { return std::exp(-0.5 * x * x) / std::sqrt(2.0 * std::acos(-1.0)); }
+
+double black_scholes_gamma(double s0, double strike, double r, double q, double sigma, double maturity) {
+    double sqrt_t = std::sqrt(maturity);
+    double d1 = (std::log(s0 / strike) + (r - q + 0.5 * sigma * sigma) * maturity) / (sigma * sqrt_t);
+    return std::exp(-q * maturity) * norm_pdf(d1) / (s0 * sigma * sqrt_t);
+}
 
 double black_scholes_call(double s0, double strike, double r, double q, double sigma, double maturity) {
     double sqrt_t = std::sqrt(maturity);
@@ -399,7 +406,11 @@ TEST(GreeksFase1Test, GreekMeasureRejectsAnUnknownRiskFactorString) {
     );
 }
 
-TEST(GreeksFase1Test, ComputeGreekRejectsSecondOrder) {
+// Actualizado en Fase 6: order=2 sin cross_factor (Gamma) ya es soportado para
+// RiskFactorKind::ModelParameter -- ver GreeksFase6Test.GammaOfACallMatchesClosedFormSecondDerivative
+// más abajo. Lo que este test verificaba (order=2 rechazado sin excepción) ya no existe; el único
+// rechazo que sigue vigente es order fuera de {1,2} y order=2 CON cross_factor (tercera derivada).
+TEST(GreeksFase1Test, ComputeGreekRejectsAnOrderOutsideOneOrTwo) {
     Registries registries;
     register_builtins(registries);
     const pf::ObservableId spot{"EQ.SPOT.XYZ"};
@@ -407,7 +418,7 @@ TEST(GreeksFase1Test, ComputeGreekRejectsSecondOrder) {
     engine::GbmModel model = make_gbm_q(100.0, 0.05, 0.0, 0.2, spot.value);
 
     GreekRequest request = payoff_price_q_request("spot");
-    request.order = GreekOrder{2, std::nullopt};
+    request.order = GreekOrder{3, std::nullopt};
 
     EXPECT_THROW(
         engine::greeks::compute_greek(registries, request, model, product, flat_market(), pricing_context(1'000, 7), cpu_execution()),
@@ -1119,4 +1130,177 @@ TEST(GreeksFase5Test, GreekMeasureReachesTimeThetaThroughEnginePrice) {
     ASSERT_EQ(result.size(), 1u);
     ASSERT_TRUE(result[0].result.has_scalar);
     EXPECT_LT(result[0].result.scalar, 0.0);
+}
+
+// --- Fase 6: segundo orden y derivadas cruzadas (Gamma, Vanna) ----------------------------------
+//
+// order=2 sin cross_factor reutiliza el estencil de 3 puntos `(up - 2*base + down)/h²`; order=1
+// con cross_factor usa el estencil de 4 puntos `(up_up - up_down - down_up + down_down)/(4*h1*h2)`
+// (PLAN_GREEKS.md §11 Fase 6). Ambos siguen soportados solo para
+// ModelParameter/CurveParallel/CurvePillar/CreditParameter -- `TimeShift` queda excluido.
+
+TEST(GreeksFase6Test, GammaOfACallMatchesClosedFormSecondDerivative) {
+    Registries registries;
+    register_builtins(registries);
+    const pf::ObservableId spot{"EQ.SPOT.XYZ"};
+    const double s0 = 100.0, strike = 100.0, r = 0.05, q = 0.0, sigma = 0.2, maturity = 1.0;
+
+    pf::PayoffProduct product("CALL", european_call(spot, strike, maturity));
+    engine::GbmModel model = make_gbm_q(s0, r, q, sigma, spot.value);
+
+    GreekRequest request = payoff_price_q_request("spot");
+    request.order = GreekOrder{2, std::nullopt};
+
+    engine::greeks::GreekResult via_greek = engine::greeks::compute_greek(
+        registries, request, model, product, flat_market(), pricing_context(500'000, 7), cpu_execution()
+    );
+
+    double analytic_gamma = black_scholes_gamma(s0, strike, r, q, sigma, maturity);
+
+    EXPECT_TRUE(via_greek.has_scalar);
+    EXPECT_EQ(via_greek.order.order, 2);
+    EXPECT_FALSE(via_greek.order.cross_factor.has_value());
+    EXPECT_GT(via_greek.value, 0.0) << "la Gamma de una call vainilla es siempre positiva";
+    EXPECT_NEAR(via_greek.value, analytic_gamma, 0.01)
+        << "Greek=" << via_greek.value << " analytic=" << analytic_gamma;
+}
+
+TEST(GreeksFase6Test, VannaOfACallHasExpectedSignAndMatchesClosedFormMixedFiniteDifference) {
+    Registries registries;
+    register_builtins(registries);
+    const pf::ObservableId spot{"EQ.SPOT.XYZ"};
+    const double s0 = 100.0, strike = 100.0, r = 0.05, q = 0.0, sigma = 0.2, maturity = 1.0;
+    const double h_spot = 1.0;     // default_model_parameter_bump(100.0) = max(1e-2*100, 1e-4)
+    const double h_vol = 0.002;    // default_model_parameter_bump(0.2)   = max(1e-2*0.2, 1e-4)
+
+    pf::PayoffProduct product("CALL", european_call(spot, strike, maturity));
+    engine::GbmModel model = make_gbm_q(s0, r, q, sigma, spot.value);
+
+    GreekRequest request = payoff_price_q_request("spot");
+    request.order = GreekOrder{1, RiskFactor{RiskFactorKind::ModelParameter, "model", "volatility", std::nullopt}};
+
+    engine::greeks::GreekResult via_greek = engine::greeks::compute_greek(
+        registries, request, model, product, flat_market(), pricing_context(500'000, 7), cpu_execution()
+    );
+
+    double manual =
+        (black_scholes_call(s0 + h_spot, strike, r, q, sigma + h_vol, maturity) -
+         black_scholes_call(s0 + h_spot, strike, r, q, sigma - h_vol, maturity) -
+         black_scholes_call(s0 - h_spot, strike, r, q, sigma + h_vol, maturity) +
+         black_scholes_call(s0 - h_spot, strike, r, q, sigma - h_vol, maturity)) /
+        (4.0 * h_spot * h_vol);
+
+    EXPECT_TRUE(via_greek.has_scalar);
+    EXPECT_EQ(via_greek.order.order, 1);
+    ASSERT_TRUE(via_greek.order.cross_factor.has_value());
+    EXPECT_EQ(via_greek.order.cross_factor->name, "volatility");
+    EXPECT_EQ(via_greek.bump_used, h_spot);
+    EXPECT_FALSE(via_greek.warnings.empty()) << "el bump del cross_factor se documenta en warnings (§13)";
+    EXPECT_NEAR(via_greek.value, manual, 0.02) << "Greek=" << via_greek.value << " manual=" << manual;
+}
+
+TEST(GreeksFase6Test, ComputeGreekRejectsOrderTwoWithCrossFactor) {
+    Registries registries;
+    register_builtins(registries);
+    const pf::ObservableId spot{"EQ.SPOT.XYZ"};
+    pf::PayoffProduct product("CALL", european_call(spot, 100.0, 1.0));
+    engine::GbmModel model = make_gbm_q(100.0, 0.05, 0.0, 0.2, spot.value);
+
+    GreekRequest request = payoff_price_q_request("spot");
+    request.order = GreekOrder{2, RiskFactor{RiskFactorKind::ModelParameter, "model", "volatility", std::nullopt}};
+
+    EXPECT_THROW(
+        engine::greeks::compute_greek(registries, request, model, product, flat_market(), pricing_context(1'000, 7), cpu_execution()),
+        std::invalid_argument
+    );
+}
+
+TEST(GreeksFase6Test, ComputeGreekRejectsSecondOrderOrCrossFactorForTimeShift) {
+    Registries registries;
+    register_builtins(registries);
+    const pf::ObservableId spot{"EQ.SPOT.XYZ"};
+    pf::PayoffProduct product("CALL", european_call(spot, 100.0, 1.0));
+    engine::GbmModel model = make_gbm_q(100.0, 0.05, 0.0, 0.2, spot.value);
+
+    GreekRequest second_order_theta;
+    second_order_theta.metric_name = "PayoffPriceQ";
+    second_order_theta.risk_factor = RiskFactor{RiskFactorKind::TimeShift, "time", "", std::nullopt};
+    second_order_theta.order = GreekOrder{2, std::nullopt};
+    EXPECT_THROW(
+        engine::greeks::compute_greek(
+            registries, second_order_theta, model, product, flat_market(), pricing_context(1'000, 7), cpu_execution()
+        ),
+        std::invalid_argument
+    );
+
+    GreekRequest cross_theta;
+    cross_theta.metric_name = "PayoffPriceQ";
+    cross_theta.risk_factor = RiskFactor{RiskFactorKind::TimeShift, "time", "", std::nullopt};
+    cross_theta.order = GreekOrder{1, RiskFactor{RiskFactorKind::ModelParameter, "model", "spot", std::nullopt}};
+    EXPECT_THROW(
+        engine::greeks::compute_greek(
+            registries, cross_theta, model, product, flat_market(), pricing_context(1'000, 7), cpu_execution()
+        ),
+        std::invalid_argument
+    );
+
+    GreekRequest cross_with_theta = payoff_price_q_request("spot");
+    cross_with_theta.order = GreekOrder{1, RiskFactor{RiskFactorKind::TimeShift, "time", "", std::nullopt}};
+    EXPECT_THROW(
+        engine::greeks::compute_greek(
+            registries, cross_with_theta, model, product, flat_market(), pricing_context(1'000, 7), cpu_execution()
+        ),
+        std::invalid_argument
+    );
+}
+
+TEST(GreeksFase6Test, ComputeAllGreeksWithIncludeSecondOrderAddsGammaForEachModelParameterOnly) {
+    Registries registries;
+    register_builtins(registries);
+    const pf::ObservableId spot{"EQ.SPOT.XYZ"};
+    pf::PayoffProduct product("CALL", european_call(spot, 100.0, 1.0));
+    engine::GbmModel model = make_gbm_q(100.0, 0.05, 0.0, 0.2, spot.value);
+
+    engine::greeks::GreeksReport without_second_order = engine::greeks::compute_all_greeks(
+        registries, "PayoffPriceQ", Params{}, model, product, flat_market(), pricing_context(50'000, 7), cpu_execution(),
+        /*include_curve_buckets=*/false, /*include_second_order=*/false
+    );
+    ASSERT_EQ(without_second_order.greeks.size(), 8u); // 4 params + curve.parallel + 2 credit + time.theta
+
+    engine::greeks::GreeksReport with_second_order = engine::greeks::compute_all_greeks(
+        registries, "PayoffPriceQ", Params{}, model, product, flat_market(), pricing_context(50'000, 7), cpu_execution(),
+        /*include_curve_buckets=*/false, /*include_second_order=*/true
+    );
+    EXPECT_TRUE(with_second_order.skipped.empty());
+    ASSERT_EQ(with_second_order.greeks.size(), 12u); // + Gamma pura de los 4 parametros de modelo
+
+    int order_two_count = 0;
+    for (const auto& greek : with_second_order.greeks) {
+        if (greek.order.order == 2) {
+            ++order_two_count;
+            EXPECT_EQ(greek.risk_factor.kind, engine::greeks::RiskFactorKind::ModelParameter)
+                << "la Gamma automatica de compute_all_greeks es SOLO de parametros de modelo (PLAN_GREEKS.md §8.5 punto 5)";
+        }
+    }
+    EXPECT_EQ(order_two_count, 4);
+}
+
+TEST(GreeksFase6Test, GreekMeasureReachesGammaThroughEnginePrice) {
+    Registries registries;
+    register_builtins(registries);
+    const pf::ObservableId spot{"EQ.SPOT.XYZ"};
+    pf::PayoffProduct product("CALL", european_call(spot, 100.0, 1.0));
+    engine::GbmModel model = make_gbm_q(100.0, 0.05, 0.0, 0.2, spot.value);
+
+    engine::PriceResult result = engine::price(
+        registries, product,
+        std::vector<engine::MeasureSpec>{
+            {"Greek", Params{{"metric", std::string("PayoffPriceQ")}, {"risk_factor", std::string("model.spot")}, {"order", 2.0}}}
+        },
+        model, flat_market(), pricing_context(200'000, 7), cpu_execution()
+    );
+
+    ASSERT_EQ(result.size(), 1u);
+    ASSERT_TRUE(result[0].result.has_scalar);
+    EXPECT_GT(result[0].result.scalar, 0.0);
 }

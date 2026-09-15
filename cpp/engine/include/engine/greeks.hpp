@@ -45,9 +45,14 @@ RiskFactor parse_risk_factor(const std::string& text);
 // `RiskFactor` sea siempre auditable como el string que lo originó (PLAN_GREEKS.md §13).
 std::string to_string(const RiskFactor& risk_factor);
 
-// Orden de la derivada y, opcionalmente, la variable cruzada (PLAN_GREEKS.md §3.2). Fase 1 exige
-// order == 1 y cross_factor ausente; compute_greek rechaza cualquier otra combinación de forma
-// explícita (Fase 6 la habilita).
+// Orden de la derivada y, opcionalmente, la variable cruzada (PLAN_GREEKS.md §3.2). Fase 1 exigía
+// order == 1 y cross_factor ausente; Fase 6 habilita `order == 2` sin `cross_factor` (Gamma/Volga,
+// estencil de 3 puntos `(up - 2*base + down)/h²`) y `order == 1` CON `cross_factor` (Vanna/
+// cross-gamma, estencil de 4 puntos `(up_up - up_down - down_up + down_down)/(4*h1*h2)`), ambos
+// solo para `RiskFactor::kind` en {ModelParameter, CurveParallel, CurvePillar, CreditParameter} --
+// `TimeShift` (Theta) queda excluido de orden 2/cruzada (§15: "AAD de segundo orden... fuera de
+// alcance", y Theta de segundo orden/cruzada tampoco tiene bump-and-reval implementado en esta
+// fase). `order == 2` CON `cross_factor` (tercera derivada) sigue rechazado explícito (§3.2/§15).
 struct GreekOrder {
     int order = 1;
     std::optional<RiskFactor> cross_factor;
@@ -126,8 +131,13 @@ struct GreekResult {
 // `times`/`primary`/`secondary`) -- una discrepancia de forma entre las dos evaluaciones
 // bumpeadas es un error explícito (indicaría que `metric_params` cambia el tamaño del perfil de
 // forma no determinista, lo que no debería ocurrir nunca). Fase 3 añadió `CurveParallel`/
-// `CurvePillar`; Fase 4 añadió `CreditParameter`; Fase 5 añade `TimeShift`. Cualquier otra
-// combinación lanza std::invalid_argument con el motivo exacto -- nunca aproxima en silencio.
+// `CurvePillar`; Fase 4 añadió `CreditParameter`; Fase 5 añadió `TimeShift`. Fase 6 añade
+// `order == 2` (Gamma/Volga, estencil de 3 puntos que reutiliza `up`/`down` de orden 1 más una
+// evaluación extra en el punto base) y `order == 1` con `cross_factor` (Vanna/cross-gamma,
+// estencil de 4 puntos, cada uno compuesto encadenando dos bumps vía `bump_state`) para
+// `ModelParameter`/`CurveParallel`/`CurvePillar`/`CreditParameter` -- `TimeShift` sigue limitado a
+// `order == 1` sin `cross_factor` (ver más arriba). Cualquier otra combinación lanza
+// std::invalid_argument con el motivo exacto -- nunca aproxima en silencio.
 //
 // Nota de diseño (Fase 3): `Dv01Measure` (measure.hpp) NO se reimplementa sobre esta función --
 // su convención numérica es un bump UNIDIRECCIONAL (`bumped - base`, sin dividir por `h`,
@@ -149,14 +159,16 @@ GreekResult compute_greek(
 // `curve.pillar:i` por cada pillar de `market.pillars()` solo si `include_curve_buckets` (política
 // de enumeración exacta de §8.5, punto 2). Fase 4 añadió `credit.hazard_rate`/
 // `credit.recovery_rate` SIEMPRE (§8.5 punto 3: "una derivada nula es una respuesta válida,
-// distinta de 'no aplica'"). Fase 5 añade `time.theta` SIEMPRE (§8.5 punto 4): si la métrica
+// distinta de 'no aplica'"). Fase 5 añadió `time.theta` SIEMPRE (§8.5 punto 4): si la métrica
 // todavía no honra `PricingContext::pricing_date()` (`metric_supports_time_shift` en greeks.cpp)
 // o `dt` cruza un instante que el motor no puede reconstruir sin histórico, `compute_greek` lanza
 // y el candidato cae en `skipped` con el motivo -- nunca se omite en silencio ni se computa como
-// un Theta cero engañoso. Segundo orden sigue pendiente de la Fase 6 (`include_second_order` se
-// acepta por compatibilidad con la firma final de §8.5 pero todavía no produce candidatos). Un
-// candidato que falle (`compute_greek` lanza) se registra en `skipped` con el motivo -- nunca
-// aborta el reporte completo.
+// un Theta cero engañoso. Fase 6 añade, si `include_second_order` (§8.5 punto 5, default `false`),
+// la Gamma pura (`order=2`, sin `cross_factor`) de cada parámetro de MODELO (punto 1) -- nunca de
+// curva/crédito, y nunca derivadas cruzadas (Vanna/cross-gamma no se enumeran automáticamente,
+// solo vía `compute_greek`/`GreekOrder::cross_factor` explícito). Un candidato que falle
+// (`compute_greek` lanza) se registra en `skipped` con el motivo -- nunca aborta el reporte
+// completo.
 struct GreeksReport {
     std::vector<GreekResult> greeks;
     std::vector<std::string> skipped;
