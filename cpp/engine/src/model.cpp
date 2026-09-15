@@ -8,6 +8,10 @@ HullWhite1FModel::HullWhite1FModel(const Params& params)
       sigma_(get_double(params, "sigma")),
       r0_(get_double(params, "r0")) {}
 
+Params HullWhite1FModel::to_params() const {
+    return Params{{"a", a_}, {"b", b_}, {"sigma", sigma_}, {"r0", r0_}};
+}
+
 double HullWhite1FModel::a() const { return a_; }
 double HullWhite1FModel::b() const { return b_; }
 double HullWhite1FModel::sigma() const { return sigma_; }
@@ -20,6 +24,10 @@ HullWhite2FModel::HullWhite2FModel(const Params& params)
       eta_(get_double(params, "eta")),
       rho_(get_double(params, "rho")),
       r0_(get_double(params, "r0")) {}
+
+Params HullWhite2FModel::to_params() const {
+    return Params{{"a", a_}, {"b", b_}, {"sigma", sigma_}, {"eta", eta_}, {"rho", rho_}, {"r0", r0_}};
+}
 
 double HullWhite2FModel::a() const { return a_; }
 double HullWhite2FModel::b() const { return b_; }
@@ -49,6 +57,10 @@ std::optional<payoff::ModelCapabilities> GbmModel::capabilities() const {
     return caps;
 }
 
+Params GbmModel::to_params() const {
+    return Params{{"s0", s0_}, {"r", r_}, {"q", q_}, {"sigma", sigma_}, {"observable", observable_.value}};
+}
+
 double GbmModel::s0() const { return s0_; }
 double GbmModel::r() const { return r_; }
 double GbmModel::q() const { return q_; }
@@ -69,6 +81,10 @@ std::optional<payoff::ModelCapabilities> GbmPModel::capabilities() const {
     // Brownian bridge (§4.2) es igualmente aplicable bajo P.
     caps.supports_continuous_barrier_bridge = true;
     return caps;
+}
+
+Params GbmPModel::to_params() const {
+    return Params{{"s0", s0_}, {"mu", mu_}, {"sigma", sigma_}, {"observable", observable_.value}};
 }
 
 double GbmPModel::s0() const { return s0_; }

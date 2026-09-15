@@ -22,6 +22,15 @@ public:
     // "este modelo no declara capacidades de payoff" -- los modelos legacy (HullWhite1F/2F) no
     // necesitan implementarlo para seguir funcionando con sus medidas actuales.
     virtual std::optional<payoff::ModelCapabilities> capabilities() const { return std::nullopt; }
+
+    // Extensión aditiva (PLAN_GREEKS.md §4.2): serializa los `Params` con los que se
+    // reconstruiría un modelo IDÉNTICO vía `Registry<IModel>::create(type_name(), to_params())`.
+    // Todo modelo YA se construye desde un `Params` -- `to_params()` es la operación inversa, y
+    // con ella "bumpear un parámetro de modelo" se reduce a "leer el double de esa clave,
+    // sumarle h, reconstruir" (`engine::greeks::compute_greek`), sin un método virtual nuevo por
+    // parámetro ni por modelo. Pura virtual: los cuatro modelos concretos de este archivo son los
+    // únicos que implementan `IModel` hoy, así que no hay ningún consumidor externo que rompa.
+    virtual Params to_params() const = 0;
 };
 
 // Hull-White de 1 factor con nivel de reversión de largo plazo constante (mismo modelo que
@@ -32,6 +41,7 @@ public:
     explicit HullWhite1FModel(const Params& params);
 
     std::string type_name() const override { return "HullWhite1F"; }
+    Params to_params() const override;
 
     double a() const;
     double b() const;
@@ -56,6 +66,7 @@ public:
     explicit HullWhite2FModel(const Params& params);
 
     std::string type_name() const override { return "HullWhite2F"; }
+    Params to_params() const override;
 
     double a() const;
     double b() const;
@@ -88,6 +99,7 @@ public:
 
     std::string type_name() const override { return "GBM"; }
     std::optional<payoff::ModelCapabilities> capabilities() const override;
+    Params to_params() const override;
 
     double s0() const;
     double r() const;
@@ -118,6 +130,7 @@ public:
 
     std::string type_name() const override { return "GBM_P"; }
     std::optional<payoff::ModelCapabilities> capabilities() const override;
+    Params to_params() const override;
 
     double s0() const;
     double mu() const;

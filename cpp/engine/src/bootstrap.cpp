@@ -1,5 +1,8 @@
 #include "engine/bootstrap.hpp"
 
+#include <memory>
+
+#include "engine/greeks.hpp"
 #include "engine/payoff/payoff_product.hpp"
 
 namespace engine {
@@ -22,6 +25,16 @@ void register_builtins(Registries& registries) {
     registries.measures.register_type<PayoffForecastPMeasure>("PayoffForecastP");
     registries.measures.register_type<PayoffHitProbabilityPMeasure>("PayoffHitProbabilityP");
     registries.measures.register_type<PayoffPnlDistributionPMeasure>("PayoffPnlDistributionP");
+    registries.measures.register_type<PayoffSensitivityQMeasure>("PayoffSensitivityQ");
+    // "Greek" (PLAN_GREEKS.md §8.1) necesita el propio `Registries` para resolver la métrica
+    // interior por nombre (`greeks::compute_greek` llama a `registries.measures.create(...)`) --
+    // a diferencia de `register_type<Concrete>`, que solo pasa un `Params` al constructor, esta
+    // fábrica captura `registries` (la misma referencia que recibe esta función) para
+    // inyectarla en `GreekMeasure`. Sin riesgo de lifetime: `registries` sigue viva mientras
+    // exista cualquier medida creada desde ella (misma vida que el resto de `Registry<IMeasure>`).
+    registries.measures.register_factory("Greek", [&registries](const Params& params) {
+        return std::make_unique<GreekMeasure>(params, registries);
+    });
     registries.calibrators.register_type<HullWhite1FCalibrator>("HullWhite1F");
     registries.calibrators.register_type<HullWhite2FCalibrator>("HullWhite2F");
 }
