@@ -14,6 +14,65 @@
 
 use std::ops::{Add, Div, Mul, Neg, Sub};
 
+/// Trait minimo de numero dual truncado (PLAN_HYPERDUAL.md §3.1/ADR-HD-01): exactamente las
+/// operaciones que el interprete de payoff (`ScalarOp`, ver `super::sensitivity`) usa, ni una mas
+/// -- `Add`/`Sub`/`Mul`/`Div`/`Neg` como supertraits (`ScalarOp` los cubre via `std::ops`) mas las
+/// 6 funciones que `Dual` ya implementa a mano. Deliberadamente NO incluye un constructor
+/// `variable()`/"seedear una direccion": cada tipo de la familia (`Dual`, `Dual2`, `HyperDual`)
+/// tiene una nocion distinta de que significa esa direccion, y la decide `GbmDualPath` (o su
+/// generalizacion), no el trait.
+pub(crate) trait DualNumber:
+    Copy + Add<Output = Self> + Sub<Output = Self> + Mul<Output = Self> + Div<Output = Self> + Neg<Output = Self>
+{
+    /// Valor base (`f64`), sin derivada -- equivalente generico del campo `.value` de `Dual`.
+    fn re(self) -> f64;
+    /// Constante: todas las componentes de derivada a cero (equivalente generico de `Dual::constant`).
+    fn constant(value: f64) -> Self;
+
+    fn abs(self) -> Self;
+    fn exp(self) -> Self;
+    fn ln(self) -> Self;
+    fn powf(self, other: Self) -> Self;
+    fn min(self, other: Self) -> Self;
+    fn max(self, other: Self) -> Self;
+}
+
+/// Multiplicacion `f64` instrumentada (PLAN_HYPERDUAL.md §8.4): en builds de test cuenta cada
+/// multiplicacion real realizada por `Mul` de `Dual`/`Dual2`/`HyperDual` en un contador por hilo,
+/// para verificar la tabla de costes de §0.1 contra la aritmetica real en vez de solo calcularla a
+/// mano. Fuera de `cfg(test)` es una multiplicacion `f64` lisa (se espera que el compilador la
+/// inline por completo, cero coste extra en produccion).
+#[inline(always)]
+fn mul_f64(a: f64, b: f64) -> f64 {
+    #[cfg(test)]
+    mul_count::record();
+    a * b
+}
+
+#[cfg(test)]
+pub(crate) mod mul_count {
+    use std::cell::Cell;
+
+    thread_local! {
+        static COUNT: Cell<usize> = const { Cell::new(0) };
+    }
+
+    /// Pone el contador a cero -- llamar antes de la operacion cuyo coste se quiere medir (cada
+    /// `#[test]` corre en su propio hilo, asi que no hay interferencia entre tests).
+    pub(crate) fn reset() {
+        COUNT.with(|c| c.set(0));
+    }
+
+    /// Multiplicaciones `f64` registradas desde el ultimo `reset()`.
+    pub(crate) fn get() -> usize {
+        COUNT.with(|c| c.get())
+    }
+
+    pub(crate) fn record() {
+        COUNT.with(|c| c.set(c.get() + 1));
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct Dual {
     pub(crate) value: f64,
@@ -105,7 +164,10 @@ impl Sub for Dual {
 impl Mul for Dual {
     type Output = Dual;
     fn mul(self, rhs: Dual) -> Dual {
-        Dual { value: self.value * rhs.value, deriv: self.deriv * rhs.value + self.value * rhs.deriv }
+        Dual {
+            value: mul_f64(self.value, rhs.value),
+            deriv: mul_f64(self.deriv, rhs.value) + mul_f64(self.value, rhs.deriv),
+        }
     }
 }
 
@@ -123,6 +185,38 @@ impl Neg for Dual {
     type Output = Dual;
     fn neg(self) -> Dual {
         Dual { value: -self.value, deriv: -self.deriv }
+    }
+}
+
+/// Impl mecanica (PLAN_HYPERDUAL.md Fase 1, §7): delega en los metodos inherentes que `Dual` ya
+/// tiene, sin cambiar una linea de su comportamiento -- los call sites existentes (`Dual::exp()`,
+/// `Dual::abs()`, ...) siguen resolviendo al metodo inherente, no a este impl de trait (Rust
+/// prioriza metodos inherentes sobre metodos de trait en resolucion de metodo), asi que este impl
+/// solo se ejerce cuando algo lo usa a traves de `T: DualNumber` generico (`super::sensitivity`).
+impl DualNumber for Dual {
+    fn re(self) -> f64 {
+        self.value
+    }
+    fn constant(value: f64) -> Self {
+        Dual::constant(value)
+    }
+    fn abs(self) -> Self {
+        Dual::abs(self)
+    }
+    fn exp(self) -> Self {
+        Dual::exp(self)
+    }
+    fn ln(self) -> Self {
+        Dual::ln(self)
+    }
+    fn powf(self, other: Self) -> Self {
+        Dual::powf(self, other)
+    }
+    fn min(self, other: Self) -> Self {
+        Dual::min(self, other)
+    }
+    fn max(self, other: Self) -> Self {
+        Dual::max(self, other)
     }
 }
 
@@ -169,5 +263,16 @@ mod tests {
     fn constant_has_zero_derivative_and_variable_has_unit_derivative() {
         assert_eq!(Dual::constant(3.0).deriv, 0.0);
         assert_eq!(Dual::variable(3.0).deriv, 1.0);
+    }
+
+    // PLAN_HYPERDUAL.md §8.4/§0.1: coste MEDIDO (no solo calculado a mano) de una multiplicacion
+    // de cada miembro de la familia -- confirma que la tabla de §0.1 no se degrada en silencio si
+    // alguien "optimiza" la aritmetica de forma incorrecta. Extendida en Fase 2/3 con Dual2/
+    // HyperDual (mismo test, mismo nombre, mas aserciones).
+    #[test]
+    fn multiplication_cost_matches_the_documented_cauchy_product_table() {
+        mul_count::reset();
+        let _ = Dual::variable(1.3) * Dual::variable(2.1);
+        assert_eq!(mul_count::get(), 3, "Dual: 3 multiplicaciones por Mul (PLAN_HYPERDUAL.md §0.1)");
     }
 }

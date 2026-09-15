@@ -27,24 +27,32 @@
 //! payoff_sensitivity_gbm_q` usa en su lugar el fallback bump-and-reval que PLAN_PRODUCTS.md
 //! preveia explicitamente (numeros aleatorios comunes: mismo `seed` en ambas valoraciones
 //! bumped, para que solo cambie el parametro perturbado).
+//!
+//! **Interprete generico (PLAN_HYPERDUAL.md §4, Fase 1)**: `eval_scalar`/`eval_contract`/
+//! `ObservablePathT` estan parametrizados sobre `T: DualNumber` -- UN solo cuerpo de interprete
+//! (mismo `match` de los 16 `ScalarOp`, sin una rama distinta por tipo) reutilizado con `T=Dual`
+//! (orden 1, este modulo, sin cambios de comportamiento), `T=Dual2` (orden 2 puro, Gamma/Volga) y
+//! `T=HyperDual` (orden 1 cruzado, Vanna/cross-gamma). Rust monomorphiza cada instanciacion en
+//! tiempo de compilacion -- pedir `Dual2`/`HyperDual` nunca afecta el coste de una llamada con
+//! `T=Dual` (PLAN_HYPERDUAL.md §0).
 
-use super::dual::Dual;
+use super::dual::{Dual, DualNumber};
 use super::eval::{eval_predicate, EventStateResolved, ObservablePath};
 use super::ir::{CompiledPayoff, ContractOp, ScalarOp, SettlementMode};
 
-/// Un cashflow sin agregar cuyo importe es un `Dual` en vez de un `f64` -- mismo papel que
-/// `eval::PathCashflow`, para la pasada de sensibilidad.
-pub(crate) struct PathCashflowDual {
+/// Un cashflow sin agregar cuyo importe es un `T: DualNumber` en vez de un `f64` -- mismo papel
+/// que `eval::PathCashflow`, para la pasada de sensibilidad.
+pub(crate) struct PathCashflowDual<T: DualNumber> {
     pub(crate) payment_time: f64,
-    pub(crate) amount: Dual,
+    pub(crate) amount: T,
 }
 
-/// Equivalente dual de `eval::ObservablePath`: valores de UN observable de una ruta ya simulada,
-/// como `Dual` respecto del parametro elegido. Separado de `ObservablePath` (en vez de generico
-/// sobre ambos) para no tocar el interprete `f64` existente, ya probado -- ver el doc-comment del
-/// modulo.
-pub(crate) trait DualObservablePath {
-    fn value_at(&self, slot: usize, time: f64) -> Dual;
+/// Equivalente generico de `eval::ObservablePath`: valores de UN observable de una ruta ya
+/// simulada, como `T: DualNumber` respecto del parametro elegido. Separado de `ObservablePath`
+/// (en vez de generico sobre ambos) para no tocar el interprete `f64` existente, ya probado -- ver
+/// el doc-comment del modulo.
+pub(crate) trait ObservablePathT<T: DualNumber> {
+    fn value_at(&self, slot: usize, time: f64) -> T;
 }
 
 /// Los cuatro parametros de `models::gbm::Gbm` respecto de los que se puede pedir una
@@ -107,10 +115,12 @@ pub(crate) fn contains_exercise(payoff: &CompiledPayoff) -> bool {
     payoff.contract_ops.iter().any(|op| matches!(op, ContractOp::Exercise { .. }))
 }
 
-/// Recupera `S_t(param)` como `Dual` a partir de una ruta GBM `f64` ya simulada, fijando el
-/// Browniano realizado (ver el doc-comment del modulo). `times`/`values` son paralelos, mismos
-/// arrays que ya usa `payoff::api::SinglePath` para esa ruta.
-pub(crate) struct GbmDualPath<'a> {
+/// Recupera `S_t(param)` como `T: DualNumber` a partir de una ruta GBM `f64` ya simulada, fijando
+/// el Browniano realizado (ver el doc-comment del modulo). `times`/`values` son paralelos, mismos
+/// arrays que ya usa `payoff::api::SinglePath` para esa ruta. Generico en `T` (PLAN_HYPERDUAL.md
+/// §4): los campos son todos `f64`/`GbmGreek` -- `T` solo aparece en los metodos que producen
+/// numeros duales (`value_at`/`rate_dual`, via `GbmParamDuals<T>` abajo), nunca en el layout.
+pub(crate) struct GbmDualPath<'a, T> {
     times: &'a [f64],
     /// Browniano recuperado por indice de `times` (`w[i]` corresponde a `times[i]`).
     w: Vec<f64>,
@@ -119,9 +129,10 @@ pub(crate) struct GbmDualPath<'a> {
     q: f64,
     sigma: f64,
     greek: GbmGreek,
+    _dual: std::marker::PhantomData<T>,
 }
 
-impl<'a> GbmDualPath<'a> {
+impl<'a, T> GbmDualPath<'a, T> {
     pub(crate) fn new(times: &'a [f64], values: &[f64], s0: f64, r: f64, q: f64, sigma: f64, greek: GbmGreek) -> Self {
         assert_eq!(times.len(), values.len(), "payoff: times/values de longitud distinta");
         let drift_no_diffusion = r - q - 0.5 * sigma * sigma;
@@ -130,7 +141,7 @@ impl<'a> GbmDualPath<'a> {
             .zip(values.iter())
             .map(|(&t, &s)| ((s / s0).ln() - drift_no_diffusion * t) / sigma)
             .collect();
-        Self { times, w, s0, r, q, sigma, greek }
+        Self { times, w, s0, r, q, sigma, greek, _dual: std::marker::PhantomData }
     }
 
     /// Equivalente de `new` bajo P (PLAN_GREEKS.md §11 Fase 7): `GbmP` tiene drift fisico `mu` en
@@ -148,7 +159,19 @@ impl<'a> GbmDualPath<'a> {
         };
         Self::new(times, values, s0, mu, 0.0, sigma, internal_greek)
     }
+}
 
+/// Como seedear los 4 parametros duales de `GbmDualPath` para un tipo concreto de la familia --
+/// UNA implementacion por tipo (PLAN_HYPERDUAL.md §3.1/ADR-HD-01: "seedear una direccion" no es
+/// parte del trait `DualNumber`, cada tipo lo decide a su manera: `Dual` seedea una unica
+/// direccion, `Dual2` seedea la unica direccion pedida pero de orden 2, `HyperDual` seedea DOS
+/// direcciones independientes). `value_at`/`rate_dual` (abajo) son genericos UNA sola vez sobre
+/// cualquier `T` que implemente esto -- solo el seedeo se repite por tipo, no el resto del calculo.
+pub(crate) trait GbmParamDuals<T: DualNumber> {
+    fn param_duals(&self) -> (T, T, T, T);
+}
+
+impl GbmParamDuals<Dual> for GbmDualPath<'_, Dual> {
     fn param_duals(&self) -> (Dual, Dual, Dual, Dual) {
         let s0_d = if self.greek == GbmGreek::Spot { Dual::variable(self.s0) } else { Dual::constant(self.s0) };
         let r_d = if self.greek == GbmGreek::Rate { Dual::variable(self.r) } else { Dual::constant(self.r) };
@@ -164,81 +187,86 @@ impl<'a> GbmDualPath<'a> {
         };
         (s0_d, r_d, q_d, sigma_d)
     }
+}
 
-    /// El `Dual` de `r` usado internamente, expuesto para que quien descuenta el ledger
+impl<'a, T: DualNumber> GbmDualPath<'a, T>
+where
+    GbmDualPath<'a, T>: GbmParamDuals<T>,
+{
+    /// El `T` de `r` usado internamente, expuesto para que quien descuenta el ledger
     /// (`payoff::api`) use exactamente el mismo `r` dual al construir el factor de descuento --
     /// si `greek == Rate`, descontar con un `r` constante ignoraria la sensibilidad del propio
     /// descuento (`rho` incluye tanto el termino de la ruta como el de `exp(-r*t)`).
-    pub(crate) fn rate_dual(&self) -> Dual {
+    pub(crate) fn rate_dual(&self) -> T {
         self.param_duals().1
     }
 }
 
-impl DualObservablePath for GbmDualPath<'_> {
-    fn value_at(&self, _slot: usize, time: f64) -> Dual {
+impl<'a, T: DualNumber> ObservablePathT<T> for GbmDualPath<'a, T>
+where
+    GbmDualPath<'a, T>: GbmParamDuals<T>,
+{
+    fn value_at(&self, _slot: usize, time: f64) -> T {
         let idx = self
             .times
             .iter()
             .position(|&t| (t - time).abs() < 1e-9)
             .unwrap_or_else(|| panic!("payoff: tiempo {time} no simulado por el modelo (times={:?})", self.times));
         let (s0_d, r_d, q_d, sigma_d) = self.param_duals();
-        let t = Dual::constant(self.times[idx]);
-        let w = Dual::constant(self.w[idx]);
-        let half = Dual::constant(0.5);
+        let t = T::constant(self.times[idx]);
+        let w = T::constant(self.w[idx]);
+        let half = T::constant(0.5);
         let drift = (r_d - q_d - sigma_d * sigma_d * half) * t;
         let diffusion = sigma_d * w;
         s0_d * (drift + diffusion).exp()
     }
 }
 
-/// Evalua `payoff.scalar_ops[idx]` como `Dual` -- espejo exacto de `eval::eval_scalar`, mismo
-/// conjunto de nodos, mismos mensajes de error; ver el doc-comment del modulo para el porque de
-/// esta duplicacion deliberadamente pequena en vez de generalizar `eval::eval_scalar` sobre un
-/// tipo numerico.
-pub(crate) fn eval_scalar_dual(
+/// Evalua `payoff.scalar_ops[idx]` como `T: DualNumber` -- espejo exacto de `eval::eval_scalar`,
+/// mismo conjunto de nodos, mismos mensajes de error, ahora generico sobre el tipo dual
+/// (PLAN_HYPERDUAL.md §4: UN solo cuerpo de interprete para `Dual`/`Dual2`/`HyperDual`, en vez de
+/// una copia por tipo); ver el doc-comment del modulo para el porque de mantener esta duplicacion
+/// (deliberadamente pequena) frente al interprete `f64` de `eval::eval_scalar`, en vez de
+/// generalizar tambien ese.
+pub(crate) fn eval_scalar<T: DualNumber>(
     payoff: &CompiledPayoff,
     idx: usize,
     cursor: Option<f64>,
-    path: &dyn DualObservablePath,
+    path: &dyn ObservablePathT<T>,
     states: &[EventStateResolved],
-) -> Dual {
+) -> T {
     match &payoff.scalar_ops[idx] {
-        ScalarOp::Constant(v) => Dual::constant(*v),
+        ScalarOp::Constant(v) => T::constant(*v),
         ScalarOp::Fixing { observable, time } => path.value_at(*observable, *time),
         ScalarOp::Current { observable } => {
             let t = cursor.expect("payoff: 'current' sin cursor de tiempo activo (falta un 'when' envolvente)");
             path.value_at(*observable, t)
         }
-        ScalarOp::Add(l, r) => {
-            eval_scalar_dual(payoff, *l, cursor, path, states) + eval_scalar_dual(payoff, *r, cursor, path, states)
-        }
-        ScalarOp::Sub(l, r) => {
-            eval_scalar_dual(payoff, *l, cursor, path, states) - eval_scalar_dual(payoff, *r, cursor, path, states)
-        }
-        ScalarOp::Mul(l, r) => {
-            eval_scalar_dual(payoff, *l, cursor, path, states) * eval_scalar_dual(payoff, *r, cursor, path, states)
-        }
+        ScalarOp::Add(l, r) => eval_scalar(payoff, *l, cursor, path, states) + eval_scalar(payoff, *r, cursor, path, states),
+        ScalarOp::Sub(l, r) => eval_scalar(payoff, *l, cursor, path, states) - eval_scalar(payoff, *r, cursor, path, states),
+        ScalarOp::Mul(l, r) => eval_scalar(payoff, *l, cursor, path, states) * eval_scalar(payoff, *r, cursor, path, states),
         ScalarOp::Div(l, r) => {
-            let denominator = eval_scalar_dual(payoff, *r, cursor, path, states);
-            assert!(denominator.value != 0.0, "payoff: division por cero");
-            eval_scalar_dual(payoff, *l, cursor, path, states) / denominator
+            let denominator = eval_scalar(payoff, *r, cursor, path, states);
+            assert!(denominator.re() != 0.0, "payoff: division por cero");
+            eval_scalar(payoff, *l, cursor, path, states) / denominator
         }
-        ScalarOp::Neg(x) => -eval_scalar_dual(payoff, *x, cursor, path, states),
-        ScalarOp::Abs(x) => eval_scalar_dual(payoff, *x, cursor, path, states).abs(),
-        ScalarOp::Exp(x) => eval_scalar_dual(payoff, *x, cursor, path, states).exp(),
-        ScalarOp::Log(x) => eval_scalar_dual(payoff, *x, cursor, path, states).ln(),
-        ScalarOp::Pow(base, exponent) => eval_scalar_dual(payoff, *base, cursor, path, states)
-            .powf(eval_scalar_dual(payoff, *exponent, cursor, path, states)),
+        ScalarOp::Neg(x) => -eval_scalar(payoff, *x, cursor, path, states),
+        ScalarOp::Abs(x) => eval_scalar(payoff, *x, cursor, path, states).abs(),
+        ScalarOp::Exp(x) => eval_scalar(payoff, *x, cursor, path, states).exp(),
+        ScalarOp::Log(x) => eval_scalar(payoff, *x, cursor, path, states).ln(),
+        ScalarOp::Pow(base, exponent) => {
+            eval_scalar(payoff, *base, cursor, path, states).powf(eval_scalar(payoff, *exponent, cursor, path, states))
+        }
         ScalarOp::Min(l, r) => {
-            eval_scalar_dual(payoff, *l, cursor, path, states).min(eval_scalar_dual(payoff, *r, cursor, path, states))
+            eval_scalar(payoff, *l, cursor, path, states).min(eval_scalar(payoff, *r, cursor, path, states))
         }
         ScalarOp::Max(l, r) => {
-            eval_scalar_dual(payoff, *l, cursor, path, states).max(eval_scalar_dual(payoff, *r, cursor, path, states))
+            eval_scalar(payoff, *l, cursor, path, states).max(eval_scalar(payoff, *r, cursor, path, states))
         }
         ScalarOp::Clamp { value, low, high } => {
-            let v = eval_scalar_dual(payoff, *value, cursor, path, states);
-            let lo = eval_scalar_dual(payoff, *low, cursor, path, states);
-            let hi = eval_scalar_dual(payoff, *high, cursor, path, states);
+            let v = eval_scalar(payoff, *value, cursor, path, states);
+            let lo = eval_scalar(payoff, *low, cursor, path, states);
+            let hi = eval_scalar(payoff, *high, cursor, path, states);
             v.max(lo).min(hi)
         }
         ScalarOp::EventValue { event, observable } => {
@@ -250,10 +278,10 @@ pub(crate) fn eval_scalar_dual(
             let t = state
                 .first_hit_time
                 .expect("payoff: EventValue: evento 'occurred' sin first_hit_time (estado inconsistente)");
-            // Recalcula el valor capturado como Dual en vez de leer `captured_values` (que solo
+            // Recalcula el valor capturado como T en vez de leer `captured_values` (que solo
             // guarda el `f64` realizado, ver `eval::EventStateResolved`): mismo valor real,
-            // ahora con su sensibilidad, porque `DualObservablePath::value_at` es una funcion
-            // pura de `(observable, time)` -- ninguna captura adicional que mantener aparte.
+            // ahora con su sensibilidad, porque `ObservablePathT::value_at` es una funcion pura
+            // de `(observable, time)` -- ninguna captura adicional que mantener aparte.
             path.value_at(*observable, t)
         }
     }
@@ -262,54 +290,52 @@ pub(crate) fn eval_scalar_dual(
 /// Evalua `payoff.contract_ops[idx]` acumulando cashflows duales en `out` -- espejo exacto de
 /// `eval::eval_contract`, salvo `ContractOp::If`, cuyo predicado se evalua sobre `f64_path`/
 /// `states` (la ramificacion se decide una vez y se mantiene fija, ver el doc-comment del modulo).
+/// Generico sobre `T: DualNumber`, mismo criterio que `eval_scalar`.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn eval_contract_dual(
+pub(crate) fn eval_contract<T: DualNumber>(
     payoff: &CompiledPayoff,
     idx: usize,
     cursor: Option<f64>,
-    dual_path: &dyn DualObservablePath,
+    dual_path: &dyn ObservablePathT<T>,
     f64_path: &dyn ObservablePath,
     states: &[EventStateResolved],
-    out: &mut Vec<PathCashflowDual>,
+    out: &mut Vec<PathCashflowDual<T>>,
 ) {
     match &payoff.contract_ops[idx] {
         ContractOp::Zero => {}
         ContractOp::Cashflow { amount } => {
             let t = cursor.expect("payoff: 'cashflow' sin cursor de tiempo activo (falta un 'when' envolvente)");
-            out.push(PathCashflowDual {
-                payment_time: t,
-                amount: eval_scalar_dual(payoff, *amount, cursor, dual_path, states),
-            });
+            out.push(PathCashflowDual { payment_time: t, amount: eval_scalar(payoff, *amount, cursor, dual_path, states) });
         }
         ContractOp::Give(child) => {
             let start = out.len();
-            eval_contract_dual(payoff, *child, cursor, dual_path, f64_path, states, out);
+            eval_contract(payoff, *child, cursor, dual_path, f64_path, states, out);
             for cf in &mut out[start..] {
                 cf.amount = -cf.amount;
             }
         }
         ContractOp::Both(children) => {
             for &child in children {
-                eval_contract_dual(payoff, child, cursor, dual_path, f64_path, states, out);
+                eval_contract(payoff, child, cursor, dual_path, f64_path, states, out);
             }
         }
         ContractOp::Scale { factor, child } => {
-            let f = eval_scalar_dual(payoff, *factor, cursor, dual_path, states);
+            let f = eval_scalar(payoff, *factor, cursor, dual_path, states);
             let start = out.len();
-            eval_contract_dual(payoff, *child, cursor, dual_path, f64_path, states, out);
+            eval_contract(payoff, *child, cursor, dual_path, f64_path, states, out);
             for cf in &mut out[start..] {
                 cf.amount = cf.amount * f;
             }
         }
         ContractOp::If { condition, if_true, if_false } => {
             if eval_predicate(payoff, *condition, cursor, f64_path, states) {
-                eval_contract_dual(payoff, *if_true, cursor, dual_path, f64_path, states, out);
+                eval_contract(payoff, *if_true, cursor, dual_path, f64_path, states, out);
             } else {
-                eval_contract_dual(payoff, *if_false, cursor, dual_path, f64_path, states, out);
+                eval_contract(payoff, *if_false, cursor, dual_path, f64_path, states, out);
             }
         }
         ContractOp::When { time, child } => {
-            eval_contract_dual(payoff, *child, Some(*time), dual_path, f64_path, states, out)
+            eval_contract(payoff, *child, Some(*time), dual_path, f64_path, states, out)
         }
         ContractOp::Trigger { event, settlement, on_hit, on_miss, .. } => {
             let state = &states[*event];
@@ -318,9 +344,9 @@ pub(crate) fn eval_contract_dual(
                     SettlementMode::AtHit => state.first_hit_time,
                     SettlementMode::AtScheduledPayment => cursor,
                 };
-                eval_contract_dual(payoff, *on_hit, new_cursor, dual_path, f64_path, states, out);
+                eval_contract(payoff, *on_hit, new_cursor, dual_path, f64_path, states, out);
             } else {
-                eval_contract_dual(payoff, *on_miss, cursor, dual_path, f64_path, states, out);
+                eval_contract(payoff, *on_miss, cursor, dual_path, f64_path, states, out);
             }
         }
         ContractOp::Exercise { event, exercise_value, continuation, .. } => {
@@ -331,10 +357,10 @@ pub(crate) fn eval_contract_dual(
                     .expect("payoff: Exercise 'occurred' sin first_hit_time (estado de decision inconsistente)");
                 out.push(PathCashflowDual {
                     payment_time: t,
-                    amount: eval_scalar_dual(payoff, *exercise_value, Some(t), dual_path, states),
+                    amount: eval_scalar(payoff, *exercise_value, Some(t), dual_path, states),
                 });
             } else {
-                eval_contract_dual(payoff, *continuation, cursor, dual_path, f64_path, states, out);
+                eval_contract(payoff, *continuation, cursor, dual_path, f64_path, states, out);
             }
         }
     }
@@ -343,15 +369,15 @@ pub(crate) fn eval_contract_dual(
 /// Interpreta `payoff` sobre una unica ruta y devuelve el ledger pathwise dual sin descontar --
 /// version dual de `eval::evaluate_with_resolved_states`. `states` debe venir de
 /// `eval::resolve_trigger_states` sobre la MISMA ruta `f64` que subyace a `dual_path` (mismos
-/// tiempos/valores, ver `GbmDualPath::new`).
-pub(crate) fn evaluate_dual(
+/// tiempos/valores, ver `GbmDualPath::new`). Generico sobre `T: DualNumber`.
+pub(crate) fn evaluate_dual<T: DualNumber>(
     payoff: &CompiledPayoff,
-    dual_path: &dyn DualObservablePath,
+    dual_path: &dyn ObservablePathT<T>,
     f64_path: &dyn ObservablePath,
     states: &[EventStateResolved],
-) -> Vec<PathCashflowDual> {
+) -> Vec<PathCashflowDual<T>> {
     let mut out = Vec::new();
-    eval_contract_dual(payoff, payoff.root, None, dual_path, f64_path, states, &mut out);
+    eval_contract(payoff, payoff.root, None, dual_path, f64_path, states, &mut out);
     out
 }
 
@@ -390,7 +416,7 @@ mod tests {
         let times = [t];
         let s_t = 137.0; // una realizacion cualquiera > 0
         let values = [s_t];
-        let path = GbmDualPath::new(&times, &values, s0, r, q, sigma, GbmGreek::Spot);
+        let path = GbmDualPath::<Dual>::new(&times, &values, s0, r, q, sigma, GbmGreek::Spot);
         let dual = path.value_at(0, t);
         assert!((dual.value - s_t).abs() < 1e-9);
         let expected_deriv = s_t / s0;
@@ -410,7 +436,7 @@ mod tests {
             let values = [s_t];
             let f64_path = FixedPath { times: &times, values: &values };
             let states = resolve_trigger_states(&payoff, &f64_path, 0);
-            let dual_path = GbmDualPath::new(&times, &values, s0, r, q, sigma, GbmGreek::Spot);
+            let dual_path = GbmDualPath::<Dual>::new(&times, &values, s0, r, q, sigma, GbmGreek::Spot);
             let ledger = evaluate_dual(&payoff, &dual_path, &f64_path, &states);
             assert_eq!(ledger.len(), 1);
             let expected_deriv = if s_t > 100.0 { s_t / s0 } else { 0.0 };
@@ -464,7 +490,7 @@ mod tests {
         let times = [t];
         let s_t = 121.0;
         let values = [s_t];
-        let path = GbmDualPath::new_p(&times, &values, s0, mu, sigma, GbmPGreek::Spot);
+        let path = GbmDualPath::<Dual>::new_p(&times, &values, s0, mu, sigma, GbmPGreek::Spot);
         let dual = path.value_at(0, t);
         assert!((dual.value - s_t).abs() < 1e-9);
         let expected_deriv = s_t / s0;

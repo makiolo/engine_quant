@@ -21,6 +21,7 @@ use crate::mc::{self, McEstimate};
 use crate::models::gbm_p::GbmP;
 use crate::payoff::api::check_single_observable;
 use crate::payoff::compile::compile;
+use crate::payoff::dual::Dual;
 use crate::payoff::eval::{evaluate_with_events_seeded, resolve_trigger_states, ObservablePath};
 use crate::payoff::ir::CompiledPayoff;
 use crate::payoff::sensitivity::{contains_exercise, evaluate_dual, GbmDualPath, GbmPGreek};
@@ -258,7 +259,7 @@ pub fn payoff_sensitivity_gbm_p(
         let values: Vec<f64> = columns.iter().map(|col| col[path_idx]).collect();
         let f64_path = SinglePath { times: &times, values: &values, sigma };
         let states = resolve_trigger_states(&payoff, &f64_path, bridge_seed_for_path(seed, path_idx));
-        let dual_path = GbmDualPath::new_p(&times, &values, s0, mu, sigma, greek_kind);
+        let dual_path = GbmDualPath::<Dual>::new_p(&times, &values, s0, mu, sigma, greek_kind);
         let ledger = evaluate_dual(&payoff, &dual_path, &f64_path, &states);
         samples.push(ledger.iter().map(|cf| cf.amount.deriv).sum());
     }

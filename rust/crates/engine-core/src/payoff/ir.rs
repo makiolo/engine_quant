@@ -30,8 +30,8 @@
 //! `f64`/`usize` por cada campo de cada variante, pensado para vectorizar la EVALUACION de muchos
 //! nodos a la vez): ese layout solo paga su complejidad si el interprete recorre el arbol de forma
 //! vectorizada nodo a nodo, y el modelo de ejecucion actual (`eval::eval_scalar`/`eval_contract`,
-//! `payoff::sensitivity::eval_scalar_dual`/`eval_contract_dual`) es recursivo sobre UN arbol por
-//! ruta -- la vectorizacion real de esta fase ocurre en la dimension de RUTAS Monte Carlo (columnas
+//! `payoff::sensitivity::eval_scalar`/`eval_contract` -- genericos sobre `T: DualNumber` desde
+//! PLAN_HYPERDUAL.md Fase 1) es recursivo sobre UN arbol por ruta -- la vectorizacion real de esta fase ocurre en la dimension de RUTAS Monte Carlo (columnas
 //! `Vec<f64>` de `simulate_gbm_columns`/`simulate_gbm_columns_at` en `payoff::api`/`payoff::hedge`,
 //! generadas por el backend de Burn), no en la dimension de nodos del IR. Reestructurar el IR a
 //! SoA sin cambiar tambien el interprete a un recorrido vectorizado por nodo no aportaria ninguna

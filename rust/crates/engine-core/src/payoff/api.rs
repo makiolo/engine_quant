@@ -444,7 +444,7 @@ fn payoff_sensitivity_pathwise_on<B: Backend<FloatElem = f64>>(
         let values: Vec<f64> = columns.iter().map(|col| col[path_idx]).collect();
         let f64_path = SinglePath { times: &times, values: &values, sigma };
         let states = resolve_trigger_states(payoff, &f64_path, bridge_seed_for_path(seed, path_idx));
-        let dual_path = GbmDualPath::new(&times, &values, s0, r, q, sigma, greek);
+        let dual_path = GbmDualPath::<Dual>::new(&times, &values, s0, r, q, sigma, greek);
         let ledger = evaluate_dual(payoff, &dual_path, &f64_path, &states);
 
         let r_dual = dual_path.rate_dual();

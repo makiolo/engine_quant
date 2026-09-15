@@ -367,7 +367,7 @@ y las rutas AAD reverse-mode de Hull-White (`Autodiff<CpuBackend>` de Burn, tens
 de payoff) NO implementan `DualNumber` en esta generalización — ver §5.1/§9/§10. Gamma/Vanna de
 Hull-White siguen sirviéndose exclusivamente por bump-and-reval.
 
-### Fase 1 — trait `DualNumber` + intérprete genérico (sin nuevos tipos)
+### Fase 1 — trait `DualNumber` + intérprete genérico (sin nuevos tipos) — DONE
 
 - extraer el trait de la aritmética que `Dual` ya tiene (impl mecánica, sin cambiar `Dual`);
 - genericizar `eval_scalar_dual`/`eval_contract_dual`/`DualObservablePath` sobre `T: DualNumber`;
@@ -376,7 +376,18 @@ Hull-White siguen sirviéndose exclusivamente por bump-and-reval.
 **Aceptación**: todos los tests existentes de `dual.rs`/`sensitivity.rs` pasan sin tocar una
 aserción — refactor puro, cero cambio de comportamiento observable (mismo criterio que
 `IModel::to_params()` en PLAN_GREEKS.md Fase 1: "aditivo, mecánico, no cambia ningún comportamiento
-existente").
+existente"). Confirmado: `cargo test -p engine-core` en verde (104/104 en `payoff::*`), `cargo build
+--workspace` limpio (incluye `engine-ffi`).
+
+**Nota de implementación (no contradice el diseño, lo precisa)**: `GbmDualPath::param_duals()` no
+es un metodo generico sobre `T` con un cuerpo compartido (el propio §4 ya anticipaba que el seedeo
+difiere por tipo) — se implementa via un trait auxiliar `GbmParamDuals<T: DualNumber>` (una
+`impl GbmParamDuals<Dual> for GbmDualPath<'_, Dual>` en Fase 1, una por cada tipo nuevo en Fase
+2/3), lo que permite que `value_at`/`rate_dual` SI sean genericos y escritos una unica vez (`impl<T:
+DualNumber> ObservablePathT<T> for GbmDualPath<'_, T> where GbmDualPath<'_, T>: GbmParamDuals<T>`).
+Reduce la duplicacion de Fase 2/3 al minimo: cada tipo nuevo solo aporta su propio `param_duals()`,
+no una copia de `value_at`. Instrumentacion añadida en Fase 1 para §8.4: `dual.rs::mul_f64` cuenta
+multiplicaciones reales en builds de test (cero coste en release, `#[inline(always)]` + `#[cfg(test)]`).
 
 ### Fase 2 — `Dual2` (Gamma/Volga pathwise)
 
