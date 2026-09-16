@@ -667,7 +667,7 @@ ENGINE_ABI_API void engine_abi_free_hessian(
 
 ## 9. Plan por fases
 
-### Fase 0 — ADRs
+### Fase 0 — ADRs — DONE
 
 - Confirmar (revisando el pricer cerrado de Hull-White línea a línea, no solo por inspección) que no
   hay ninguna rama (`if`/`min`/`max`) en el camino de `a`/`b`/`sigma`/`r0`/`eta`/`rho` hacia el NPV de
@@ -749,7 +749,7 @@ los `Dual2`/`HyperDual` abandonados de `payoff::dual` (que nunca llegaron a impl
 comparten la convención de Taylor y el patrón de producto de Cauchy truncado, no ningún tipo ni
 módulo.
 
-### Fase 1 — Hessiano local del motor de payoff (likelihood ratio, sin AD)
+### Fase 1 — Hessiano local del motor de payoff (likelihood ratio, sin AD) — DONE
 
 - `payoff::lrm`: añadir `volga_weight` (ya derivado y verificado en PLAN_HYPERDUAL.md/esta
   investigación) y una función `local_hessian_weights(z, s0, sigma, t) -> {gamma, volga, vanna}` que
@@ -770,7 +770,15 @@ Black-Scholes cerrado; el coste (paths simulados) de pedir las 3 entradas es el 
 sola (verificado con un contador de simulaciones, mismo espíritu que `mul_count` de
 PLAN_HYPERDUAL.md §8.4).
 
-### Fase 2 — Hessiano cerrado de Hull-White 1F (`Dual2`/`HyperDual` nuevos)
+**Cierre (commit `0ba5305`)**: implementado tal cual — `payoff::lrm::volga_weight` (derivado y
+verificado por cuadratura determinista) y `payoff_local_hessian_gbm_q`/`_p` (una única tanda de
+rutas reutilizada para gamma/volga/vanna, test bit a bit contra las rutas separadas existentes con
+el mismo seed). `HessianEntry`/`HessianReport`/`compute_hessian`/`try_hessian_likelihood_ratio`
+cableados en `engine::greeks`. `payoff_sensitivity2_gbm_q`/`_p`/`payoff_sensitivity_cross_gbm_q`/`_p`
+NO se retiraron (quedan coexistiendo, la migración de llamantes queda abierta si hace falta). Multi-
+activo: solo documentado en el código (§4.2), no implementado, como se decidió.
+
+### Fase 2 — Hessiano cerrado de Hull-White 1F (`Dual2`/`HyperDual` nuevos) — DONE
 
 - Nuevo módulo `models::hull_white_dual` (o similar): reimplementación escalar del pricer cerrado de
   bono cupón cero / NPV de swap, parametrizada sobre `T: DualNumber` (reutiliza el TRAIT de
@@ -784,7 +792,14 @@ PLAN_HYPERDUAL.md §8.4).
 puntos por par (10 pares) dentro de tolerancia declarada; NPV/Delta de la nueva implementación
 escalar coinciden con los de la implementación Burn existente.
 
-### Fase 3 — Hessiano cerrado de Hull-White 2F + HVP trivial
+**Cierre (commit `57a4562`)**: implementado tal cual en `models::hull_white_dual` (Rust) —
+`Dual2`/`HyperDual` nuevos (reutilizan el trait `DualNumber` de `payoff::dual`, ahora `pub(crate)`),
+value/gradiente verificados contra `irs_hull_white_npv_all_greeks` (Burn) con diferencias ~1e-10
+(ruido de punto flotante puro), Hessiano 4x4 (10 pares) verificado contra bump-and-reval.
+`try_hessian_forward_over_forward`/`GreekMethod::AadForwardOverForward` cableados en
+`compute_hessian` para `HullWhite1F`.
+
+### Fase 3 — Hessiano cerrado de Hull-White 2F + HVP trivial — DONE
 
 - Extiende Fase 2 a los 6 parámetros de 2F (21 pares), documentando `rho` fuera de la tabla si su
   parcial no se deriva en esta pasada (mismo criterio que AAD reverse hoy).
@@ -794,14 +809,24 @@ escalar coinciden con los de la implementación Burn existente.
 **Aceptación**: mismo criterio que Fase 2, extendido a 2F; `Hv` coincide con diferencias finitas
 direccionales de segundo orden.
 
-### Fase 4 (opcional) — estencil de bump-and-reval genérico para Hessiano/HVP fuera de tabla
+**Cierre (commit `133b849`)**: implementado tal cual — Hessiano 5x5 de Hull-White 2F (15 pares
+reales; `rho` nunca aparece, no es diferenciable, mismo criterio que AAD reverse) verificado contra
+Burn y contra bump-and-reval. `HvpComponent`/`HvpReport`/`compute_hvp` añadidos: se apoyan en
+`compute_hessian` ya existente (sin dispatch nuevo por modelo), por lo que funcionan igual para
+Hull-White que para GBM/GBM_P sin código adicional. **Paso adicional no numerado, hecho justo
+después (commit `4b50659`)**: `compute_hessian`/`compute_hvp` expuestos en Python (nanobind
+directo)/Excel (`ENGINE.HESSIAN`/`ENGINE.HVP`)/C ABI (`engine_abi_hessian`/`_hvp`), siguiendo el
+patrón real de `compute_all_greeks` en las tres capas (el boceto de dataclasses Python de §8.1 no
+aplica: `all_greeks` real no lo usa).
+
+### Fase 4 (opcional) — estencil de bump-and-reval genérico para Hessiano/HVP fuera de tabla — NOT DONE (opcional, no implementada)
 
 - Para cualquier `(modelo,métrica)` no cubierta por Fase 1-3: `compute_hessian`/`compute_hvp` caen a
   N(N+1)/2 pares evaluados con el estencil de 3/4 puntos que `compute_greek` ya tiene por entrada —
   mecánico, sin necesitar tabla de capacidades nueva, mismo principio de "nunca fallar, degradar a
   bump-and-reval" que el resto del motor de Greeks.
 
-### Fase 6 — `Portfolio` first-class (lista de trades, agregación por suma)
+### Fase 6 — `Portfolio` first-class (lista de trades, agregación por suma) — DONE
 
 - `engine::Portfolio` (`engine/portfolio.hpp`, §6.4): contenedor de `IProduct`, envoltorio fino sobre
   `price_many` ya existente para `Portfolio::price`.
@@ -820,6 +845,18 @@ entrada a entrada, con sumar a mano los `HessianReport` de `compute_hessian` lla
 `Portfolio.price()` coincide con `price_many` sobre el mismo vector de trades; añadir/quitar un
 trade del `Portfolio` no requiere reconstruir ni reconfigurar nada del lado de `IModel`/
 `MarketSnapshot`.
+
+**Cierre (commit `31c938d`)**: implementado con dos desviaciones deliberadas del boceto anterior,
+documentadas en el código: (1) Python expone `engine::Portfolio` directamente vía `nb::class_`
+(mismo criterio real que `Engine.hessian`/`.hvp`), no una fachada `engine_typed.portfolio.Portfolio`
+separada; (2) Excel usa `ENGINE.PORTFOLIO.CREATE(trade_handles)` FUNCIONAL (construye el portfolio
+completo de una lista de handles, memoizado por esa lista exacta) en vez de un `.ADD` mutante —
+un `.ADD` sobre un handle ya creado rompería la invariante de `HandleRegistry` ("mismos parámetros
+→ mismo handle", sin gestión de ciclo de vida por celda), porque Excel puede recalcular esa fórmula
+en cualquier evento de recálculo, no solo la primera vez. `EngineProduct::ptr` (C ABI) pasó de
+`unique_ptr` a `shared_ptr` para permitir que un trade viva a la vez en un `Portfolio` y se siga
+usando individualmente (mejora de seguridad de memoria como efecto secundario). Verificado
+exactamente en las cuatro capas (C++/C ABI/Python/Excel).
 
 ### Fase 7 (fuera de alcance de este documento, solo referenciada) — curva/pilares y multi-activo
 
