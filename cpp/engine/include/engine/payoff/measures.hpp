@@ -384,6 +384,30 @@ bool payoff_supports_second_order_lrm(const PayoffProgram& program);
 // Extension bajo P de `payoff_supports_second_order_lrm`.
 bool payoff_supports_second_order_lrm_p(const PayoffProgram& program);
 
+// --- PLAN_BACKWARD.md §9 Fase 1: Hessiano local (Gamma/Volga/Vanna) via likelihood ratio -------
+//
+// UNA SOLA tanda de rutas simuladas reutilizada para las tres entradas (ver
+// `engine_core::payoff::LocalHessianEstimate`) -- complementa, no sustituye, a
+// `payoff_sensitivity2_gbm`/`payoff_sensitivity_cross_gbm` (Gamma/Vanna una a una, cada una con su
+// propia simulacion independiente). Mismo alcance/preflight que esas dos funciones: solo
+// contratos de una unica fecha terminal (`payoff_supports_second_order_lrm[_p]`).
+
+struct LocalHessianResult {
+    SensitivityResult gamma; // d2V/ds0^2
+    SensitivityResult volga; // d2V/dsigma^2
+    SensitivityResult vanna; // d2V/(ds0 dsigma)
+};
+
+// Hessiano local bajo Q -- ver `engine_core::payoff::payoff_local_hessian_gbm_q`.
+LocalHessianResult payoff_local_hessian_gbm(
+    const PayoffProgram& program, const GbmModel& model, std::uint64_t n_paths, std::uint64_t seed
+);
+
+// Extension bajo P -- ver `engine_core::payoff::payoff_local_hessian_gbm_p`.
+LocalHessianResult payoff_local_hessian_gbm_p(
+    const PayoffProgram& program, const GbmPModel& model, std::uint64_t n_paths, std::uint64_t seed
+);
+
 // Restricciones opcionales sobre los pesos de `synthesize_hedge_gbm` (PLAN_PRODUCTS.md §12
 // Fase 11, items pendientes "liquidez" y "restricciones de tipo LP/QP (posiciones
 // minimas/maximas)"). Espejo de `engine_core::payoff::HedgeConstraints` -- ver su doc-comment en

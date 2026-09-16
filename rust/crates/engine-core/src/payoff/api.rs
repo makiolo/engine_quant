@@ -631,6 +631,105 @@ fn payoff_sensitivity_cross_lrm_on<B: Backend<FloatElem = f64>>(
     Ok(mc::aggregate(&samples, mc::Z_95))
 }
 
+/// Resultado de `payoff_local_hessian_gbm_q`/`_p` (PLAN_BACKWARD.md §9 Fase 1): las tres entradas
+/// del Hessiano local de una call/put de una UNICA fecha terminal -- `gamma` (`d2V/ds0^2`), `volga`
+/// (`d2V/dsigma^2`) y `vanna` (`d2V/(ds0 dsigma)`) -- cada una agregada por separado
+/// (`mc::aggregate`) pero sobre la MISMA tanda de rutas simuladas (ver
+/// `payoff_local_hessian_lrm_on`). A diferencia de llamar a `payoff_sensitivity2_gbm_q` +
+/// `payoff_sensitivity_cross_gbm_q` por separado (dos simulaciones GBM independientes, aunque con
+/// el mismo seed), aqui solo hay una: el coste de pedir las 3 entradas es el mismo que pedir 1 sola.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LocalHessianEstimate {
+    pub gamma: McEstimate,
+    pub volga: McEstimate,
+    pub vanna: McEstimate,
+}
+
+/// Hessiano local (Gamma/Volga/Vanna) de `price_payoff_gbm_q` via likelihood ratio, en UNA SOLA
+/// tanda de rutas simuladas (PLAN_BACKWARD.md §9 Fase 1 -- "una pasada cara, muchas derivadas
+/// baratas", la propiedad que motiva todo el documento). Complementa a `payoff_sensitivity2_gbm_q`/
+/// `payoff_sensitivity_cross_gbm_q` (que siguen intactas, cada una con su propia simulacion
+/// independiente) sin sustituirlas -- ambas rutas coexisten hasta que los llamantes migren a esta
+/// (PLAN_BACKWARD.md §9 Fase 1). Mismo alcance que esas dos funciones: solo contratos de una unica
+/// fecha terminal (`lrm::single_terminal_time`); no hay parametro `greek` porque siempre se calculan
+/// las tres entradas.
+#[allow(clippy::too_many_arguments)]
+pub fn payoff_local_hessian_gbm_q(
+    backend: &str,
+    spec_json: &str,
+    observable: &str,
+    s0: f64,
+    r: f64,
+    q: f64,
+    sigma: f64,
+    n_paths: u64,
+    seed: u64,
+) -> Result<LocalHessianEstimate, String> {
+    let payoff = compile(spec_json)?;
+    check_single_observable(&payoff, observable, n_paths)?;
+    lrm::single_terminal_time(&payoff)?;
+    match resolve_backend(backend) {
+        ComputeBackend::Cpu => {
+            let device = burn::tensor::Device::<CpuBackend>::default();
+            payoff_local_hessian_lrm_on::<CpuBackend>(&device, &payoff, s0, r, q, sigma, n_paths, seed)
+        }
+        ComputeBackend::Gpu => {
+            #[cfg(feature = "gpu")]
+            {
+                let device = burn::tensor::Device::<crate::backend::GpuBackend>::default();
+                payoff_local_hessian_lrm_on::<crate::backend::GpuBackend>(
+                    &device, &payoff, s0, r, q, sigma, n_paths, seed,
+                )
+            }
+            #[cfg(not(feature = "gpu"))]
+            {
+                let device = burn::tensor::Device::<CpuBackend>::default();
+                payoff_local_hessian_lrm_on::<CpuBackend>(&device, &payoff, s0, r, q, sigma, n_paths, seed)
+            }
+        }
+    }
+}
+
+/// UNA sola llamada a `simulate_gbm_columns` (verificable por inspeccion: no hay ninguna otra en
+/// esta funcion) reutilizada para las tres salidas -- mismo bucle por ruta que
+/// `payoff_sensitivity2_lrm_on`/`payoff_sensitivity_cross_lrm_on`, acumulando tres vectores de
+/// muestras (`gamma`/`volga`/`vanna`) a partir del MISMO `present_value`/`z` por ruta
+/// (`lrm::local_hessian_weights`).
+#[allow(clippy::too_many_arguments)]
+fn payoff_local_hessian_lrm_on<B: Backend<FloatElem = f64>>(
+    device: &burn::tensor::Device<B>,
+    payoff: &CompiledPayoff,
+    s0: f64,
+    r: f64,
+    q: f64,
+    sigma: f64,
+    n_paths: u64,
+    seed: u64,
+) -> Result<LocalHessianEstimate, String> {
+    let (times, columns) = simulate_gbm_columns::<B>(device, payoff, s0, r, q, sigma, n_paths, seed, 0.0)?;
+    let t = times[0]; // lrm::single_terminal_time ya garantizo una unica fecha antes de llegar aqui
+    let n_paths_usize = n_paths as usize;
+
+    let mut gamma_samples = Vec::with_capacity(n_paths_usize);
+    let mut volga_samples = Vec::with_capacity(n_paths_usize);
+    let mut vanna_samples = Vec::with_capacity(n_paths_usize);
+    for path_idx in 0..n_paths_usize {
+        let s_t = columns[0][path_idx];
+        let present_value = discounted_present_value_at_terminal(payoff, t, s_t, r, sigma, seed, path_idx);
+        let z = lrm::recover_terminal_z(s0, r, q, sigma, t, s_t);
+        let weights = lrm::local_hessian_weights(z, s0, sigma, t);
+        gamma_samples.push(present_value * weights.gamma);
+        volga_samples.push(present_value * weights.volga);
+        vanna_samples.push(present_value * weights.vanna);
+    }
+
+    Ok(LocalHessianEstimate {
+        gamma: mc::aggregate(&gamma_samples, mc::Z_95),
+        volga: mc::aggregate(&volga_samples, mc::Z_95),
+        vanna: mc::aggregate(&vanna_samples, mc::Z_95),
+    })
+}
+
 /// Fallback bump-and-reval (diferencia central, numeros aleatorios comunes) para contratos con
 /// `ContractOp::Exercise` -- ver el doc-comment de `payoff_sensitivity_gbm_q`. `h` es un bump
 /// relativo (`1e-4`), con un piso absoluto (`1e-6`) para el caso de un parametro nominalmente cero
@@ -1754,6 +1853,50 @@ mod tests {
             "vanna MC={} (se={}) vanna analitica={analytic_vanna} tol={tolerance}",
             vanna.mean,
             vanna.std_error
+        );
+    }
+
+    // PLAN_BACKWARD.md §9 Fase 1: `payoff_local_hessian_gbm_q` hace UNA sola simulacion reutilizada
+    // para Gamma/Volga/Vanna -- con el MISMO seed/n_paths que las llamadas separadas de arriba,
+    // Gamma/Vanna deben coincidir BIT A BIT (mismas muestras, misma formula, mismo orden de
+    // operaciones en punto flotante) y Volga debe coincidir con Black-Scholes dentro de tolerancia
+    // Monte Carlo.
+    #[test]
+    fn local_hessian_matches_separate_gamma_and_vanna_calls_bit_for_bit_and_volga_matches_black_scholes() {
+        let _guard = crate::rng_test_lock::LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (s0, strike, r, q, sigma, maturity) = (100.0, 100.0, 0.05, 0.0, 0.2, 1.0);
+        let spec = CALL_JSON_TEMPLATE.replace("{maturity}", &maturity.to_string()).replace("{strike}", &strike.to_string());
+        let (n_paths, seed) = (200_000, 7);
+
+        let hessian = payoff_local_hessian_gbm_q("cpu", &spec, "EQ.SPOT.XYZ", s0, r, q, sigma, n_paths, seed).unwrap();
+        let gamma_separate =
+            payoff_sensitivity2_gbm_q("cpu", &spec, "EQ.SPOT.XYZ", "spot", s0, r, q, sigma, n_paths, seed).unwrap();
+        let vanna_separate = payoff_sensitivity_cross_gbm_q(
+            "cpu", &spec, "EQ.SPOT.XYZ", "spot", "volatility", s0, r, q, sigma, n_paths, seed,
+        )
+        .unwrap();
+
+        assert_eq!(
+            hessian.gamma, gamma_separate,
+            "misma semilla/n_paths/formula -> mismas muestras -> identico bit a bit"
+        );
+        assert_eq!(
+            hessian.vanna, vanna_separate,
+            "misma semilla/n_paths/formula -> mismas muestras -> identico bit a bit"
+        );
+
+        let h = 1e-3;
+        let analytic_volga = (black_scholes_call(s0, strike, r, q, sigma + h, maturity)
+            - 2.0 * black_scholes_call(s0, strike, r, q, sigma, maturity)
+            + black_scholes_call(s0, strike, r, q, sigma - h, maturity))
+            / (h * h);
+
+        let tolerance = 8.0 * hessian.volga.std_error;
+        assert!(
+            (hessian.volga.mean - analytic_volga).abs() < tolerance,
+            "volga MC={} (se={}) volga analitica={analytic_volga} tol={tolerance}",
+            hessian.volga.mean,
+            hessian.volga.std_error
         );
     }
 

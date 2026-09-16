@@ -83,6 +83,94 @@ pub(crate) fn vanna_weight(z: f64, s0: f64, sigma: f64, t: f64) -> f64 {
     (z * (z * z - 3.0) / (sigma * sigma * sqrt_t) + (1.0 - z * z) / sigma) / s0
 }
 
+/// Peso de Volga (segunda derivada PURA respecto de `sigma`) -- `Volga = E[h(S_T) *
+/// volga_weight(Z)]`. Derivado con el MISMO metodo que `gamma_weight`/`vanna_weight`
+/// (PLAN_BACKWARD.md §9 Fase 1): la identidad `d^2/dtheta^2 E[h(S_T)] = E[h(S_T) * ((d ln f/dtheta)^2
+/// + d^2 ln f/dtheta^2)]` evaluada en `theta = sigma`, con `f` la densidad lognormal de `S_T` bajo
+/// GBM y `Z` la normal estandar recuperada por `recover_terminal_z`.
+///
+/// Derivacion (mantener aqui para auditar el algebra, no solo el resultado): fijando el punto
+/// observado `s = S_T` (y por tanto `x = ln(s/s0)`) y dejando variar `sigma`, `ln f(s;sigma) =
+/// -ln(sigma) - const - z(sigma)^2/2` donde `z(sigma) = (x - (r-q-0.5*sigma^2)*t) / (sigma*sqrt(t))`
+/// es la MISMA `Z` recuperada por `recover_terminal_z`, ahora vista como funcion de `sigma` con `x`
+/// fijo (el termino `-ln(s)` no depende de `sigma`, asi que no afecta a ninguna derivada respecto de
+/// `sigma`). Escribiendo `N(sigma) = x - (r-q)*t + 0.5*sigma^2*t` (el numerador de `z`, con
+/// `dN/dsigma = sigma*t`):
+///
+/// ```text
+/// dz/dsigma  = sqrt(t) - z/sigma
+/// d(z^2/2)/dsigma  = z*sqrt(t) - z^2/sigma
+/// d^2(z^2/2)/dsigma^2 = t - 3*z*sqrt(t)/sigma + 3*z^2/sigma^2
+///
+/// d ln f/dsigma   = -1/sigma - z*sqrt(t) + z^2/sigma       = (z^2-1)/sigma - z*sqrt(t)
+/// d^2 ln f/dsigma^2 = 1/sigma^2 - t + 3*z*sqrt(t)/sigma - 3*z^2/sigma^2
+///
+/// volga_weight = (d ln f/dsigma)^2 + d^2 ln f/dsigma^2
+///              = (z^4 - 5*z^2 + 2)/sigma^2 + sqrt(t)*z*(5 - 2*z^2)/sigma + t*(z^2 - 1)
+/// ```
+///
+/// Verificado por cuadratura determinista contra la segunda diferencia finita respecto de `sigma`
+/// de la propia integral (no del integrando) en `tests`, mismo criterio que `gamma_weight`/
+/// `vanna_weight`: sin `s0` en la formula (una derivada pura en `sigma` no depende de `s0`), a
+/// diferencia de `gamma_weight`/`vanna_weight` que si escalan por `1/s0^2`/`1/s0`.
+pub(crate) fn volga_weight(z: f64, sigma: f64, t: f64) -> f64 {
+    let sqrt_t = t.sqrt();
+    let z2 = z * z;
+    (z2 * z2 - 5.0 * z2 + 2.0) / (sigma * sigma) + sqrt_t * z * (5.0 - 2.0 * z2) / sigma + t * (z2 - 1.0)
+}
+
+/// Las tres entradas del Hessiano local de una unica fecha terminal, reutilizando una UNICA `z`
+/// recuperada por ruta (PLAN_BACKWARD.md §9 Fase 1: "una pasada cara, muchas derivadas baratas") --
+/// evita que quien llama repita `gamma_weight`/`volga_weight`/`vanna_weight` a mano en tres sitios
+/// distintos.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct LocalHessianWeights {
+    pub gamma: f64,
+    pub volga: f64,
+    pub vanna: f64,
+}
+
+pub(crate) fn local_hessian_weights(z: f64, s0: f64, sigma: f64, t: f64) -> LocalHessianWeights {
+    LocalHessianWeights {
+        gamma: gamma_weight(z, s0, sigma, t),
+        volga: volga_weight(z, sigma, t),
+        vanna: vanna_weight(z, s0, sigma, t),
+    }
+}
+
+// PLAN_BACKWARD.md §4.2 (investigacion, NO implementado -- no existe hoy ningun payoff
+// multi-activo, `Gbm` es de un unico observable): generalizacion de `gamma_weight`/`volga_weight`/
+// `vanna_weight` a `n` activos lognormales con Brownianos correlacionados (matriz de correlacion
+// `rho` FIJA, no un parametro a derivar). La densidad conjunta de `S_T` en un punto `s` tiene la
+// forma `ln f(s;theta) = A(theta) - 0.5 * eps(theta)^T P eps(theta)`, donde `eps(theta)` es el
+// vector de residuos estandarizados (`eps_k = (ln(s_k/s0_k) - mu_k(theta)*T) / (sigma_k(theta) *
+// sqrt(T))`, evaluado en el punto observado `s`, como funcion de los parametros `theta`), `P =
+// rho^-1` (la matriz de precision, constante) y `A(theta)` recoge los terminos normalizadores que
+// dependen de `theta` solo a traves de `sigma_k` (nunca de `s0_k`). El peso de Hessiano para
+// cualquier par de parametros `(theta_i, theta_j)` es la misma identidad que arriba, ahora con
+// productos matriciales:
+//
+// ```text
+// weight_ij(eps) = (d ln f/d theta_i)(d ln f/d theta_j) + d^2 ln f/(d theta_i d theta_j)
+//
+// d ln f/d theta_i        = A'_i(theta) - eps^T P (d eps/d theta_i)
+// d^2 ln f/(d theta_i d theta_j) = A''_ij(theta) - (d eps/d theta_j)^T P (d eps/d theta_i)
+//                                  - eps^T P (d^2 eps/(d theta_i d theta_j))
+// ```
+//
+// `Gamma = E[valor_presente(ruta) * weight_ii]`, `Hessiano_cruzado_ij = E[valor_presente(ruta) *
+// weight_ij]` -- de nuevo sin derivar el payoff, solo reponderando. Para `n=1` esta formula se
+// reduce exactamente a `gamma_weight`/`vanna_weight`/`volga_weight` de arriba.
+//
+// HALLAZGO NO OBVIO (verificado numericamente por cuadratura 2D en PLAN_BACKWARD.md §4.2, factor
+// de error ~2 si se ignora): en presencia de correlacion, ni siquiera la Gamma "propia" de un
+// activo (mantener fijo todo excepto `s0_1`) coincide con la formula univariante de un unico activo
+// aislado -- hay un termino de correccion que depende de `rho` y del residuo del OTRO activo
+// (`eps_2`), porque se esta derivando la densidad CONJUNTA, no la marginal. Cualquier implementacion
+// futura de esta formula (condicionada a que exista un payoff multi-activo real, PLAN_BACKWARD.md
+// §12) DEBE repetir esa verificacion por cuadratura antes de confiar en la formula -- no se
+// implementa aqui, solo se documenta.
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -163,6 +251,51 @@ mod tests {
         assert!(
             (lrm_vanna - numerical_vanna).abs() < 1e-2 * numerical_vanna.abs().max(1.0),
             "lrm={lrm_vanna} numerical={numerical_vanna}"
+        );
+    }
+
+    #[test]
+    fn volga_weight_matches_numerical_second_derivative_for_a_smooth_payoff() {
+        // Mismo criterio que gamma_weight_matches_numerical_second_derivative_for_a_smooth_payoff,
+        // pero diferenciando respecto de sigma en vez de s0.
+        let (s0, r, q, sigma, t) = (100.0, 0.05, 0.02, 0.3, 0.75);
+        let h = |x: f64| x * x;
+
+        let v = |sigma: f64| integrate_normal(|z| h(s_t_of(s0, r, q, sigma, t, z)));
+        let eps = 1e-4;
+        let numerical_volga = (v(sigma + eps) - 2.0 * v(sigma) + v(sigma - eps)) / (eps * eps);
+
+        let lrm_volga =
+            integrate_normal(|z| h(s_t_of(s0, r, q, sigma, t, z)) * volga_weight(z, sigma, t));
+
+        assert!(
+            (lrm_volga - numerical_volga).abs() < 1e-3 * numerical_volga.abs().max(1.0),
+            "lrm={lrm_volga} numerical={numerical_volga}"
+        );
+    }
+
+    #[test]
+    fn volga_weight_matches_numerical_second_derivative_for_a_kinked_call_payoff() {
+        // El caso que motiva el modulo: h tiene un kink real (max(S_T-K,0)); numerical_volga sigue
+        // siendo un oraculo valido porque diferencia la EXPECTATION (suave en sigma), no el
+        // integrando.
+        let (s0, strike, r, q, sigma, t) = (100.0, 100.0, 0.05, 0.0, 0.2, 1.0);
+        let h = |x: f64| (x - strike).max(0.0);
+
+        let v = |sigma: f64| integrate_normal(|z| h(s_t_of(s0, r, q, sigma, t, z)));
+        // eps mas grande que en el caso suave: la derivada finita de segundo orden divide por
+        // eps^2, amplificando el error de discretizacion de `integrate_normal` cerca del kink
+        // (mismo motivo por el que `vanna_weight_matches_numerical_mixed_partial_for_a_kinked_call_payoff`
+        // usa una tolerancia mas laxa que su contraparte suave).
+        let eps = 1e-3;
+        let numerical_volga = (v(sigma + eps) - 2.0 * v(sigma) + v(sigma - eps)) / (eps * eps);
+
+        let lrm_volga =
+            integrate_normal(|z| h(s_t_of(s0, r, q, sigma, t, z)) * volga_weight(z, sigma, t));
+
+        assert!(
+            (lrm_volga - numerical_volga).abs() < 1e-2 * numerical_volga.abs().max(1.0),
+            "lrm={lrm_volga} numerical={numerical_volga}"
         );
     }
 

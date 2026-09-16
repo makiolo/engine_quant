@@ -66,7 +66,14 @@ struct GreekOrder {
 // Pathwise/AadReverse explícitamente sobre una combinación no verificada (o sobre `order=2`/
 // `cross_factor`, que ninguna especialización cubre todavía) lanza std::invalid_argument
 // nombrando la razón exacta -- nunca degrada en silencio.
-enum class GreekMethod { Auto, BumpAndReval, Pathwise, AadReverse };
+// `LikelihoodRatioHessian` (PLAN_BACKWARD.md §9 Fase 1: Hessiano local del motor de payoff via
+// likelihood ratio, sin AD -- ver `compute_hessian`/`try_hessian_likelihood_ratio` en greeks.cpp)
+// y `AadForwardOverForward` (PLAN_BACKWARD.md §5, Fase 2/3: Hessiano cerrado de Hull-White vía
+// `Dual2`/`HyperDual` NUEVOS -- congelado aquí por ADR-BW-02 aunque todavía no tiene ninguna
+// especialización cableada) se añaden deliberadamente distintos de `Pathwise`/`AadReverse` para
+// que `HessianEntry::method_used` siga siendo auto-explicativo sobre CUÁL de los mecanismos
+// (verosimilitud, forward-over-forward cerrado, bump-and-reval) produjo cada número.
+enum class GreekMethod { Auto, BumpAndReval, Pathwise, AadReverse, LikelihoodRatioHessian, AadForwardOverForward };
 
 GreekMethod parse_greek_method(const std::string& text);
 std::string to_string(GreekMethod method);
@@ -189,6 +196,41 @@ GreeksReport compute_all_greeks(
     const IModel& model, const IProduct& product, const MarketSnapshot& market,
     const PricingContext& pricing, const ExecutionContext& execution,
     bool include_curve_buckets = false, bool include_second_order = false
+);
+
+// Hessiano local de un único trade (PLAN_BACKWARD.md §7, §9 Fase 1): un `HessianEntry` por par
+// `(factor_i, factor_j)` -- `factor_i == factor_j` es una entrada diagonal (Gamma/Volga),
+// `factor_i != factor_j` una cruzada (Vanna/cross-gamma). Fase 1 solo puebla esto para GBM/GBM_P
+// vía likelihood ratio (`LikelihoodRatioHessian`, factores en {spot, volatility}); Fase 2/3
+// añadirán Hull-White vía `AadForwardOverForward`.
+struct HessianEntry {
+    RiskFactor factor_i;
+    RiskFactor factor_j;               // factor_i == factor_j -> entrada diagonal (Gamma/Volga)
+    double value = 0.0;
+    std::optional<double> std_error;   // presente si method_used == LikelihoodRatioHessian (Monte Carlo)
+    GreekMethod method_used = GreekMethod::BumpAndReval;
+    payoff::ProbabilityMeasure measure = payoff::ProbabilityMeasure::DeterministicScenario;
+};
+
+struct HessianReport {
+    std::vector<HessianEntry> entries;  // solo triangulo superior (simetrico) + diagonal
+    std::vector<std::string> skipped;   // mismo criterio "best effort" que GreeksReport::skipped
+};
+
+// Hessiano local de un único trade, "mejor esfuerzo" como `compute_all_greeks` (nunca lanza sobre
+// una combinación no soportada -- va a `skipped`, a diferencia de `compute_greek` que sí lanza
+// sobre una petición explícita no soportada). PLAN_BACKWARD.md §9 Fase 1: solo cubre
+// `{"GBM","PayoffPriceQ"}`/`{"GBM_P","PayoffForecastP"}` (ver `hessian_capabilities()` en
+// greeks.cpp) con factores en {spot, volatility} -- cualquier otra combinación de (modelo,
+// métrica) o cualquier factor fuera de {spot, volatility} va a `skipped` con el motivo exacto.
+// `factors` vacío = enumeración automática (exactamente {spot, volatility} en esta fase, ver el
+// doc-comment de `compute_hessian` en greeks.cpp); no vacío = solo los pares formables con esos
+// factores (∩ {spot, volatility}).
+HessianReport compute_hessian(
+    const Registries& registries, const std::string& metric_name, const Params& metric_params,
+    const IModel& model, const IProduct& product, const MarketSnapshot& market,
+    const PricingContext& pricing, const ExecutionContext& execution,
+    const std::vector<RiskFactor>& factors = {}
 );
 
 } // namespace greeks

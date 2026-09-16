@@ -144,6 +144,17 @@ mod ffi {
         n_paths: u64,
     }
 
+    /// Hessiano local (Gamma/Volga/Vanna) de un `PayoffProgram` bajo GBM, via likelihood ratio, en
+    /// UNA SOLA tanda de rutas simuladas (PLAN_BACKWARD.md §9 Fase 1), ver
+    /// `engine_core::payoff::LocalHessianEstimate`. Reutiliza `PayoffSensitivityResult` para cada
+    /// componente (misma forma que `payoff_sensitivity2_gbm_q`/`payoff_sensitivity_cross_gbm_q`,
+    /// sin inventar un formato nuevo).
+    struct PayoffLocalHessianResult {
+        gamma: PayoffSensitivityResult,
+        volga: PayoffSensitivityResult,
+        vanna: PayoffSensitivityResult,
+    }
+
     /// Resultado de sintetizar una cobertura bajo GBM/Q (PLAN_PRODUCTS.md §11/§12 Fase 11, item
     /// pendiente "cablear payoff::hedge::synthesize_hedge_gbm_q ... al bridge cxx"), ver
     /// `engine_core::payoff::HedgeResult`. Los campos opcionales de `HedgeResult`
@@ -771,6 +782,37 @@ mod ffi {
             n_paths: u64,
             seed: u64,
         ) -> Result<PayoffSensitivityResult>;
+
+        // PLAN_BACKWARD.md §9 Fase 1: Hessiano local (Gamma/Volga/Vanna) bajo Q via likelihood
+        // ratio, ver engine_core::payoff::payoff_local_hessian_gbm_q -- UNA SOLA simulacion GBM
+        // reutilizada para las tres salidas (complementa, no sustituye, a
+        // payoff_sensitivity2_gbm_q/payoff_sensitivity_cross_gbm_q). Mismo alcance: solo contratos
+        // de una unica fecha terminal (`payoff_supports_second_order_lrm` decide ANTES de llamar
+        // aqui); no hay parametro `greek` porque siempre se calculan las tres entradas.
+        #[allow(clippy::too_many_arguments)]
+        fn payoff_local_hessian_gbm_q(
+            spec_json: String,
+            observable: String,
+            s0: f64,
+            r: f64,
+            q: f64,
+            sigma: f64,
+            n_paths: u64,
+            seed: u64,
+        ) -> Result<PayoffLocalHessianResult>;
+
+        // Extension bajo P de payoff_local_hessian_gbm_q -- ver
+        // engine_core::payoff::payoff_local_hessian_gbm_p.
+        #[allow(clippy::too_many_arguments)]
+        fn payoff_local_hessian_gbm_p(
+            spec_json: String,
+            observable: String,
+            s0: f64,
+            mu: f64,
+            sigma: f64,
+            n_paths: u64,
+            seed: u64,
+        ) -> Result<PayoffLocalHessianResult>;
 
         // PLAN_HYPERDUAL.md §5: `true` si spec_json compila y depende del subyacente en una unica
         // fecha terminal -- consulta de capacidad que engine::greeks::compute_greek (C++) usa
@@ -1617,6 +1659,81 @@ fn payoff_sensitivity_cross_gbm_p(
         ci_low: estimate.ci_low,
         ci_high: estimate.ci_high,
         n_paths: estimate.n_paths,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn payoff_local_hessian_gbm_q(
+    spec_json: String,
+    observable: String,
+    s0: f64,
+    r: f64,
+    q: f64,
+    sigma: f64,
+    n_paths: u64,
+    seed: u64,
+) -> Result<ffi::PayoffLocalHessianResult, String> {
+    let estimate = engine_core::payoff::payoff_local_hessian_gbm_q(
+        "cpu", &spec_json, &observable, s0, r, q, sigma, n_paths, seed,
+    )?;
+    Ok(ffi::PayoffLocalHessianResult {
+        gamma: ffi::PayoffSensitivityResult {
+            value: estimate.gamma.mean,
+            std_error: estimate.gamma.std_error,
+            ci_low: estimate.gamma.ci_low,
+            ci_high: estimate.gamma.ci_high,
+            n_paths: estimate.gamma.n_paths,
+        },
+        volga: ffi::PayoffSensitivityResult {
+            value: estimate.volga.mean,
+            std_error: estimate.volga.std_error,
+            ci_low: estimate.volga.ci_low,
+            ci_high: estimate.volga.ci_high,
+            n_paths: estimate.volga.n_paths,
+        },
+        vanna: ffi::PayoffSensitivityResult {
+            value: estimate.vanna.mean,
+            std_error: estimate.vanna.std_error,
+            ci_low: estimate.vanna.ci_low,
+            ci_high: estimate.vanna.ci_high,
+            n_paths: estimate.vanna.n_paths,
+        },
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn payoff_local_hessian_gbm_p(
+    spec_json: String,
+    observable: String,
+    s0: f64,
+    mu: f64,
+    sigma: f64,
+    n_paths: u64,
+    seed: u64,
+) -> Result<ffi::PayoffLocalHessianResult, String> {
+    let estimate = engine_core::payoff::payoff_local_hessian_gbm_p(&spec_json, &observable, s0, mu, sigma, n_paths, seed)?;
+    Ok(ffi::PayoffLocalHessianResult {
+        gamma: ffi::PayoffSensitivityResult {
+            value: estimate.gamma.mean,
+            std_error: estimate.gamma.std_error,
+            ci_low: estimate.gamma.ci_low,
+            ci_high: estimate.gamma.ci_high,
+            n_paths: estimate.gamma.n_paths,
+        },
+        volga: ffi::PayoffSensitivityResult {
+            value: estimate.volga.mean,
+            std_error: estimate.volga.std_error,
+            ci_low: estimate.volga.ci_low,
+            ci_high: estimate.volga.ci_high,
+            n_paths: estimate.volga.n_paths,
+        },
+        vanna: ffi::PayoffSensitivityResult {
+            value: estimate.vanna.mean,
+            std_error: estimate.vanna.std_error,
+            ci_low: estimate.vanna.ci_low,
+            ci_high: estimate.vanna.ci_high,
+            n_paths: estimate.vanna.n_paths,
+        },
     })
 }
 

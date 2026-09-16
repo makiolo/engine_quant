@@ -2108,3 +2108,139 @@ TEST(GreeksHyperdualTest, ExplicitPathwiseRejectsAVannaPairOtherThanSpotAndVolat
         EXPECT_NE(std::string(e.what()).find("volatility"), std::string::npos) << e.what();
     }
 }
+
+// PLAN_BACKWARD.md §9 Fase 1: Hessiano local del motor de payoff (likelihood ratio, sin AD) --
+// `compute_hessian` fusiona en UNA SOLA simulacion lo que `GreeksHyperdualTest` de arriba pedia
+// como dos llamadas independientes a `compute_greek` (Gamma order=2, Vanna order=1
+// cross=volatility). Mismo fixture/tolerancias que esos tests.
+
+double black_scholes_vega(double s0, double strike, double r, double q, double sigma, double maturity) {
+    double sqrt_t = std::sqrt(maturity);
+    double d1 = (std::log(s0 / strike) + (r - q + 0.5 * sigma * sigma) * maturity) / (sigma * sqrt_t);
+    return s0 * std::exp(-q * maturity) * norm_pdf(d1) * sqrt_t;
+}
+
+// Volga cerrado de Black-Scholes: `Vega * d1 * d2 / sigma` (convencion estandar, d1/d2 con la
+// misma formula que `black_scholes_call`/`black_scholes_gamma` de arriba).
+double black_scholes_volga(double s0, double strike, double r, double q, double sigma, double maturity) {
+    double sqrt_t = std::sqrt(maturity);
+    double d1 = (std::log(s0 / strike) + (r - q + 0.5 * sigma * sigma) * maturity) / (sigma * sqrt_t);
+    double d2 = d1 - sigma * sqrt_t;
+    return black_scholes_vega(s0, strike, r, q, sigma, maturity) * d1 * d2 / sigma;
+}
+
+TEST(GreeksHessianTest, ComputeHessianWithEmptyFactorsReturnsGammaVolgaVannaAllViaLikelihoodRatio) {
+    Registries registries;
+    register_builtins(registries);
+    const pf::ObservableId spot{"EQ.SPOT.XYZ"};
+    const double s0 = 100.0, strike = 100.0, r = 0.05, q = 0.0, sigma = 0.2, maturity = 1.0;
+
+    pf::PayoffProduct product("CALL", european_call(spot, strike, maturity));
+    engine::GbmModel model = make_gbm_q(s0, r, q, sigma, spot.value);
+
+    engine::greeks::HessianReport report = engine::greeks::compute_hessian(
+        registries, "PayoffPriceQ", Params{}, model, product, flat_market(), pricing_context(500'000, 7), cpu_execution()
+    );
+
+    ASSERT_TRUE(report.skipped.empty()) << (report.skipped.empty() ? "" : report.skipped.front());
+    ASSERT_EQ(report.entries.size(), 3u);
+    for (const auto& entry : report.entries) {
+        EXPECT_EQ(entry.method_used, engine::greeks::GreekMethod::LikelihoodRatioHessian);
+        EXPECT_EQ(entry.measure, pf::ProbabilityMeasure::RiskNeutralQ);
+    }
+
+    auto find_entry = [&](const std::string& name_i, const std::string& name_j) -> const engine::greeks::HessianEntry& {
+        for (const auto& entry : report.entries) {
+            if (entry.factor_i.name == name_i && entry.factor_j.name == name_j) return entry;
+        }
+        throw std::runtime_error("entrada no encontrada: " + name_i + "/" + name_j);
+    };
+    const engine::greeks::HessianEntry& gamma_ss = find_entry("spot", "spot");
+    const engine::greeks::HessianEntry& volga_vv = find_entry("volatility", "volatility");
+    const engine::greeks::HessianEntry& vanna_sv = find_entry("spot", "volatility");
+
+    double analytic_gamma = black_scholes_gamma(s0, strike, r, q, sigma, maturity);
+    double analytic_volga = black_scholes_volga(s0, strike, r, q, sigma, maturity);
+    const double h_spot = 1.0, h_vol = 0.002;
+    double analytic_vanna =
+        (black_scholes_call(s0 + h_spot, strike, r, q, sigma + h_vol, maturity) -
+         black_scholes_call(s0 + h_spot, strike, r, q, sigma - h_vol, maturity) -
+         black_scholes_call(s0 - h_spot, strike, r, q, sigma + h_vol, maturity) +
+         black_scholes_call(s0 - h_spot, strike, r, q, sigma - h_vol, maturity)) /
+        (4.0 * h_spot * h_vol);
+
+    ASSERT_TRUE(gamma_ss.std_error.has_value());
+    EXPECT_NEAR(gamma_ss.value, analytic_gamma, 8.0 * *gamma_ss.std_error)
+        << "gamma=" << gamma_ss.value << " analytic=" << analytic_gamma;
+
+    ASSERT_TRUE(volga_vv.std_error.has_value());
+    EXPECT_NEAR(volga_vv.value, analytic_volga, 8.0 * *volga_vv.std_error)
+        << "volga=" << volga_vv.value << " analytic=" << analytic_volga;
+
+    ASSERT_TRUE(vanna_sv.std_error.has_value());
+    EXPECT_NEAR(vanna_sv.value, analytic_vanna, 8.0 * *vanna_sv.std_error)
+        << "vanna=" << vanna_sv.value << " analytic=" << analytic_vanna;
+
+    // Mismo seed/n_paths que compute_greek (Gamma order=2 / Vanna cruzada existentes) -> UNA SOLA
+    // simulacion reutilizada implica coincidencia bit a bit (verificado tambien del lado Rust,
+    // rust/crates/engine-core/src/payoff/api.rs::local_hessian_matches_separate_gamma_and_vanna_calls...).
+    GreekRequest gamma_request = payoff_price_q_request("spot");
+    gamma_request.order = GreekOrder{2, std::nullopt};
+    engine::greeks::GreekResult gamma_via_compute_greek = engine::greeks::compute_greek(
+        registries, gamma_request, model, product, flat_market(), pricing_context(500'000, 7), cpu_execution()
+    );
+    EXPECT_NEAR(gamma_ss.value, gamma_via_compute_greek.value, 1e-9);
+
+    GreekRequest vanna_request = payoff_price_q_request("spot");
+    vanna_request.order = GreekOrder{1, RiskFactor{RiskFactorKind::ModelParameter, "model", "volatility", std::nullopt}};
+    engine::greeks::GreekResult vanna_via_compute_greek = engine::greeks::compute_greek(
+        registries, vanna_request, model, product, flat_market(), pricing_context(500'000, 7), cpu_execution()
+    );
+    EXPECT_NEAR(vanna_sv.value, vanna_via_compute_greek.value, 1e-9);
+}
+
+TEST(GreeksHessianTest, ComputeHessianOnAnUnsupportedModelMetricCombinationGoesToSkippedWithoutThrowing) {
+    // Hull-White + "PV" no esta en hessian_capabilities() (Fase 1 solo cubre GBM/GBM_P) --
+    // compute_hessian es "mejor esfuerzo" (a diferencia de compute_greek), nunca lanza.
+    Registries registries;
+    register_builtins(registries);
+    engine::IrSwapProduct swap = make_irs(1'000'000.0, 0.02);
+    engine::HullWhite1FModel model = make_hull_white();
+
+    engine::greeks::HessianReport report = engine::greeks::compute_hessian(
+        registries, "PV", Params{}, model, swap, flat_market(), pricing_context(1'000, 7), cpu_execution()
+    );
+
+    EXPECT_TRUE(report.entries.empty());
+    ASSERT_FALSE(report.skipped.empty());
+    EXPECT_NE(report.skipped.front().find("PV"), std::string::npos) << report.skipped.front();
+}
+
+TEST(GreeksHessianTest, ComputeHessianRequestingAFactorOutsideSpotVolatilityGoesToSkippedForThatEntryOnly) {
+    Registries registries;
+    register_builtins(registries);
+    const pf::ObservableId spot{"EQ.SPOT.XYZ"};
+    pf::PayoffProduct product("CALL", european_call(spot, 100.0, 1.0));
+    engine::GbmModel model = make_gbm_q(100.0, 0.05, 0.0, 0.2, spot.value);
+
+    std::vector<RiskFactor> factors = {
+        RiskFactor{RiskFactorKind::ModelParameter, "model", "spot", std::nullopt},
+        RiskFactor{RiskFactorKind::ModelParameter, "model", "rate", std::nullopt},
+    };
+
+    engine::greeks::HessianReport report = engine::greeks::compute_hessian(
+        registries, "PayoffPriceQ", Params{}, model, product, flat_market(), pricing_context(200'000, 7), cpu_execution(),
+        factors
+    );
+
+    // "rate" cae a skipped explicito; "spot" solo (sin "volatility" pedido) solo puede formar la
+    // diagonal gamma_ss -- volga/vanna necesitan "volatility", que nadie pidio.
+    ASSERT_EQ(report.entries.size(), 1u);
+    EXPECT_EQ(report.entries.front().factor_i.name, "spot");
+    EXPECT_EQ(report.entries.front().factor_j.name, "spot");
+
+    bool found_rate_skip = std::any_of(report.skipped.begin(), report.skipped.end(), [](const std::string& msg) {
+        return msg.find("rate") != std::string::npos;
+    });
+    EXPECT_TRUE(found_rate_skip);
+}

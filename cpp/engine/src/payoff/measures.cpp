@@ -545,6 +545,59 @@ bool payoff_supports_second_order_lrm_p(const PayoffProgram& program) {
     }
 }
 
+namespace {
+SensitivityResult to_sensitivity_result(const ffi::PayoffSensitivityResult& result, ProbabilityMeasure measure) {
+    SensitivityResult out;
+    out.value = result.value;
+    out.std_error = result.std_error;
+    out.ci_low = result.ci_low;
+    out.ci_high = result.ci_high;
+    out.n_paths = result.n_paths;
+    out.measure = measure;
+    return out;
+}
+} // namespace
+
+LocalHessianResult payoff_local_hessian_gbm(
+    const PayoffProgram& program, const GbmModel& model, std::uint64_t n_paths, std::uint64_t seed
+) {
+    preflight_gbm_capabilities(program, model.capabilities(), ProbabilityMeasure::RiskNeutralQ);
+
+    std::string spec_json = CanonicalVisitor::to_json(program.id, program.contract);
+    try {
+        ffi::PayoffLocalHessianResult result = ffi::payoff_local_hessian_gbm_q(
+            spec_json, model.observable().value, model.s0(), model.r(), model.q(), model.sigma(), n_paths, seed
+        );
+        LocalHessianResult out;
+        out.gamma = to_sensitivity_result(result.gamma, ProbabilityMeasure::RiskNeutralQ);
+        out.volga = to_sensitivity_result(result.volga, ProbabilityMeasure::RiskNeutralQ);
+        out.vanna = to_sensitivity_result(result.vanna, ProbabilityMeasure::RiskNeutralQ);
+        return out;
+    } catch (const std::exception& e) {
+        throw EvaluationError(e.what(), NodePath::root());
+    }
+}
+
+LocalHessianResult payoff_local_hessian_gbm_p(
+    const PayoffProgram& program, const GbmPModel& model, std::uint64_t n_paths, std::uint64_t seed
+) {
+    preflight_gbm_capabilities(program, model.capabilities(), ProbabilityMeasure::PhysicalP);
+
+    std::string spec_json = CanonicalVisitor::to_json(program.id, program.contract);
+    try {
+        ffi::PayoffLocalHessianResult result = ffi::payoff_local_hessian_gbm_p(
+            spec_json, model.observable().value, model.s0(), model.mu(), model.sigma(), n_paths, seed
+        );
+        LocalHessianResult out;
+        out.gamma = to_sensitivity_result(result.gamma, ProbabilityMeasure::PhysicalP);
+        out.volga = to_sensitivity_result(result.volga, ProbabilityMeasure::PhysicalP);
+        out.vanna = to_sensitivity_result(result.vanna, ProbabilityMeasure::PhysicalP);
+        return out;
+    } catch (const std::exception& e) {
+        throw EvaluationError(e.what(), NodePath::root());
+    }
+}
+
 HedgeResult synthesize_hedge_gbm(
     const PayoffProgram& target, const std::vector<const PayoffProgram*>& instruments, const GbmModel& model,
     const std::optional<std::vector<double>>& instrument_prices, double ridge, const HedgeConstraints& constraints,

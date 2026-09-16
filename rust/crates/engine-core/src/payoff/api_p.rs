@@ -19,7 +19,7 @@
 use crate::backend::CpuBackend;
 use crate::mc::{self, McEstimate};
 use crate::models::gbm_p::GbmP;
-use crate::payoff::api::check_single_observable;
+use crate::payoff::api::{check_single_observable, LocalHessianEstimate};
 use crate::payoff::compile::compile;
 use crate::payoff::dual::Dual;
 use crate::payoff::eval::{evaluate_with_events_seeded, resolve_trigger_states, ObservablePath};
@@ -345,6 +345,47 @@ pub fn payoff_sensitivity_cross_gbm_p(
     Ok(mc::aggregate(&samples, mc::Z_95))
 }
 
+/// Extension bajo P de `api::payoff_local_hessian_gbm_q` (PLAN_BACKWARD.md §9 Fase 1): mismo
+/// mecanismo que `payoff_local_hessian_gbm_q` extiende a `payoff_sensitivity2_gbm_q`/
+/// `payoff_sensitivity_cross_gbm_q` -- sustituye `(r,q)` por `(mu,0.0)` en la formula lognormal
+/// (mismo truco que `payoff_sensitivity2_gbm_p`) y no descuenta. UNA sola llamada a
+/// `simulate_gbm_p_columns`, reutilizada para las tres entradas del Hessiano local. Solo
+/// contratos de una unica fecha terminal.
+pub fn payoff_local_hessian_gbm_p(
+    spec_json: &str,
+    observable: &str,
+    s0: f64,
+    mu: f64,
+    sigma: f64,
+    n_paths: u64,
+    seed: u64,
+) -> Result<LocalHessianEstimate, String> {
+    let payoff = compile(spec_json)?;
+    check_single_observable(&payoff, observable, n_paths)?;
+    let t = lrm::single_terminal_time(&payoff)?;
+    let (_times, columns) = simulate_gbm_p_columns(&payoff, s0, mu, sigma, n_paths, seed)?;
+    let n_paths_usize = n_paths as usize;
+
+    let mut gamma_samples = Vec::with_capacity(n_paths_usize);
+    let mut volga_samples = Vec::with_capacity(n_paths_usize);
+    let mut vanna_samples = Vec::with_capacity(n_paths_usize);
+    for path_idx in 0..n_paths_usize {
+        let s_t = columns[0][path_idx];
+        let present_value = undiscounted_ledger_sum_at_terminal(&payoff, t, s_t, sigma, seed, path_idx);
+        let z = lrm::recover_terminal_z(s0, mu, 0.0, sigma, t, s_t);
+        let weights = lrm::local_hessian_weights(z, s0, sigma, t);
+        gamma_samples.push(present_value * weights.gamma);
+        volga_samples.push(present_value * weights.volga);
+        vanna_samples.push(present_value * weights.vanna);
+    }
+
+    Ok(LocalHessianEstimate {
+        gamma: mc::aggregate(&gamma_samples, mc::Z_95),
+        volga: mc::aggregate(&volga_samples, mc::Z_95),
+        vanna: mc::aggregate(&vanna_samples, mc::Z_95),
+    })
+}
+
 fn undiscounted_ledger_sum_at_terminal(payoff: &CompiledPayoff, t: f64, s_t: f64, sigma: f64, seed: u64, path_idx: usize) -> f64 {
     let times = [t];
     let values = [s_t];
@@ -572,6 +613,39 @@ mod tests {
             "vanna={} (se={}) finite_difference={} deberian coincidir dentro de tolerancia",
             vanna.mean,
             vanna.std_error,
+            finite_difference
+        );
+    }
+
+    // PLAN_BACKWARD.md §9 Fase 1, extension bajo P: mismo criterio que el test hermano en
+    // `api.rs` -- Gamma/Vanna deben coincidir bit a bit con las llamadas separadas (mismo
+    // seed/n_paths/formula) y Volga debe ser consistente con la segunda diferencia finita de
+    // `forecast_gbm_p` respecto de sigma.
+    #[test]
+    fn local_hessian_under_p_matches_separate_calls_bit_for_bit_and_volga_matches_finite_difference() {
+        let (s0, mu, sigma) = (100.0, 0.05, 0.2);
+        let (n_paths, seed) = (500_000, 7);
+
+        let hessian = payoff_local_hessian_gbm_p(CALL_JSON, "EQ.SPOT.XYZ", s0, mu, sigma, n_paths, seed).unwrap();
+        let gamma_separate = payoff_sensitivity2_gbm_p(CALL_JSON, "EQ.SPOT.XYZ", "spot", s0, mu, sigma, n_paths, seed).unwrap();
+        let vanna_separate = payoff_sensitivity_cross_gbm_p(CALL_JSON, "EQ.SPOT.XYZ", "spot", "volatility", s0, mu, sigma, n_paths, seed)
+            .unwrap();
+
+        assert_eq!(hessian.gamma, gamma_separate, "misma semilla/n_paths/formula -> identico bit a bit");
+        assert_eq!(hessian.vanna, vanna_separate, "misma semilla/n_paths/formula -> identico bit a bit");
+
+        let h = 1e-3;
+        let up = forecast_gbm_p(CALL_JSON, "EQ.SPOT.XYZ", s0, mu, sigma + h, n_paths, seed).unwrap();
+        let base = forecast_gbm_p(CALL_JSON, "EQ.SPOT.XYZ", s0, mu, sigma, n_paths, seed).unwrap();
+        let down = forecast_gbm_p(CALL_JSON, "EQ.SPOT.XYZ", s0, mu, sigma - h, n_paths, seed).unwrap();
+        let finite_difference = (up.mean - 2.0 * base.mean + down.mean) / (h * h);
+
+        let tolerance = 8.0 * hessian.volga.std_error;
+        assert!(
+            (hessian.volga.mean - finite_difference).abs() < tolerance,
+            "volga={} (se={}) finite_difference={} deberian coincidir dentro de tolerancia",
+            hessian.volga.mean,
+            hessian.volga.std_error,
             finite_difference
         );
     }
