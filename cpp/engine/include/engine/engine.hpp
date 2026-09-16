@@ -228,6 +228,41 @@ HullWhite2FGreeks irs_hull_white_2f_npv_all_greeks(
     const std::vector<double>& payment_times, const std::vector<double>& accruals
 );
 
+// Valor + Hessiano 5x5 completo (15 pares) del NPV determinista de Hull-White 2F
+// (PLAN_BACKWARD.md §9 Fase 3), mismo mecanismo que HullWhite1FHessian (Dual2/HyperDual nuevos,
+// forward-over-forward cerrado, no AAD reverse-mode de Burn -- Burn no anida
+// Autodiff<Autodiff<_>>, PLAN_BACKWARD.md §1.2). No incluye d_rho ni entradas cruzadas con rho --
+// rho es un f64 plano no diferenciable, mismo criterio que HullWhite2FGreeks sin d_rho.
+struct HullWhite2FHessian {
+    double value = 0.0;
+    double d_a = 0.0;
+    double d_b = 0.0;
+    double d_sigma = 0.0;
+    double d_eta = 0.0;
+    double d_r0 = 0.0;
+    double d_aa = 0.0;
+    double d_bb = 0.0;
+    double d_sigmasigma = 0.0;
+    double d_etaeta = 0.0;
+    double d_r0r0 = 0.0;
+    double d_ab = 0.0;
+    double d_asigma = 0.0;
+    double d_aeta = 0.0;
+    double d_ar0 = 0.0;
+    double d_bsigma = 0.0;
+    double d_beta = 0.0;
+    double d_br0 = 0.0;
+    double d_sigmaeta = 0.0;
+    double d_sigmar0 = 0.0;
+    double d_etar0 = 0.0;
+};
+
+HullWhite2FHessian hull_white_2f_hessian(
+    double a, double b, double sigma, double eta, double rho, double r0,
+    double notional, double fixed_rate, bool use_par_rate, double start,
+    const std::vector<double>& payment_times, const std::vector<double>& accruals
+);
+
 // Equivalentes de lote de las cuatro funciones 2F de arriba -- ver las versiones de 1 factor
 // para el porqué de cada una (PLAN.md §7.19).
 std::vector<double> irs_hull_white_2f_npv_batch(

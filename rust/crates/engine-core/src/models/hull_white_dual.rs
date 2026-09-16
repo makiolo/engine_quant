@@ -583,6 +583,267 @@ pub fn hull_white_1f_hessian(
     }
 }
 
+// ---------------------------------------------------------------------------------------------
+// Pricer cerrado de Hull-White 2 factores (G2++), generico sobre `T: DualNumber` -- traduccion
+// mecanica de `models::hull_white_2f::HullWhite2F::variance_term`/`cross_term`/
+// `zero_coupon_bond` (tensores Burn -> escalares `T`, ADR-BW-01 cubre tambien `hull_white_2f.rs`
+// sin ninguna rama) y de `products::irs::IrSwap::npv`/`par_rate` (mismo patron que la seccion 1F
+// de arriba, PLAN_BACKWARD.md §9 Fase 3). Reutiliza `b_factor` YA DEFINIDA arriba para 1F: es
+// exactamente la misma formula aplicada a cada uno de los dos factores latentes por separado
+// (aunque, con estado inicial `x_0=y_0=0`, los terminos `-b_factor(...)*x_t`/`*y_t` de
+// `zero_coupon_bond` son cero y se omiten directamente, ver mas abajo). `rho` es SIEMPRE `f64`
+// puro (nunca `T`), igual que `HullWhite2F::rho` (campo `f64` plano, no tensor) -- no es
+// diferenciable ni aqui ni en AAD reverse (`try_aad_reverse` en greeks.cpp ya lo excluye para
+// HullWhite2F).
+// ---------------------------------------------------------------------------------------------
+
+/// Termino de varianza propia de un factor con reversion `z` y volatilidad `vol` (Brigo-Mercurio
+/// ec. 4.11) -- misma formula que `HullWhite2F::variance_term`.
+fn variance_term<T: DualNumber>(z: T, vol: T, tau: f64) -> T {
+    let inv_z = z.powf(T::constant(-1.0));
+    let e1 = (z * T::constant(-tau)).exp();
+    let e2 = (z * T::constant(-2.0 * tau)).exp();
+    let bracket = inv_z * T::constant(2.0) * e1 - inv_z * T::constant(0.5) * e2 - inv_z * T::constant(1.5)
+        + T::constant(tau);
+    (vol * vol) / (z * z) * bracket
+}
+
+/// Termino cruzado de covarianza entre los dos factores (Brigo-Mercurio ec. 4.11) -- misma
+/// formula que `HullWhite2F::cross_term`. `rho` es `f64` puro (ver doc-comment de arriba).
+fn cross_term<T: DualNumber>(a: T, b: T, sigma: T, eta: T, rho: f64, tau: f64) -> T {
+    let a_plus_b = a + b;
+    let term_a = ((a * T::constant(-tau)).exp() + T::constant(-1.0)) / a;
+    let term_b = ((b * T::constant(-tau)).exp() + T::constant(-1.0)) / b;
+    let term_ab = ((a_plus_b * T::constant(-tau)).exp() + T::constant(-1.0)) / a_plus_b;
+    let bracket = term_a + T::constant(tau) + term_b - term_ab;
+    let coef = (sigma * eta) * T::constant(2.0 * rho) / (a * b);
+    coef * bracket
+}
+
+/// `P(t,T)` de Hull-White 2 factores (G2++) con estado inicial `x_0=y_0=0` -- unico caso que
+/// necesita el pricer de NPV a `t=0`/`t=start` (ver doc-comment de arriba: los terminos
+/// `-b_factor(a,tau)*x_t - b_factor(b,tau)*y_t` de `HullWhite2F::zero_coupon_bond` se omiten
+/// directamente por ser cero, en vez de arrastrar dos `T::constant(0.0)` sin uso).
+#[allow(clippy::too_many_arguments)]
+fn zero_coupon_bond_2f<T: DualNumber>(a: T, b: T, sigma: T, eta: T, r0: T, rho: f64, t: f64, maturity: f64) -> T {
+    let tau = maturity - t;
+    let variance = variance_term(a, sigma, tau) + variance_term(b, eta, tau) + cross_term(a, b, sigma, eta, rho, tau);
+    (r0 * T::constant(-tau) + variance * T::constant(0.5)).exp()
+}
+
+/// NPV del swap pagador a `t=0` bajo Hull-White 2F -- misma formula que `npv` (seccion 1F de
+/// arriba), solo cambia que `zero_coupon_bond` se llama por debajo. `rho`/`notional`/
+/// `fixed_rate`/`accruals`/`payment_times`/`start` son `f64` PUROS, nunca derivados.
+#[allow(clippy::too_many_arguments)]
+fn npv_2f<T: DualNumber>(
+    a: T,
+    b: T,
+    sigma: T,
+    eta: T,
+    r0: T,
+    rho: f64,
+    notional: f64,
+    fixed_rate: f64,
+    start: f64,
+    payment_times: &[f64],
+    accruals: &[f64],
+) -> T {
+    let p_start = zero_coupon_bond_2f(a, b, sigma, eta, r0, rho, 0.0, start);
+    let p_end = zero_coupon_bond_2f(
+        a, b, sigma, eta, r0, rho, 0.0,
+        *payment_times.last().expect("un swap necesita al menos un periodo"),
+    );
+    let floating_leg = T::constant(notional) * (p_start - p_end);
+
+    let fixed_leg = payment_times
+        .iter()
+        .zip(accruals.iter())
+        .map(|(&ti, &tau)| {
+            let p_i = zero_coupon_bond_2f(a, b, sigma, eta, r0, rho, 0.0, ti);
+            T::constant(notional * fixed_rate * tau) * p_i
+        })
+        .fold(T::constant(0.0), |acc, leg| acc + leg);
+
+    floating_leg - fixed_leg
+}
+
+/// Tipo fijo "a la par" visto desde `t=start` bajo Hull-White 2F -- misma formula que `par_rate`
+/// (1F, arriba), siempre con `T=f64` (aritmetica plana: el cupon de un swap ya emitido no debe
+/// moverse cuando se shockea un parametro para medir un Hessiano, mismo motivo documentado alli).
+#[allow(clippy::too_many_arguments)]
+fn par_rate_2f<T: DualNumber>(
+    a: T,
+    b: T,
+    sigma: T,
+    eta: T,
+    r0: T,
+    rho: f64,
+    start: f64,
+    payment_times: &[f64],
+    accruals: &[f64],
+) -> T {
+    let p_start = zero_coupon_bond_2f(a, b, sigma, eta, r0, rho, start, start);
+    let p_end = zero_coupon_bond_2f(
+        a, b, sigma, eta, r0, rho, start,
+        *payment_times.last().expect("un swap necesita al menos un periodo"),
+    );
+    let numerator = p_start - p_end;
+
+    let denominator = payment_times
+        .iter()
+        .zip(accruals.iter())
+        .map(|(&ti, &tau)| zero_coupon_bond_2f(a, b, sigma, eta, r0, rho, start, ti) * T::constant(tau))
+        .fold(T::constant(0.0), |acc, leg| acc + leg);
+
+    numerator / denominator
+}
+
+/// Valor y Hessiano 5x5 completo (15 pares) del NPV determinista de un IRS bajo Hull-White 2
+/// factores, PLAN_BACKWARD.md §9 Fase 3. `value`/gradiente salen de 1+5 evaluaciones `f64`/
+/// `Dual2`; las 10 entradas cruzadas salen de 10 evaluaciones `HyperDual` -- 16 evaluaciones del
+/// pricer cerrado en total. `rho` es un `f64` PLANO -- nunca aparece en ninguno de los 21 campos
+/// numericos (value + 5 gradiente + 5 diagonal + 10 cruzada), coherente con que solo hay 5
+/// parametros realmente diferenciables (a/b/sigma/eta/r0), ver doc-comment del modulo.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct HullWhite2FHessian {
+    pub value: f64,
+    pub d_a: f64,
+    pub d_b: f64,
+    pub d_sigma: f64,
+    pub d_eta: f64,
+    pub d_r0: f64,
+    pub d_aa: f64,
+    pub d_bb: f64,
+    pub d_sigmasigma: f64,
+    pub d_etaeta: f64,
+    pub d_r0r0: f64,
+    pub d_ab: f64,
+    pub d_asigma: f64,
+    pub d_aeta: f64,
+    pub d_ar0: f64,
+    pub d_bsigma: f64,
+    pub d_beta: f64,
+    pub d_br0: f64,
+    pub d_sigmaeta: f64,
+    pub d_sigmar0: f64,
+    pub d_etar0: f64,
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn hull_white_2f_hessian(
+    a: f64,
+    b: f64,
+    sigma: f64,
+    eta: f64,
+    rho: f64,
+    r0: f64,
+    notional: f64,
+    fixed_rate: f64,
+    use_par_rate: bool,
+    start: f64,
+    payment_times: &[f64],
+    accruals: &[f64],
+) -> HullWhite2FHessian {
+    // Mismo patron que `hull_white_1f_hessian`/`build_irs_swap_2f`: el tipo fijo se fija UNA vez,
+    // en aritmetica f64 plana, antes de construir cualquier Dual2/HyperDual.
+    let fixed_rate_f64 = if use_par_rate {
+        par_rate_2f::<f64>(a, b, sigma, eta, r0, rho, start, payment_times, accruals)
+    } else {
+        fixed_rate
+    };
+
+    let value =
+        npv_2f::<f64>(a, b, sigma, eta, r0, rho, notional, fixed_rate_f64, start, payment_times, accruals);
+
+    // Gradiente + diagonal del Hessiano: 5 llamadas Dual2, una por parametro.
+    let dual_a = npv_2f::<Dual2>(
+        Dual2::variable(a), Dual2::constant(b), Dual2::constant(sigma), Dual2::constant(eta), Dual2::constant(r0),
+        rho, notional, fixed_rate_f64, start, payment_times, accruals,
+    );
+    let dual_b = npv_2f::<Dual2>(
+        Dual2::constant(a), Dual2::variable(b), Dual2::constant(sigma), Dual2::constant(eta), Dual2::constant(r0),
+        rho, notional, fixed_rate_f64, start, payment_times, accruals,
+    );
+    let dual_sigma = npv_2f::<Dual2>(
+        Dual2::constant(a), Dual2::constant(b), Dual2::variable(sigma), Dual2::constant(eta), Dual2::constant(r0),
+        rho, notional, fixed_rate_f64, start, payment_times, accruals,
+    );
+    let dual_eta = npv_2f::<Dual2>(
+        Dual2::constant(a), Dual2::constant(b), Dual2::constant(sigma), Dual2::variable(eta), Dual2::constant(r0),
+        rho, notional, fixed_rate_f64, start, payment_times, accruals,
+    );
+    let dual_r0 = npv_2f::<Dual2>(
+        Dual2::constant(a), Dual2::constant(b), Dual2::constant(sigma), Dual2::constant(eta), Dual2::variable(r0),
+        rho, notional, fixed_rate_f64, start, payment_times, accruals,
+    );
+
+    // Entradas cruzadas del Hessiano: 10 llamadas HyperDual, una por par distinto.
+    let hyper_ab = npv_2f::<HyperDual>(
+        HyperDual::variable_x(a), HyperDual::variable_y(b), HyperDual::constant(sigma), HyperDual::constant(eta),
+        HyperDual::constant(r0), rho, notional, fixed_rate_f64, start, payment_times, accruals,
+    );
+    let hyper_asigma = npv_2f::<HyperDual>(
+        HyperDual::variable_x(a), HyperDual::constant(b), HyperDual::variable_y(sigma), HyperDual::constant(eta),
+        HyperDual::constant(r0), rho, notional, fixed_rate_f64, start, payment_times, accruals,
+    );
+    let hyper_aeta = npv_2f::<HyperDual>(
+        HyperDual::variable_x(a), HyperDual::constant(b), HyperDual::constant(sigma), HyperDual::variable_y(eta),
+        HyperDual::constant(r0), rho, notional, fixed_rate_f64, start, payment_times, accruals,
+    );
+    let hyper_ar0 = npv_2f::<HyperDual>(
+        HyperDual::variable_x(a), HyperDual::constant(b), HyperDual::constant(sigma), HyperDual::constant(eta),
+        HyperDual::variable_y(r0), rho, notional, fixed_rate_f64, start, payment_times, accruals,
+    );
+    let hyper_bsigma = npv_2f::<HyperDual>(
+        HyperDual::constant(a), HyperDual::variable_x(b), HyperDual::variable_y(sigma), HyperDual::constant(eta),
+        HyperDual::constant(r0), rho, notional, fixed_rate_f64, start, payment_times, accruals,
+    );
+    let hyper_beta = npv_2f::<HyperDual>(
+        HyperDual::constant(a), HyperDual::variable_x(b), HyperDual::constant(sigma), HyperDual::variable_y(eta),
+        HyperDual::constant(r0), rho, notional, fixed_rate_f64, start, payment_times, accruals,
+    );
+    let hyper_br0 = npv_2f::<HyperDual>(
+        HyperDual::constant(a), HyperDual::variable_x(b), HyperDual::constant(sigma), HyperDual::constant(eta),
+        HyperDual::variable_y(r0), rho, notional, fixed_rate_f64, start, payment_times, accruals,
+    );
+    let hyper_sigmaeta = npv_2f::<HyperDual>(
+        HyperDual::constant(a), HyperDual::constant(b), HyperDual::variable_x(sigma), HyperDual::variable_y(eta),
+        HyperDual::constant(r0), rho, notional, fixed_rate_f64, start, payment_times, accruals,
+    );
+    let hyper_sigmar0 = npv_2f::<HyperDual>(
+        HyperDual::constant(a), HyperDual::constant(b), HyperDual::variable_x(sigma), HyperDual::constant(eta),
+        HyperDual::variable_y(r0), rho, notional, fixed_rate_f64, start, payment_times, accruals,
+    );
+    let hyper_etar0 = npv_2f::<HyperDual>(
+        HyperDual::constant(a), HyperDual::constant(b), HyperDual::constant(sigma), HyperDual::variable_x(eta),
+        HyperDual::variable_y(r0), rho, notional, fixed_rate_f64, start, payment_times, accruals,
+    );
+
+    HullWhite2FHessian {
+        value,
+        d_a: dual_a.d1,
+        d_b: dual_b.d1,
+        d_sigma: dual_sigma.d1,
+        d_eta: dual_eta.d1,
+        d_r0: dual_r0.d1,
+        d_aa: dual_a.second_derivative(),
+        d_bb: dual_b.second_derivative(),
+        d_sigmasigma: dual_sigma.second_derivative(),
+        d_etaeta: dual_eta.second_derivative(),
+        d_r0r0: dual_r0.second_derivative(),
+        d_ab: hyper_ab.dxy,
+        d_asigma: hyper_asigma.dxy,
+        d_aeta: hyper_aeta.dxy,
+        d_ar0: hyper_ar0.dxy,
+        d_bsigma: hyper_bsigma.dxy,
+        d_beta: hyper_beta.dxy,
+        d_br0: hyper_br0.dxy,
+        d_sigmaeta: hyper_sigmaeta.dxy,
+        d_sigmar0: hyper_sigmar0.dxy,
+        d_etar0: hyper_etar0.dxy,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -937,5 +1198,388 @@ mod tests {
                 hessian.d_sigmar0
             );
         }
+    }
+
+    // =========================================================================================
+    // Hull-White 2 factores (G2++), PLAN_BACKWARD.md §9 Fase 3. Mismo orden de verificacion que
+    // 1F arriba: value/gradiente vs Burn, consistencia interna HyperDual/Dual2, Hessiano vs
+    // bump-and-reval.
+    // =========================================================================================
+
+    use crate::api::irs_hull_white_2f_npv;
+    use crate::api::irs_hull_white_2f_npv_all_greeks;
+
+    struct Fixture2F {
+        a: f64,
+        b: f64,
+        sigma: f64,
+        eta: f64,
+        rho: f64,
+        r0: f64,
+        notional: f64,
+        fixed_rate: f64,
+        use_par_rate: bool,
+        start: f64,
+        payment_times: Vec<f64>,
+        accruals: Vec<f64>,
+    }
+
+    /// Mismos `a`/`b`/`sigma`/`eta`/`rho`/`r0` que `hull_white_2f::tests::reference_model`
+    /// (`rho` negativo tipico de G2++), mas una variante `use_par_rate=true` y una variante con
+    /// parametros/calendario distintos -- mismo criterio de cobertura que `fixtures()` (1F).
+    fn fixtures_2f() -> Vec<Fixture2F> {
+        vec![
+            Fixture2F {
+                a: 0.1, b: 0.2, sigma: 0.01, eta: 0.012, rho: -0.7, r0: 0.03,
+                notional: 1_000_000.0, fixed_rate: 0.03, use_par_rate: false, start: 0.0,
+                payment_times: vec![1.0, 2.0, 3.0, 4.0, 5.0], accruals: vec![1.0; 5],
+            },
+            Fixture2F {
+                a: 0.1, b: 0.2, sigma: 0.01, eta: 0.012, rho: -0.7, r0: 0.03,
+                notional: 1_000_000.0, fixed_rate: 0.0, use_par_rate: true, start: 0.0,
+                payment_times: vec![1.0, 2.0, 3.0, 4.0, 5.0], accruals: vec![1.0; 5],
+            },
+            Fixture2F {
+                a: 0.15, b: 0.05, sigma: 0.008, eta: 0.006, rho: -0.3, r0: 0.02,
+                notional: 2_500_000.0, fixed_rate: 0.025, use_par_rate: false, start: 0.0,
+                payment_times: vec![0.5, 1.0, 1.5, 2.0], accruals: vec![0.5; 4],
+            },
+        ]
+    }
+
+    fn fixed_rate_of_2f(fx: &Fixture2F) -> f64 {
+        if fx.use_par_rate {
+            par_rate_2f::<f64>(fx.a, fx.b, fx.sigma, fx.eta, fx.r0, fx.rho, fx.start, &fx.payment_times, &fx.accruals)
+        } else {
+            fx.fixed_rate
+        }
+    }
+
+    fn npv_2f_f64(fx: &Fixture2F, fixed_rate_f64: f64, a: f64, b: f64, sigma: f64, eta: f64, r0: f64) -> f64 {
+        npv_2f::<f64>(
+            a, b, sigma, eta, r0, fx.rho, fx.notional, fixed_rate_f64, fx.start, &fx.payment_times, &fx.accruals,
+        )
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // 1) value/gradiente de hull_white_2f_hessian vs la ruta Burn EXISTENTE
+    //    (irs_hull_white_2f_npv_all_greeks/irs_hull_white_2f_npv) -- comparacion MAS IMPORTANTE.
+    // -----------------------------------------------------------------------------------------
+
+    #[test]
+    fn value_and_gradient_match_the_burn_autodiff_route_2f() {
+        for (idx, fx) in fixtures_2f().into_iter().enumerate() {
+            let hessian = hull_white_2f_hessian(
+                fx.a, fx.b, fx.sigma, fx.eta, fx.rho, fx.r0, fx.notional, fx.fixed_rate, fx.use_par_rate,
+                fx.start, &fx.payment_times, &fx.accruals,
+            );
+            let burn = irs_hull_white_2f_npv_all_greeks(
+                fx.a, fx.b, fx.sigma, fx.eta, fx.rho, fx.r0, fx.notional, fx.fixed_rate, fx.use_par_rate,
+                fx.start, fx.payment_times.clone(), fx.accruals.clone(),
+            );
+            let burn_value = irs_hull_white_2f_npv(
+                fx.a, fx.b, fx.sigma, fx.eta, fx.rho, fx.r0, fx.notional, fx.fixed_rate, fx.use_par_rate,
+                fx.start, fx.payment_times.clone(), fx.accruals.clone(),
+            );
+
+            let rel_tol = |reference: f64| 1e-8 * reference.abs().max(1.0);
+
+            assert!(
+                (hessian.value - burn_value).abs() < rel_tol(burn_value),
+                "fixture {idx}: value={} burn={burn_value}",
+                hessian.value
+            );
+            assert!(
+                (hessian.d_a - burn.d_a).abs() < rel_tol(burn.d_a),
+                "fixture {idx}: d_a={} burn={}",
+                hessian.d_a, burn.d_a
+            );
+            assert!(
+                (hessian.d_b - burn.d_b).abs() < rel_tol(burn.d_b),
+                "fixture {idx}: d_b={} burn={}",
+                hessian.d_b, burn.d_b
+            );
+            assert!(
+                (hessian.d_sigma - burn.d_sigma).abs() < rel_tol(burn.d_sigma),
+                "fixture {idx}: d_sigma={} burn={}",
+                hessian.d_sigma, burn.d_sigma
+            );
+            assert!(
+                (hessian.d_eta - burn.d_eta).abs() < rel_tol(burn.d_eta),
+                "fixture {idx}: d_eta={} burn={}",
+                hessian.d_eta, burn.d_eta
+            );
+            assert!(
+                (hessian.d_r0 - burn.d_r0).abs() < rel_tol(burn.d_r0),
+                "fixture {idx}: d_r0={} burn={}",
+                hessian.d_r0, burn.d_r0
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // 2) Consistencia interna: dx/dy de la llamada HyperDual de (a,b) coinciden con d1 de las
+    //    llamadas Dual2 correspondientes.
+    // -----------------------------------------------------------------------------------------
+
+    #[test]
+    fn hyperdual_gradient_components_are_consistent_with_dual2_gradient_2f() {
+        let fx = &fixtures_2f()[0];
+        let hessian = hull_white_2f_hessian(
+            fx.a, fx.b, fx.sigma, fx.eta, fx.rho, fx.r0, fx.notional, fx.fixed_rate, fx.use_par_rate,
+            fx.start, &fx.payment_times, &fx.accruals,
+        );
+        let fixed_rate_f64 = fixed_rate_of_2f(fx);
+
+        let hyper_ab = npv_2f::<HyperDual>(
+            HyperDual::variable_x(fx.a), HyperDual::variable_y(fx.b), HyperDual::constant(fx.sigma),
+            HyperDual::constant(fx.eta), HyperDual::constant(fx.r0), fx.rho, fx.notional, fixed_rate_f64,
+            fx.start, &fx.payment_times, &fx.accruals,
+        );
+        assert!((hyper_ab.dx - hessian.d_a).abs() < 1e-9, "dx={} d_a={}", hyper_ab.dx, hessian.d_a);
+        assert!((hyper_ab.dy - hessian.d_b).abs() < 1e-9, "dy={} d_b={}", hyper_ab.dy, hessian.d_b);
+
+        let hyper_etar0 = npv_2f::<HyperDual>(
+            HyperDual::constant(fx.a), HyperDual::constant(fx.b), HyperDual::constant(fx.sigma),
+            HyperDual::variable_x(fx.eta), HyperDual::variable_y(fx.r0), fx.rho, fx.notional, fixed_rate_f64,
+            fx.start, &fx.payment_times, &fx.accruals,
+        );
+        assert!(
+            (hyper_etar0.dx - hessian.d_eta).abs() < 1e-9,
+            "dx={} d_eta={}", hyper_etar0.dx, hessian.d_eta
+        );
+        assert!(
+            (hyper_etar0.dy - hessian.d_r0).abs() < 1e-9,
+            "dy={} d_r0={}", hyper_etar0.dy, hessian.d_r0
+        );
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // 3) Las 15 entradas del Hessiano vs un estencil de bump-and-reval sobre npv_2f::<f64> -- el
+    //    tipo fijo se fija UNA VEZ con los parametros originales (mismo criterio que Fase 2, no
+    //    se recalcula "a la par" en cada punto bumpeado).
+    // -----------------------------------------------------------------------------------------
+
+    #[test]
+    fn hessian_diagonal_matches_a_three_point_bump_and_reval_stencil_2f() {
+        for (idx, fx) in fixtures_2f().into_iter().enumerate() {
+            let hessian = hull_white_2f_hessian(
+                fx.a, fx.b, fx.sigma, fx.eta, fx.rho, fx.r0, fx.notional, fx.fixed_rate, fx.use_par_rate,
+                fx.start, &fx.payment_times, &fx.accruals,
+            );
+            let fixed_rate_f64 = fixed_rate_of_2f(&fx);
+
+            let h_a = 1e-4 * fx.a.abs().max(1.0);
+            let h_b = 1e-4 * fx.b.abs().max(1.0);
+            let h_sigma = 1e-4 * fx.sigma.abs().max(1.0);
+            let h_eta = 1e-4 * fx.eta.abs().max(1.0);
+            let h_r0 = 1e-4 * fx.r0.abs().max(1.0);
+
+            let base = npv_2f_f64(&fx, fixed_rate_f64, fx.a, fx.b, fx.sigma, fx.eta, fx.r0);
+
+            let bump_aa = (npv_2f_f64(&fx, fixed_rate_f64, fx.a + h_a, fx.b, fx.sigma, fx.eta, fx.r0)
+                - 2.0 * base
+                + npv_2f_f64(&fx, fixed_rate_f64, fx.a - h_a, fx.b, fx.sigma, fx.eta, fx.r0))
+                / (h_a * h_a);
+            let bump_bb = (npv_2f_f64(&fx, fixed_rate_f64, fx.a, fx.b + h_b, fx.sigma, fx.eta, fx.r0)
+                - 2.0 * base
+                + npv_2f_f64(&fx, fixed_rate_f64, fx.a, fx.b - h_b, fx.sigma, fx.eta, fx.r0))
+                / (h_b * h_b);
+            let bump_sigmasigma = (npv_2f_f64(&fx, fixed_rate_f64, fx.a, fx.b, fx.sigma + h_sigma, fx.eta, fx.r0)
+                - 2.0 * base
+                + npv_2f_f64(&fx, fixed_rate_f64, fx.a, fx.b, fx.sigma - h_sigma, fx.eta, fx.r0))
+                / (h_sigma * h_sigma);
+            let bump_etaeta = (npv_2f_f64(&fx, fixed_rate_f64, fx.a, fx.b, fx.sigma, fx.eta + h_eta, fx.r0)
+                - 2.0 * base
+                + npv_2f_f64(&fx, fixed_rate_f64, fx.a, fx.b, fx.sigma, fx.eta - h_eta, fx.r0))
+                / (h_eta * h_eta);
+            let bump_r0r0 = (npv_2f_f64(&fx, fixed_rate_f64, fx.a, fx.b, fx.sigma, fx.eta, fx.r0 + h_r0)
+                - 2.0 * base
+                + npv_2f_f64(&fx, fixed_rate_f64, fx.a, fx.b, fx.sigma, fx.eta, fx.r0 - h_r0))
+                / (h_r0 * h_r0);
+
+            let tol = |reference: f64| 1e-3 * reference.abs().max(1.0);
+            assert!((hessian.d_aa - bump_aa).abs() < tol(bump_aa), "fixture {idx}: d_aa={} bump={bump_aa}", hessian.d_aa);
+            assert!((hessian.d_bb - bump_bb).abs() < tol(bump_bb), "fixture {idx}: d_bb={} bump={bump_bb}", hessian.d_bb);
+            assert!(
+                (hessian.d_sigmasigma - bump_sigmasigma).abs() < tol(bump_sigmasigma),
+                "fixture {idx}: d_sigmasigma={} bump={bump_sigmasigma}",
+                hessian.d_sigmasigma
+            );
+            assert!(
+                (hessian.d_etaeta - bump_etaeta).abs() < tol(bump_etaeta),
+                "fixture {idx}: d_etaeta={} bump={bump_etaeta}",
+                hessian.d_etaeta
+            );
+            assert!(
+                (hessian.d_r0r0 - bump_r0r0).abs() < tol(bump_r0r0),
+                "fixture {idx}: d_r0r0={} bump={bump_r0r0}",
+                hessian.d_r0r0
+            );
+        }
+    }
+
+    #[test]
+    fn hessian_cross_terms_match_a_four_point_bump_and_reval_stencil_2f() {
+        for (idx, fx) in fixtures_2f().into_iter().enumerate() {
+            let hessian = hull_white_2f_hessian(
+                fx.a, fx.b, fx.sigma, fx.eta, fx.rho, fx.r0, fx.notional, fx.fixed_rate, fx.use_par_rate,
+                fx.start, &fx.payment_times, &fx.accruals,
+            );
+            let fixed_rate_f64 = fixed_rate_of_2f(&fx);
+
+            let h_a = 1e-4 * fx.a.abs().max(1.0);
+            let h_b = 1e-4 * fx.b.abs().max(1.0);
+            let h_sigma = 1e-4 * fx.sigma.abs().max(1.0);
+            let h_eta = 1e-4 * fx.eta.abs().max(1.0);
+            let h_r0 = 1e-4 * fx.r0.abs().max(1.0);
+
+            // Estencil de 4 puntos generico sobre dos parametros indexados por closures que
+            // devuelven (a,b,sigma,eta,r0) desplazados en +h/-h en cada uno de los dos ejes.
+            let four_point = |f: &dyn Fn(f64, f64) -> f64, hx: f64, hy: f64| -> f64 {
+                (f(hx, hy) - f(hx, -hy) - f(-hx, hy) + f(-hx, -hy)) / (4.0 * hx * hy)
+            };
+
+            let cross_ab = four_point(
+                &|da, db| npv_2f_f64(&fx, fixed_rate_f64, fx.a + da, fx.b + db, fx.sigma, fx.eta, fx.r0),
+                h_a, h_b,
+            );
+            let cross_asigma = four_point(
+                &|da, ds| npv_2f_f64(&fx, fixed_rate_f64, fx.a + da, fx.b, fx.sigma + ds, fx.eta, fx.r0),
+                h_a, h_sigma,
+            );
+            let cross_aeta = four_point(
+                &|da, de| npv_2f_f64(&fx, fixed_rate_f64, fx.a + da, fx.b, fx.sigma, fx.eta + de, fx.r0),
+                h_a, h_eta,
+            );
+            let cross_ar0 = four_point(
+                &|da, dr| npv_2f_f64(&fx, fixed_rate_f64, fx.a + da, fx.b, fx.sigma, fx.eta, fx.r0 + dr),
+                h_a, h_r0,
+            );
+            let cross_bsigma = four_point(
+                &|db, ds| npv_2f_f64(&fx, fixed_rate_f64, fx.a, fx.b + db, fx.sigma + ds, fx.eta, fx.r0),
+                h_b, h_sigma,
+            );
+            let cross_beta = four_point(
+                &|db, de| npv_2f_f64(&fx, fixed_rate_f64, fx.a, fx.b + db, fx.sigma, fx.eta + de, fx.r0),
+                h_b, h_eta,
+            );
+            let cross_br0 = four_point(
+                &|db, dr| npv_2f_f64(&fx, fixed_rate_f64, fx.a, fx.b + db, fx.sigma, fx.eta, fx.r0 + dr),
+                h_b, h_r0,
+            );
+            let cross_sigmaeta = four_point(
+                &|ds, de| npv_2f_f64(&fx, fixed_rate_f64, fx.a, fx.b, fx.sigma + ds, fx.eta + de, fx.r0),
+                h_sigma, h_eta,
+            );
+            let cross_sigmar0 = four_point(
+                &|ds, dr| npv_2f_f64(&fx, fixed_rate_f64, fx.a, fx.b, fx.sigma + ds, fx.eta, fx.r0 + dr),
+                h_sigma, h_r0,
+            );
+            let cross_etar0 = four_point(
+                &|de, dr| npv_2f_f64(&fx, fixed_rate_f64, fx.a, fx.b, fx.sigma, fx.eta + de, fx.r0 + dr),
+                h_eta, h_r0,
+            );
+
+            let tol = |reference: f64| 1e-3 * reference.abs().max(1.0);
+            assert!((hessian.d_ab - cross_ab).abs() < tol(cross_ab), "fixture {idx}: d_ab={} bump={cross_ab}", hessian.d_ab);
+            assert!(
+                (hessian.d_asigma - cross_asigma).abs() < tol(cross_asigma),
+                "fixture {idx}: d_asigma={} bump={cross_asigma}",
+                hessian.d_asigma
+            );
+            assert!(
+                (hessian.d_aeta - cross_aeta).abs() < tol(cross_aeta),
+                "fixture {idx}: d_aeta={} bump={cross_aeta}",
+                hessian.d_aeta
+            );
+            assert!((hessian.d_ar0 - cross_ar0).abs() < tol(cross_ar0), "fixture {idx}: d_ar0={} bump={cross_ar0}", hessian.d_ar0);
+            assert!(
+                (hessian.d_bsigma - cross_bsigma).abs() < tol(cross_bsigma),
+                "fixture {idx}: d_bsigma={} bump={cross_bsigma}",
+                hessian.d_bsigma
+            );
+            assert!(
+                (hessian.d_beta - cross_beta).abs() < tol(cross_beta),
+                "fixture {idx}: d_beta={} bump={cross_beta}",
+                hessian.d_beta
+            );
+            assert!(
+                (hessian.d_br0 - cross_br0).abs() < tol(cross_br0),
+                "fixture {idx}: d_br0={} bump={cross_br0}",
+                hessian.d_br0
+            );
+            assert!(
+                (hessian.d_sigmaeta - cross_sigmaeta).abs() < tol(cross_sigmaeta),
+                "fixture {idx}: d_sigmaeta={} bump={cross_sigmaeta}",
+                hessian.d_sigmaeta
+            );
+            assert!(
+                (hessian.d_sigmar0 - cross_sigmar0).abs() < tol(cross_sigmar0),
+                "fixture {idx}: d_sigmar0={} bump={cross_sigmar0}",
+                hessian.d_sigmar0
+            );
+            assert!(
+                (hessian.d_etar0 - cross_etar0).abs() < tol(cross_etar0),
+                "fixture {idx}: d_etar0={} bump={cross_etar0}",
+                hessian.d_etar0
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // 4) (opcional) caso limite b grande + eta=rho=0: el Hessiano 2F debe coincidir con el
+    //    Hessiano 1F ya verificado (mismos a/sigma/r0) -- el segundo factor se extingue casi al
+    //    instante y nunca se correlaciona con el primero (mismo caso limite que
+    //    hull_white_2f::tests::zero_coupon_bond_matches_one_factor_when_second_factor_is_degenerate).
+    // -----------------------------------------------------------------------------------------
+
+    #[test]
+    fn hessian_matches_1f_hessian_in_the_degenerate_second_factor_limit() {
+        let a = 0.1;
+        let sigma = 0.01;
+        let r0 = 0.03;
+        let b_degenerate = 50.0; // reversion muy rapida: el segundo factor se extingue casi al instante
+        let eta = 0.0;
+        let rho = 0.0;
+        let notional = 1_000_000.0;
+        let fixed_rate = 0.03;
+        let start = 0.0;
+        let payment_times = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+        let accruals = vec![1.0; 5];
+
+        // `HullWhite1F::b` es el nivel de reversion de largo plazo (no el segundo `a` de 2F,
+        // que no existe en 1F) -- mismo truco que
+        // `hull_white_2f::tests::zero_coupon_bond_matches_one_factor_when_second_factor_is_degenerate`,
+        // que fija `b=r0` para que el termino de deriva de 1F coincida con `phi0=r0` constante de
+        // G2++ con estado inicial `x0=y0=0`.
+        let hessian_1f = hull_white_1f_hessian(
+            a, r0, sigma, r0, notional, fixed_rate, false, start, &payment_times, &accruals,
+        );
+        let hessian_2f = hull_white_2f_hessian(
+            a, b_degenerate, sigma, eta, rho, r0, notional, fixed_rate, false, start, &payment_times, &accruals,
+        );
+
+        // Con eta=rho=0 y b_degenerate grande, variance_term(b,...)/cross_term(...) y sus
+        // derivadas en a/sigma se anulan numericamente -- el valor, d_a/d_sigma y
+        // d_aa/d_sigmasigma/d_asigma de 2F deben coincidir con los de 1F dentro de tolerancia
+        // razonable (b finito, no exactamente cero).
+        //
+        // NOTA: r0 se excluye deliberadamente de esta comparacion -- no es un error, es una
+        // diferencia real de parametrizacion entre los dos modelos verificada analiticamente:
+        // en 1F, `r0` (4º argumento de `hull_white_1f_hessian`) es el ESTADO `r_t` que se bumpea
+        // manteniendo el nivel de reversion `b` FIJO (dP/dr_t = -B(a,tau)*P, satura a 1/a cuando
+        // tau->infinito); en 2F, `r0` es `phi0`, un desplazamiento CONSTANTE de TODA la
+        // trayectoria (dP/dr0 = -tau*P, crece sin cota en tau). Ambas derivadas coinciden solo en
+        // el limite tau->0, no en general -- confirmado empiricamente: el assert de d_r0 falla
+        // con esta fixture (tau in [1,5]) mientras que value/d_a/d_sigma/d_aa/d_sigmasigma/
+        // d_asigma sí coinciden, tal como predice la formula cerrada.
+        let tol = |reference: f64| 1e-4 * reference.abs().max(1.0);
+        assert!((hessian_2f.value - hessian_1f.value).abs() < tol(hessian_1f.value));
+        assert!((hessian_2f.d_a - hessian_1f.d_a).abs() < tol(hessian_1f.d_a));
+        assert!((hessian_2f.d_sigma - hessian_1f.d_sigma).abs() < tol(hessian_1f.d_sigma));
+        assert!((hessian_2f.d_aa - hessian_1f.d_aa).abs() < tol(hessian_1f.d_aa));
+        assert!((hessian_2f.d_sigmasigma - hessian_1f.d_sigmasigma).abs() < tol(hessian_1f.d_sigmasigma));
+        assert!((hessian_2f.d_asigma - hessian_1f.d_asigma).abs() < tol(hessian_1f.d_asigma));
     }
 }

@@ -219,18 +219,50 @@ struct HessianReport {
 
 // Hessiano local de un único trade, "mejor esfuerzo" como `compute_all_greeks` (nunca lanza sobre
 // una combinación no soportada -- va a `skipped`, a diferencia de `compute_greek` que sí lanza
-// sobre una petición explícita no soportada). PLAN_BACKWARD.md §9 Fase 1: solo cubre
-// `{"GBM","PayoffPriceQ"}`/`{"GBM_P","PayoffForecastP"}` (ver `hessian_capabilities()` en
-// greeks.cpp) con factores en {spot, volatility} -- cualquier otra combinación de (modelo,
-// métrica) o cualquier factor fuera de {spot, volatility} va a `skipped` con el motivo exacto.
-// `factors` vacío = enumeración automática (exactamente {spot, volatility} en esta fase, ver el
-// doc-comment de `compute_hessian` en greeks.cpp); no vacío = solo los pares formables con esos
-// factores (∩ {spot, volatility}).
+// sobre una petición explícita no soportada). PLAN_BACKWARD.md §9 Fase 1-3: cubre
+// `{"GBM","PayoffPriceQ"}`/`{"GBM_P","PayoffForecastP"}` (factores en {spot, volatility}, vía
+// likelihood ratio) y `{"HullWhite1F","HullWhiteModelNpv"}`/`{"HullWhite2F","HullWhiteModelNpv"}`
+// (factores en {a,b,sigma,r0}/{a,b,sigma,eta,r0} respectivamente -- HullWhite2F excluye "rho", no
+// diferenciable -- vía forward-over-forward) (ver `hessian_capabilities()` en greeks.cpp) --
+// cualquier otra combinación de (modelo, métrica) o cualquier factor fuera del conjunto soportado
+// va a `skipped` con el motivo exacto. `factors` vacío = enumeración automática (exactamente el
+// conjunto soportado por la combinación aplicable, ver el doc-comment de `compute_hessian` en
+// greeks.cpp); no vacío = solo los pares formables con esos factores (∩ conjunto soportado).
 HessianReport compute_hessian(
     const Registries& registries, const std::string& metric_name, const Params& metric_params,
     const IModel& model, const IProduct& product, const MarketSnapshot& market,
     const PricingContext& pricing, const ExecutionContext& execution,
     const std::vector<RiskFactor>& factors = {}
+);
+
+// Producto Hessiano-vector "H*v" (PLAN_BACKWARD.md §5/§7/§9 Fase 3): un `HvpComponent` por factor
+// de `factors`, con `value` = la componente `i` de `H*direction` (`H` es el Hessiano de
+// `compute_hessian` sobre esos mismos `factors`). Con `N` pequeño (Hull-White: 4-6 parámetros) no
+// hace falta el truco de Pearlmutter (reverse-over-forward) -- basta montar el Hessiano ya
+// calculado y multiplicarlo por `direction` (coste trivial, O(N²) una vez, reutilizable para
+// cualquier `v`), ver §5.
+struct HvpComponent {
+    RiskFactor factor;
+    double value = 0.0;   // componente de H*v en la posicion de `factor`
+    GreekMethod method_used = GreekMethod::BumpAndReval;
+};
+
+struct HvpReport {
+    std::vector<HvpComponent> components;
+    std::vector<std::string> skipped;
+};
+
+// `direction.size() == factors.size()`, mismo orden -- `direction[i]` corresponde a `factors[i]`.
+// Implementación (PLAN_BACKWARD.md §9 Fase 3): se apoya en `compute_hessian` YA EXISTENTE (arriba)
+// en vez de repetir dispatch por modelo -- funciona igual de bien para Hull-White
+// (`AadForwardOverForward`) que para GBM/GBM_P (`LikelihoodRatioHessian`) sin código nuevo por
+// modelo. Un factor cuya fila del Hessiano quedó incompleta (falta cualquier entrada `H[i][j]`,
+// incluida la diagonal) va a `skipped` -- nunca se inventa un `0.0` silencioso.
+HvpReport compute_hvp(
+    const Registries& registries, const std::string& metric_name, const Params& metric_params,
+    const IModel& model, const IProduct& product, const MarketSnapshot& market,
+    const PricingContext& pricing, const ExecutionContext& execution,
+    const std::vector<RiskFactor>& factors, const std::vector<double>& direction
 );
 
 } // namespace greeks

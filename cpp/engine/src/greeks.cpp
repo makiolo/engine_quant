@@ -313,12 +313,17 @@ const std::vector<SpecializedCapability>& pathwise_cross_capabilities() {
 // Hessiano local del motor de payoff via likelihood ratio (PLAN_BACKWARD.md §9 Fase 1): mismas dos
 // entradas que `pathwise2_capabilities()`/`pathwise_cross_capabilities()` (misma restriccion
 // dinamica de una unica fecha terminal, comprobada en `try_hessian_likelihood_ratio`). Fase 2/3
-// anadira aqui HullWhite1F/2F via AadForwardOverForward (PLAN_BACKWARD.md §7.1).
+// anaden aqui HullWhite1F/2F via AadForwardOverForward (PLAN_BACKWARD.md §7.1) -- HullWhite2F
+// excluye cualquier par que incluya "rho" (no es diferenciable, mismo criterio que
+// `aad_capabilities()`/`try_aad_reverse`): `try_hessian_forward_over_forward` simplemente nunca
+// emite una `HessianEntry` con ese factor, asi que el filtrado generico de `compute_hessian`
+// (`distinct_factors_in`/`is_valid`) lo excluye solo, sin necesitar logica especial aqui.
 const std::vector<SpecializedCapability>& hessian_capabilities() {
     static const std::vector<SpecializedCapability> table = {
         {"GBM", "PayoffPriceQ"},
         {"GBM_P", "PayoffForecastP"},
         {"HullWhite1F", "HullWhiteModelNpv"},
+        {"HullWhite2F", "HullWhiteModelNpv"},
     };
     return table;
 }
@@ -376,57 +381,102 @@ std::optional<std::array<HessianEntry, 3>> try_hessian_likelihood_ratio(
     return entries;
 }
 
-// Hessiano cerrado de Hull-White 1F via Dual2/HyperDual NUEVOS (forward-over-forward,
-// PLAN_BACKWARD.md §5/§9 Fase 2): UNA UNICA llamada a `hull_white_1f_hessian` (puente cxx ->
-// `engine_core::models::hull_white_dual`) da el valor, el gradiente y las 10 entradas del
-// Hessiano 4x4 de una vez -- no Monte Carlo, no bump-and-reval, no AAD reverse-mode de Burn (que
-// no anida Autodiff para dar un Hessiano, PLAN_BACKWARD.md §1.2). Mismo criterio "mejor esfuerzo"
-// que `try_hessian_likelihood_ratio`: `std::nullopt` si la combinacion (modelo, metrica) no esta
-// en `hessian_capabilities()`, o si el modelo/producto no son los esperados -- nunca lanza. Orden
-// fijo de las 10 entradas devueltas: 4 diagonales (a,a)/(b,b)/(sigma,sigma)/(r0,r0) seguidas de
-// las 6 cruzadas (a,b)/(a,sigma)/(a,r0)/(b,sigma)/(b,r0)/(sigma,r0) -- sin std_error (formula
-// cerrada, no Monte Carlo) y measure=DeterministicScenario (mismo criterio que `try_aad_reverse`
-// para la metrica "HullWhiteModelNpv", ver mas abajo).
+// Hessiano cerrado de Hull-White 1F/2F via Dual2/HyperDual NUEVOS (forward-over-forward,
+// PLAN_BACKWARD.md §5/§9 Fase 2/3): UNA UNICA llamada a `hull_white_1f_hessian`/
+// `hull_white_2f_hessian` (puente cxx -> `engine_core::models::hull_white_dual`) da el valor, el
+// gradiente y las entradas del Hessiano de una vez -- no Monte Carlo, no bump-and-reval, no AAD
+// reverse-mode de Burn (que no anida Autodiff para dar un Hessiano, PLAN_BACKWARD.md §1.2). Mismo
+// criterio "mejor esfuerzo" que `try_hessian_likelihood_ratio`: `std::nullopt` si la combinacion
+// (modelo, metrica) no esta en `hessian_capabilities()`, o si el modelo/producto no son los
+// esperados -- nunca lanza. HullWhite1F: orden fijo de las 10 entradas devueltas, 4 diagonales
+// (a,a)/(b,b)/(sigma,sigma)/(r0,r0) seguidas de las 6 cruzadas (a,b)/(a,sigma)/(a,r0)/(b,sigma)/
+// (b,r0)/(sigma,r0). HullWhite2F: orden fijo de las 15 entradas, 5 diagonales
+// (a,a)/(b,b)/(sigma,sigma)/(eta,eta)/(r0,r0) seguidas de las 10 cruzadas (a,b)/(a,sigma)/
+// (a,eta)/(a,r0)/(b,sigma)/(b,eta)/(b,r0)/(sigma,eta)/(sigma,r0)/(eta,r0) -- NUNCA se genera una
+// entrada para "rho" (no es diferenciable, mismo criterio que `try_aad_reverse` con HullWhite2F).
+// Ninguna entrada lleva std_error (formula cerrada, no Monte Carlo) y measure=
+// DeterministicScenario (mismo criterio que `try_aad_reverse` para la metrica
+// "HullWhiteModelNpv", ver mas abajo).
 std::optional<std::vector<HessianEntry>> try_hessian_forward_over_forward(
     const std::string& metric_name, const IModel& model, const IProduct& product
 ) {
     const std::string model_type = model.type_name();
     if (!capability_listed(hessian_capabilities(), model_type, metric_name)) return std::nullopt;
-    if (model_type != "HullWhite1F") return std::nullopt; // Fase 3 (HullWhite2F) todavia no cableada aqui
 
-    const auto* hw1f = dynamic_cast<const HullWhite1FModel*>(&model);
     const auto* irs_product = dynamic_cast<const IrSwapProduct*>(&product);
-    if (!hw1f || !irs_product) return std::nullopt; // defensivo: la tabla solo lista IrSwapProduct
+    if (!irs_product) return std::nullopt; // defensivo: la tabla solo lista IrSwapProduct
 
-    HullWhite1FHessian h = hull_white_1f_hessian(
-        hw1f->a(), hw1f->b(), hw1f->sigma(), hw1f->r0(), irs_product->notional(), irs_product->fixed_rate(),
-        irs_product->use_par_rate(), irs_product->start(), irs_product->payment_times(), irs_product->accruals()
-    );
-
-    const RiskFactor fa{RiskFactorKind::ModelParameter, "model", "a", std::nullopt};
-    const RiskFactor fb{RiskFactorKind::ModelParameter, "model", "b", std::nullopt};
-    const RiskFactor fsigma{RiskFactorKind::ModelParameter, "model", "sigma", std::nullopt};
-    const RiskFactor fr0{RiskFactorKind::ModelParameter, "model", "r0", std::nullopt};
-
-    std::vector<HessianEntry> entries;
-    entries.reserve(10);
-    auto push = [&](const RiskFactor& factor_i, const RiskFactor& factor_j, double value) {
+    auto push = [](std::vector<HessianEntry>& entries, const RiskFactor& factor_i, const RiskFactor& factor_j, double value) {
         entries.push_back(HessianEntry{
             factor_i, factor_j, value, std::nullopt, GreekMethod::AadForwardOverForward,
             payoff::ProbabilityMeasure::DeterministicScenario
         });
     };
-    push(fa, fa, h.d_aa);
-    push(fb, fb, h.d_bb);
-    push(fsigma, fsigma, h.d_sigmasigma);
-    push(fr0, fr0, h.d_r0r0);
-    push(fa, fb, h.d_ab);
-    push(fa, fsigma, h.d_asigma);
-    push(fa, fr0, h.d_ar0);
-    push(fb, fsigma, h.d_bsigma);
-    push(fb, fr0, h.d_br0);
-    push(fsigma, fr0, h.d_sigmar0);
-    return entries;
+
+    if (model_type == "HullWhite1F") {
+        const auto* hw1f = dynamic_cast<const HullWhite1FModel*>(&model);
+        if (!hw1f) return std::nullopt; // defensivo: la tabla solo lista HullWhite1FModel
+
+        HullWhite1FHessian h = hull_white_1f_hessian(
+            hw1f->a(), hw1f->b(), hw1f->sigma(), hw1f->r0(), irs_product->notional(), irs_product->fixed_rate(),
+            irs_product->use_par_rate(), irs_product->start(), irs_product->payment_times(), irs_product->accruals()
+        );
+
+        const RiskFactor fa{RiskFactorKind::ModelParameter, "model", "a", std::nullopt};
+        const RiskFactor fb{RiskFactorKind::ModelParameter, "model", "b", std::nullopt};
+        const RiskFactor fsigma{RiskFactorKind::ModelParameter, "model", "sigma", std::nullopt};
+        const RiskFactor fr0{RiskFactorKind::ModelParameter, "model", "r0", std::nullopt};
+
+        std::vector<HessianEntry> entries;
+        entries.reserve(10);
+        push(entries, fa, fa, h.d_aa);
+        push(entries, fb, fb, h.d_bb);
+        push(entries, fsigma, fsigma, h.d_sigmasigma);
+        push(entries, fr0, fr0, h.d_r0r0);
+        push(entries, fa, fb, h.d_ab);
+        push(entries, fa, fsigma, h.d_asigma);
+        push(entries, fa, fr0, h.d_ar0);
+        push(entries, fb, fsigma, h.d_bsigma);
+        push(entries, fb, fr0, h.d_br0);
+        push(entries, fsigma, fr0, h.d_sigmar0);
+        return entries;
+    } else if (model_type == "HullWhite2F") {
+        const auto* hw2f = dynamic_cast<const HullWhite2FModel*>(&model);
+        if (!hw2f) return std::nullopt; // defensivo: la tabla solo lista HullWhite2FModel
+
+        HullWhite2FHessian h = hull_white_2f_hessian(
+            hw2f->a(), hw2f->b(), hw2f->sigma(), hw2f->eta(), hw2f->rho(), hw2f->r0(), irs_product->notional(),
+            irs_product->fixed_rate(), irs_product->use_par_rate(), irs_product->start(),
+            irs_product->payment_times(), irs_product->accruals()
+        );
+
+        const RiskFactor fa{RiskFactorKind::ModelParameter, "model", "a", std::nullopt};
+        const RiskFactor fb{RiskFactorKind::ModelParameter, "model", "b", std::nullopt};
+        const RiskFactor fsigma{RiskFactorKind::ModelParameter, "model", "sigma", std::nullopt};
+        const RiskFactor feta{RiskFactorKind::ModelParameter, "model", "eta", std::nullopt};
+        const RiskFactor fr0{RiskFactorKind::ModelParameter, "model", "r0", std::nullopt};
+
+        std::vector<HessianEntry> entries;
+        entries.reserve(15);
+        push(entries, fa, fa, h.d_aa);
+        push(entries, fb, fb, h.d_bb);
+        push(entries, fsigma, fsigma, h.d_sigmasigma);
+        push(entries, feta, feta, h.d_etaeta);
+        push(entries, fr0, fr0, h.d_r0r0);
+        push(entries, fa, fb, h.d_ab);
+        push(entries, fa, fsigma, h.d_asigma);
+        push(entries, fa, feta, h.d_aeta);
+        push(entries, fa, fr0, h.d_ar0);
+        push(entries, fb, fsigma, h.d_bsigma);
+        push(entries, fb, feta, h.d_beta);
+        push(entries, fb, fr0, h.d_br0);
+        push(entries, fsigma, feta, h.d_sigmaeta);
+        push(entries, fsigma, fr0, h.d_sigmar0);
+        push(entries, feta, fr0, h.d_etar0);
+        return entries;
+    }
+
+    return std::nullopt; // inalcanzable dada hessian_capabilities(), defensivo
 }
 
 // AAD reverse-mode (`Autodiff<CpuBackend>` de Burn): generaliza `irs_hull_white_npv_delta_r0` a
@@ -1238,15 +1288,16 @@ std::vector<RiskFactor> distinct_factors_in(const std::vector<HessianEntry>& ent
     return factors;
 }
 
-// Hessiano local de un unico trade, "mejor esfuerzo" (PLAN_BACKWARD.md §7/§9 Fase 1-2) -- a
+// Hessiano local de un unico trade, "mejor esfuerzo" (PLAN_BACKWARD.md §7/§9 Fase 1-3) -- a
 // diferencia de `compute_greek`, NUNCA lanza sobre una combinacion no soportada: todo lo no
 // cubierto va a `skipped` con el motivo exacto (mismo criterio que `compute_all_greeks`). Intenta,
 // en orden, `try_hessian_likelihood_ratio` (GBM/GBM_P, factores en {spot, volatility}, Fase 1) y
 // `try_hessian_forward_over_forward` (HullWhite1F via Dual2/HyperDual, factores en
-// {a,b,sigma,r0}, Fase 2) -- las dos tablas de capacidades son disjuntas (ningun modelo aparece en
-// ambas), asi que el orden no importa. La enumeracion automatica (`factors` vacio) es exactamente
-// el conjunto de factores que la especializacion aplicable produjo (documentado explicitamente
-// aqui: {spot,volatility} para GBM/GBM_P, {a,b,sigma,r0} para HullWhite1F).
+// {a,b,sigma,r0}, Fase 2; HullWhite2F, factores en {a,b,sigma,eta,r0} -- sin "rho", Fase 3) -- las
+// dos tablas de capacidades son disjuntas (ningun modelo aparece en ambas), asi que el orden no
+// importa. La enumeracion automatica (`factors` vacio) es exactamente el conjunto de factores que
+// la especializacion aplicable produjo (documentado explicitamente aqui: {spot,volatility} para
+// GBM/GBM_P, {a,b,sigma,r0} para HullWhite1F, {a,b,sigma,eta,r0} para HullWhite2F).
 HessianReport compute_hessian(
     const Registries& registries, const std::string& metric_name, const Params& metric_params,
     const IModel& model, const IProduct& product, const MarketSnapshot& market,
@@ -1279,7 +1330,8 @@ HessianReport compute_hessian(
         report.skipped.push_back(
             "Hessiano local: (" + model.type_name() + ", " + metric_name + ") no esta cubierta por "
             "hessian_capabilities() ({GBM,PayoffPriceQ}/{GBM_P,PayoffForecastP} via likelihood ratio, "
-            "{HullWhite1F,HullWhiteModelNpv} via forward-over-forward) -- ver PLAN_BACKWARD.md §9 Fase 1-2"
+            "{HullWhite1F,HullWhite2F}x{HullWhiteModelNpv} via forward-over-forward) -- ver "
+            "PLAN_BACKWARD.md §9 Fase 1-3"
         );
         return report;
     }
@@ -1319,6 +1371,74 @@ HessianReport compute_hessian(
         if (was_requested(entry.factor_i) && was_requested(entry.factor_j)) {
             report.entries.push_back(entry);
         }
+    }
+
+    return report;
+}
+
+// Producto Hessiano-vector "H*v" (PLAN_BACKWARD.md §5/§7/§9 Fase 3) -- se apoya en
+// `compute_hessian` YA EXISTENTE en vez de repetir dispatch por modelo: funciona igual de bien
+// para Hull-White (`AadForwardOverForward`) que para GBM/GBM_P (`LikelihoodRatioHessian`) sin
+// código nuevo por modelo. `direction.size() != factors.size()` es un error del llamante (no hay
+// forma razonable de emparejar direcciones con factores si no coinciden en longitud) -- se lanza
+// en vez de degradarse en silencio, mismo criterio que el resto del motor de Greeks para errores
+// estructurales de la petición (PLAN_GREEKS.md §5.3/§5.4).
+HvpReport compute_hvp(
+    const Registries& registries, const std::string& metric_name, const Params& metric_params,
+    const IModel& model, const IProduct& product, const MarketSnapshot& market,
+    const PricingContext& pricing, const ExecutionContext& execution,
+    const std::vector<RiskFactor>& factors, const std::vector<double>& direction
+) {
+    if (direction.size() != factors.size()) {
+        throw std::invalid_argument(
+            "compute_hvp: direction.size() (" + std::to_string(direction.size()) + ") debe coincidir con "
+            "factors.size() (" + std::to_string(factors.size()) + ") -- direction[i] corresponde a factors[i]"
+        );
+    }
+
+    HessianReport hessian = compute_hessian(
+        registries, metric_name, metric_params, model, product, market, pricing, execution, factors
+    );
+
+    // Busca H[i][j] entre (factors[i],factors[j]) y (factors[j],factors[i]) -- misma entrada por
+    // simetria (compute_hessian solo guarda el triangulo superior + diagonal).
+    auto find_entry = [&](const RiskFactor& fi, const RiskFactor& fj) -> const HessianEntry* {
+        for (const HessianEntry& entry : hessian.entries) {
+            if ((same_risk_factor(entry.factor_i, fi) && same_risk_factor(entry.factor_j, fj)) ||
+                (same_risk_factor(entry.factor_i, fj) && same_risk_factor(entry.factor_j, fi))) {
+                return &entry;
+            }
+        }
+        return nullptr;
+    };
+
+    HvpReport report;
+    for (std::size_t i = 0; i < factors.size(); ++i) {
+        // Fila i completa: hace falta H[i][j] para TODO j en 0..factors.size(), incluida la
+        // diagonal -- si falta cualquiera, el componente i de H*v no se puede calcular sin
+        // inventar un 0.0 silencioso, asi que se reporta en `skipped` y se omite.
+        bool row_complete = true;
+        for (std::size_t j = 0; j < factors.size() && row_complete; ++j) {
+            row_complete = find_entry(factors[i], factors[j]) != nullptr;
+        }
+        if (!row_complete) {
+            report.skipped.push_back(
+                "HVP: fila del Hessiano incompleta para el factor '" + to_string(factors[i]) + "' -- "
+                "ver HessianReport::skipped de compute_hessian (via este mismo compute_hvp) para el motivo exacto"
+            );
+            continue;
+        }
+
+        double hv_i = 0.0;
+        for (std::size_t j = 0; j < factors.size(); ++j) {
+            hv_i += find_entry(factors[i], factors[j])->value * direction[j];
+        }
+        const HessianEntry* diagonal = find_entry(factors[i], factors[i]);
+        report.components.push_back(HvpComponent{factors[i], hv_i, diagonal->method_used});
+    }
+
+    for (const std::string& reason : hessian.skipped) {
+        report.skipped.push_back("HVP: " + reason);
     }
 
     return report;

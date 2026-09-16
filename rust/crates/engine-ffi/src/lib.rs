@@ -224,6 +224,36 @@ mod ffi {
         d_r0: f64,
     }
 
+    /// Valor + Hessiano 5x5 completo (15 pares) del NPV determinista de Hull-White 2F
+    /// (PLAN_BACKWARD.md §9 Fase 3), ver `engine_core::models::hull_white_dual::
+    /// HullWhite2FHessian`/`hull_white_2f_hessian`. Mismo mecanismo que
+    /// `HullWhite1FHessianResult` (Dual2/HyperDual nuevos, forward-over-forward cerrado, no AAD
+    /// reverse-mode de Burn). No incluye `d_rho`/entradas cruzadas con `rho` -- `rho` es un `f64`
+    /// plano no diferenciable, mismo criterio que `HullWhite2FGreeksResult` sin `d_rho`.
+    struct HullWhite2FHessianResult {
+        value: f64,
+        d_a: f64,
+        d_b: f64,
+        d_sigma: f64,
+        d_eta: f64,
+        d_r0: f64,
+        d_aa: f64,
+        d_bb: f64,
+        d_sigmasigma: f64,
+        d_etaeta: f64,
+        d_r0r0: f64,
+        d_ab: f64,
+        d_asigma: f64,
+        d_aeta: f64,
+        d_ar0: f64,
+        d_bsigma: f64,
+        d_beta: f64,
+        d_br0: f64,
+        d_sigmaeta: f64,
+        d_sigmar0: f64,
+        d_etar0: f64,
+    }
+
     extern "Rust" {
         fn ping() -> f64;
 
@@ -503,6 +533,25 @@ mod ffi {
             payment_times: Vec<f64>,
             accruals: Vec<f64>,
         ) -> HullWhite2FGreeksResult;
+
+        // Hessiano cerrado de Hull-White 2F (PLAN_BACKWARD.md §9 Fase 3): valor + gradiente + las
+        // 15 entradas del Hessiano 5x5, via Dual2/HyperDual nuevos (forward-over-forward), mismo
+        // mecanismo que `hull_white_1f_hessian` -- ver
+        // `engine_core::models::hull_white_dual::hull_white_2f_hessian`.
+        fn hull_white_2f_hessian(
+            a: f64,
+            b: f64,
+            sigma: f64,
+            eta: f64,
+            rho: f64,
+            r0: f64,
+            notional: f64,
+            fixed_rate: f64,
+            use_par_rate: bool,
+            start: f64,
+            payment_times: Vec<f64>,
+            accruals: Vec<f64>,
+        ) -> HullWhite2FHessianResult;
 
         // Equivalentes de lote de las cuatro funciones 2F de arriba -- ver las versiones de 1
         // factor para el porqué de cada una (PLAN.md §7.19).
@@ -1279,6 +1328,49 @@ fn irs_hull_white_2f_npv_all_greeks(
         d_sigma: greeks.d_sigma,
         d_eta: greeks.d_eta,
         d_r0: greeks.d_r0,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn hull_white_2f_hessian(
+    a: f64,
+    b: f64,
+    sigma: f64,
+    eta: f64,
+    rho: f64,
+    r0: f64,
+    notional: f64,
+    fixed_rate: f64,
+    use_par_rate: bool,
+    start: f64,
+    payment_times: Vec<f64>,
+    accruals: Vec<f64>,
+) -> ffi::HullWhite2FHessianResult {
+    let hessian = engine_core::models::hull_white_dual::hull_white_2f_hessian(
+        a, b, sigma, eta, rho, r0, notional, fixed_rate, use_par_rate, start, &payment_times, &accruals,
+    );
+    ffi::HullWhite2FHessianResult {
+        value: hessian.value,
+        d_a: hessian.d_a,
+        d_b: hessian.d_b,
+        d_sigma: hessian.d_sigma,
+        d_eta: hessian.d_eta,
+        d_r0: hessian.d_r0,
+        d_aa: hessian.d_aa,
+        d_bb: hessian.d_bb,
+        d_sigmasigma: hessian.d_sigmasigma,
+        d_etaeta: hessian.d_etaeta,
+        d_r0r0: hessian.d_r0r0,
+        d_ab: hessian.d_ab,
+        d_asigma: hessian.d_asigma,
+        d_aeta: hessian.d_aeta,
+        d_ar0: hessian.d_ar0,
+        d_bsigma: hessian.d_bsigma,
+        d_beta: hessian.d_beta,
+        d_br0: hessian.d_br0,
+        d_sigmaeta: hessian.d_sigmaeta,
+        d_sigmar0: hessian.d_sigmar0,
+        d_etar0: hessian.d_etar0,
     }
 }
 

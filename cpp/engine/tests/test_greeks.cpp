@@ -2400,9 +2400,13 @@ TEST(GreeksHessianHullWhiteTest, GradientFromTheHessianStructMatchesTheExistingA
     EXPECT_NEAR(h.d_r0, aad_greek("r0"), rel_tol(aad_greek("r0")));
 }
 
-TEST(GreeksHessianHullWhiteTest, ComputeHessianOnHullWhite2FGoesToSkippedWithoutThrowing) {
-    // HullWhite2F+"HullWhiteModelNpv" no esta en hessian_capabilities() todavia (Fase 3, no esta
-    // fase) -- compute_hessian es "mejor esfuerzo", nunca lanza.
+TEST(GreeksHessianHullWhite2FTest, ComputeHessianWithEmptyFactorsReturnsAllFifteenEntriesViaForwardOverForward) {
+    // PLAN_BACKWARD.md §9 Fase 3: HullWhite2F+"HullWhiteModelNpv" YA esta en hessian_capabilities()
+    // (generalizacion de try_hessian_forward_over_forward) -- 15 entradas (5 diagonales + 10
+    // cruzadas), todas AadForwardOverForward, NINGUNA con "rho" (no es diferenciable). Verificado
+    // contra un estencil de bump-and-reval: la diagonal completa (5 entradas) + 3 pares cruzados
+    // representativos (no hace falta repetir las 15, ya cubiertas en Rust
+    // hull_white_dual::tests::hessian_*_matches_a_*_bump_and_reval_stencil_2f).
     Registries registries;
     register_builtins(registries);
     engine::IrSwapProduct swap = make_irs(1'000'000.0, 0.02);
@@ -2412,9 +2416,103 @@ TEST(GreeksHessianHullWhiteTest, ComputeHessianOnHullWhite2FGoesToSkippedWithout
         registries, "HullWhiteModelNpv", Params{}, model, swap, flat_market(), pricing_context(1'000, 7), cpu_execution()
     );
 
-    EXPECT_TRUE(report.entries.empty());
+    ASSERT_TRUE(report.skipped.empty()) << (report.skipped.empty() ? "" : report.skipped.front());
+    ASSERT_EQ(report.entries.size(), 15u);
+    for (const auto& entry : report.entries) {
+        EXPECT_EQ(entry.method_used, engine::greeks::GreekMethod::AadForwardOverForward);
+        EXPECT_EQ(entry.measure, pf::ProbabilityMeasure::DeterministicScenario);
+        EXPECT_FALSE(entry.std_error.has_value());
+        EXPECT_NE(entry.factor_i.name, "rho");
+        EXPECT_NE(entry.factor_j.name, "rho");
+    }
+
+    auto find_entry = [&](const std::string& name_i, const std::string& name_j) -> const engine::greeks::HessianEntry& {
+        for (const auto& entry : report.entries) {
+            if ((entry.factor_i.name == name_i && entry.factor_j.name == name_j) ||
+                (entry.factor_i.name == name_j && entry.factor_j.name == name_i)) {
+                return entry;
+            }
+        }
+        throw std::runtime_error("entrada no encontrada: " + name_i + "/" + name_j);
+    };
+
+    const double a = model.a(), b = model.b(), sigma = model.sigma(), eta = model.eta(), rho = model.rho(), r0 = model.r0();
+    const double notional = swap.notional(), fixed_rate = swap.fixed_rate(), start = swap.start();
+    const std::vector<double>& payment_times = swap.payment_times();
+    const std::vector<double>& accruals = swap.accruals();
+
+    auto npv = [&](double a_, double b_, double sigma_, double eta_, double r0_) {
+        return engine::irs_hull_white_2f_npv(
+            a_, b_, sigma_, eta_, rho, r0_, notional, fixed_rate, false, start, payment_times, accruals
+        );
+    };
+
+    const double h_a = 1e-4 * std::max(std::abs(a), 1.0);
+    const double h_b = 1e-4 * std::max(std::abs(b), 1.0);
+    const double h_sigma = 1e-4 * std::max(std::abs(sigma), 1.0);
+    const double h_eta = 1e-4 * std::max(std::abs(eta), 1.0);
+    const double h_r0 = 1e-4 * std::max(std::abs(r0), 1.0);
+    auto tol = [](double reference) { return 1e-3 * std::max(std::abs(reference), 1.0); };
+
+    double base = npv(a, b, sigma, eta, r0);
+
+    double bump_aa = (npv(a + h_a, b, sigma, eta, r0) - 2.0 * base + npv(a - h_a, b, sigma, eta, r0)) / (h_a * h_a);
+    EXPECT_NEAR(find_entry("a", "a").value, bump_aa, tol(bump_aa));
+
+    double bump_bb = (npv(a, b + h_b, sigma, eta, r0) - 2.0 * base + npv(a, b - h_b, sigma, eta, r0)) / (h_b * h_b);
+    EXPECT_NEAR(find_entry("b", "b").value, bump_bb, tol(bump_bb));
+
+    double bump_sigmasigma =
+        (npv(a, b, sigma + h_sigma, eta, r0) - 2.0 * base + npv(a, b, sigma - h_sigma, eta, r0)) / (h_sigma * h_sigma);
+    EXPECT_NEAR(find_entry("sigma", "sigma").value, bump_sigmasigma, tol(bump_sigmasigma));
+
+    double bump_etaeta = (npv(a, b, sigma, eta + h_eta, r0) - 2.0 * base + npv(a, b, sigma, eta - h_eta, r0)) / (h_eta * h_eta);
+    EXPECT_NEAR(find_entry("eta", "eta").value, bump_etaeta, tol(bump_etaeta));
+
+    double bump_r0r0 = (npv(a, b, sigma, eta, r0 + h_r0) - 2.0 * base + npv(a, b, sigma, eta, r0 - h_r0)) / (h_r0 * h_r0);
+    EXPECT_NEAR(find_entry("r0", "r0").value, bump_r0r0, tol(bump_r0r0));
+
+    double cross_ab = (npv(a + h_a, b + h_b, sigma, eta, r0) - npv(a + h_a, b - h_b, sigma, eta, r0) -
+                        npv(a - h_a, b + h_b, sigma, eta, r0) + npv(a - h_a, b - h_b, sigma, eta, r0)) /
+                       (4.0 * h_a * h_b);
+    EXPECT_NEAR(find_entry("a", "b").value, cross_ab, tol(cross_ab));
+
+    double cross_sigmaeta = (npv(a, b, sigma + h_sigma, eta + h_eta, r0) - npv(a, b, sigma + h_sigma, eta - h_eta, r0) -
+                              npv(a, b, sigma - h_sigma, eta + h_eta, r0) + npv(a, b, sigma - h_sigma, eta - h_eta, r0)) /
+                             (4.0 * h_sigma * h_eta);
+    EXPECT_NEAR(find_entry("sigma", "eta").value, cross_sigmaeta, tol(cross_sigmaeta));
+
+    double cross_ar0 = (npv(a + h_a, b, sigma, eta, r0 + h_r0) - npv(a + h_a, b, sigma, eta, r0 - h_r0) -
+                         npv(a - h_a, b, sigma, eta, r0 + h_r0) + npv(a - h_a, b, sigma, eta, r0 - h_r0)) /
+                        (4.0 * h_a * h_r0);
+    EXPECT_NEAR(find_entry("a", "r0").value, cross_ar0, tol(cross_ar0));
+}
+
+TEST(GreeksHessianHullWhite2FTest, RequestingRhoExplicitlyGoesToSkippedBecauseItIsNotDifferentiable) {
+    // Confirma que el filtrado GENERICO ya existente en compute_hessian (distinct_factors_in/
+    // is_valid, sin tocar) maneja "rho" solo: try_hessian_forward_over_forward nunca emite una
+    // HessianEntry con "rho", asi que "rho" nunca aparece en valid_factors y cualquier peticion
+    // explicita de ese factor cae a skipped -- sin necesitar ningun caso especial nuevo.
+    Registries registries;
+    register_builtins(registries);
+    engine::IrSwapProduct swap = make_irs(1'000'000.0, 0.02);
+    engine::HullWhite2FModel model = make_hull_white_2f();
+
+    std::vector<RiskFactor> factors = {
+        RiskFactor{RiskFactorKind::ModelParameter, "model", "a", std::nullopt},
+        RiskFactor{RiskFactorKind::ModelParameter, "model", "rho", std::nullopt},
+    };
+
+    engine::greeks::HessianReport report = engine::greeks::compute_hessian(
+        registries, "HullWhiteModelNpv", Params{}, model, swap, flat_market(), pricing_context(1'000, 7), cpu_execution(),
+        factors
+    );
+
+    ASSERT_EQ(report.entries.size(), 1u); // solo (a,a) -- "rho" no forma ningun par valido
+    EXPECT_EQ(report.entries.front().factor_i.name, "a");
+    EXPECT_EQ(report.entries.front().factor_j.name, "a");
     ASSERT_FALSE(report.skipped.empty());
-    EXPECT_NE(report.skipped.front().find("HullWhite2F"), std::string::npos) << report.skipped.front();
+    EXPECT_NE(report.skipped.front().find("rho"), std::string::npos) << report.skipped.front();
 }
 
 TEST(GreeksHessianHullWhiteTest, ComputeHessianOnAnUnsupportedMetricForHullWhite1FGoesToSkippedWithoutThrowing) {
@@ -2434,4 +2532,127 @@ TEST(GreeksHessianHullWhiteTest, ComputeHessianOnAnUnsupportedMetricForHullWhite
     EXPECT_TRUE(report.entries.empty());
     ASSERT_FALSE(report.skipped.empty());
     EXPECT_NE(report.skipped.front().find("PV"), std::string::npos) << report.skipped.front();
+}
+
+// PLAN_BACKWARD.md §7/§9 Fase 3: compute_hvp se apoya en compute_hessian YA EXISTENTE (sin
+// dispatch nuevo por modelo) -- estos tests lo ejercitan sobre Hull-White (AadForwardOverForward)
+// y, opcionalmente, sobre GBM/payoff (LikelihoodRatioHessian) para demostrar la genericidad.
+
+TEST(GreeksHvpTest, MatchesTheFirstColumnOfTheHessianForABaseDirectionVectorOnHullWhite1F) {
+    // direction = vector base (1,0,0,0) -> Hv debe coincidir EXACTAMENTE (es una multiplicacion de
+    // numeros ya calculados, no una nueva estimacion) con la primera columna del Hessiano,
+    // calculada a mano en el test desde un compute_hessian POR SEPARADO (oraculo independiente,
+    // nunca reutilizando codigo interno de compute_hvp).
+    Registries registries;
+    register_builtins(registries);
+    engine::IrSwapProduct swap = make_irs(1'000'000.0, 0.02);
+    engine::HullWhite1FModel model = make_hull_white();
+
+    const std::vector<std::string> names = {"a", "b", "sigma", "r0"};
+    std::vector<RiskFactor> factors;
+    for (const std::string& name : names) {
+        factors.push_back(RiskFactor{RiskFactorKind::ModelParameter, "model", name, std::nullopt});
+    }
+    const std::vector<double> direction = {1.0, 0.0, 0.0, 0.0};
+
+    engine::greeks::HvpReport hvp = engine::greeks::compute_hvp(
+        registries, "HullWhiteModelNpv", Params{}, model, swap, flat_market(), pricing_context(1'000, 7), cpu_execution(),
+        factors, direction
+    );
+    ASSERT_TRUE(hvp.skipped.empty()) << (hvp.skipped.empty() ? "" : hvp.skipped.front());
+    ASSERT_EQ(hvp.components.size(), factors.size());
+
+    engine::greeks::HessianReport hessian = engine::greeks::compute_hessian(
+        registries, "HullWhiteModelNpv", Params{}, model, swap, flat_market(), pricing_context(1'000, 7), cpu_execution(),
+        factors
+    );
+    ASSERT_TRUE(hessian.skipped.empty()) << (hessian.skipped.empty() ? "" : hessian.skipped.front());
+
+    auto find_h = [&](const std::string& name_i, const std::string& name_j) -> double {
+        for (const auto& entry : hessian.entries) {
+            if ((entry.factor_i.name == name_i && entry.factor_j.name == name_j) ||
+                (entry.factor_i.name == name_j && entry.factor_j.name == name_i)) {
+                return entry.value;
+            }
+        }
+        throw std::runtime_error("entrada H no encontrada: " + name_i + "/" + name_j);
+    };
+
+    for (std::size_t i = 0; i < names.size(); ++i) {
+        double expected = 0.0;
+        for (std::size_t j = 0; j < names.size(); ++j) {
+            expected += find_h(names[i], names[j]) * direction[j];
+        }
+        EXPECT_EQ(hvp.components[i].factor.name, names[i]);
+        EXPECT_EQ(hvp.components[i].method_used, engine::greeks::GreekMethod::AadForwardOverForward);
+        EXPECT_NEAR(hvp.components[i].value, expected, 1e-9 * std::max(1.0, std::abs(expected)))
+            << "factor=" << names[i];
+    }
+}
+
+TEST(GreeksHvpTest, MismatchedDirectionAndFactorsSizeThrowsInvalidArgument) {
+    Registries registries;
+    register_builtins(registries);
+    engine::IrSwapProduct swap = make_irs(1'000'000.0, 0.02);
+    engine::HullWhite1FModel model = make_hull_white();
+
+    std::vector<RiskFactor> factors = {
+        RiskFactor{RiskFactorKind::ModelParameter, "model", "a", std::nullopt},
+        RiskFactor{RiskFactorKind::ModelParameter, "model", "b", std::nullopt},
+    };
+    std::vector<double> direction = {1.0}; // tamano distinto a factors -- error estructural del llamante
+
+    EXPECT_THROW(
+        engine::greeks::compute_hvp(
+            registries, "HullWhiteModelNpv", Params{}, model, swap, flat_market(), pricing_context(1'000, 7),
+            cpu_execution(), factors, direction
+        ),
+        std::invalid_argument
+    );
+}
+
+TEST(GreeksHvpTest, WorksGenericallyOverLikelihoodRatioHessianForGbmPayoff) {
+    // Opcional (no obligatorio, PLAN_BACKWARD.md §9 Fase 3): demuestra que compute_hvp es
+    // GENERICO -- funciona igual de bien sobre el Hessiano de likelihood ratio del motor de payoff
+    // (GBM) que sobre el forward-over-forward de Hull-White, sin ningun codigo especifico de
+    // modelo dentro de compute_hvp (se apoya solo en compute_hessian).
+    Registries registries;
+    register_builtins(registries);
+    const pf::ObservableId spot{"EQ.SPOT.XYZ"};
+    pf::PayoffProduct product("CALL", european_call(spot, 100.0, 1.0));
+    engine::GbmModel model = make_gbm_q(100.0, 0.05, 0.0, 0.2, spot.value);
+
+    std::vector<RiskFactor> factors = {
+        RiskFactor{RiskFactorKind::ModelParameter, "model", "spot", std::nullopt},
+        RiskFactor{RiskFactorKind::ModelParameter, "model", "volatility", std::nullopt},
+    };
+    const std::vector<double> direction = {1.0, 1.0};
+
+    engine::greeks::HvpReport hvp = engine::greeks::compute_hvp(
+        registries, "PayoffPriceQ", Params{}, model, product, flat_market(), pricing_context(500'000, 7), cpu_execution(),
+        factors, direction
+    );
+    ASSERT_TRUE(hvp.skipped.empty()) << (hvp.skipped.empty() ? "" : hvp.skipped.front());
+    ASSERT_EQ(hvp.components.size(), 2u);
+
+    // Mismo seed/n_paths que la llamada interna de compute_hvp -> coincidencia bit a bit (mismo
+    // criterio ya usado en GreeksHessianTest.ComputeHessianWithEmptyFactorsReturnsGammaVolgaVannaAllViaLikelihoodRatio).
+    engine::greeks::HessianReport hessian = engine::greeks::compute_hessian(
+        registries, "PayoffPriceQ", Params{}, model, product, flat_market(), pricing_context(500'000, 7), cpu_execution(),
+        factors
+    );
+    auto find_h = [&](const std::string& name_i, const std::string& name_j) -> double {
+        for (const auto& entry : hessian.entries) {
+            if ((entry.factor_i.name == name_i && entry.factor_j.name == name_j) ||
+                (entry.factor_i.name == name_j && entry.factor_j.name == name_i)) {
+                return entry.value;
+            }
+        }
+        throw std::runtime_error("entrada H no encontrada: " + name_i + "/" + name_j);
+    };
+
+    double expected_spot = find_h("spot", "spot") * direction[0] + find_h("spot", "volatility") * direction[1];
+    double expected_vol = find_h("volatility", "spot") * direction[0] + find_h("volatility", "volatility") * direction[1];
+    EXPECT_NEAR(hvp.components[0].value, expected_spot, 1e-9 * std::max(1.0, std::abs(expected_spot)));
+    EXPECT_NEAR(hvp.components[1].value, expected_vol, 1e-9 * std::max(1.0, std::abs(expected_vol)));
 }

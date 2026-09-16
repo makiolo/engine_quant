@@ -299,6 +299,24 @@ HullWhite2FGreeks irs_hull_white_2f_npv_all_greeks(
     return HullWhite2FGreeks{result.d_a, result.d_b, result.d_sigma, result.d_eta, result.d_r0};
 }
 
+HullWhite2FHessian hull_white_2f_hessian(
+    double a, double b, double sigma, double eta, double rho, double r0,
+    double notional, double fixed_rate, bool use_par_rate, double start,
+    const std::vector<double>& payment_times, const std::vector<double>& accruals
+) {
+    ffi::HullWhite2FHessianResult result = ffi::hull_white_2f_hessian(
+        a, b, sigma, eta, rho, r0, notional, fixed_rate, use_par_rate, start,
+        to_rust_vec(payment_times), to_rust_vec(accruals)
+    );
+    return HullWhite2FHessian{
+        result.value, result.d_a, result.d_b, result.d_sigma, result.d_eta, result.d_r0,
+        result.d_aa, result.d_bb, result.d_sigmasigma, result.d_etaeta, result.d_r0r0,
+        result.d_ab, result.d_asigma, result.d_aeta, result.d_ar0,
+        result.d_bsigma, result.d_beta, result.d_br0,
+        result.d_sigmaeta, result.d_sigmar0, result.d_etar0,
+    };
+}
+
 std::vector<double> irs_hull_white_2f_npv_batch(
     double a, double b, double sigma, double eta, double rho, double r0,
     const std::vector<double>& notionals, const std::vector<double>& fixed_rates, double start,
