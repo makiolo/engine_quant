@@ -706,6 +706,81 @@ mod ffi {
         // (ver engine_core::payoff::payoff_contains_exercise para el porque).
         fn payoff_contains_exercise(spec_json: String) -> Result<bool>;
 
+        // PLAN_HYPERDUAL.md §5: Gamma ("segunda derivada PURA respecto de 'spot'") bajo Q via el
+        // metodo del ratio de verosimilitud (Broadie-Glasserman), ver
+        // engine_core::payoff::payoff_sensitivity2_gbm_q -- reemplaza la generalizacion original
+        // de este documento (`Dual2`, derivar el PAYOFF dos veces), que resulto matematicamente
+        // incorrecta para cualquier payoff con un kink (Max/Min/Abs/If/Trigger) que dependa del
+        // parametro derivado, ver el doc-comment de `engine_core::payoff::lrm`. Solo soportado
+        // para contratos de una unica fecha terminal (`payoff_supports_second_order_lrm` decide
+        // ANTES de llamar aqui) y `greek == "spot"`.
+        fn payoff_sensitivity2_gbm_q(
+            spec_json: String,
+            observable: String,
+            greek: String,
+            s0: f64,
+            r: f64,
+            q: f64,
+            sigma: f64,
+            n_paths: u64,
+            seed: u64,
+        ) -> Result<PayoffSensitivityResult>;
+
+        // Extension bajo P de payoff_sensitivity2_gbm_q -- ver engine_core::payoff::payoff_sensitivity2_gbm_p.
+        #[allow(clippy::too_many_arguments)]
+        fn payoff_sensitivity2_gbm_p(
+            spec_json: String,
+            observable: String,
+            greek: String,
+            s0: f64,
+            mu: f64,
+            sigma: f64,
+            n_paths: u64,
+            seed: u64,
+        ) -> Result<PayoffSensitivityResult>;
+
+        // PLAN_HYPERDUAL.md §5: Vanna (derivada cruzada "spot"/"volatility") bajo Q via likelihood
+        // ratio -- ver engine_core::payoff::payoff_sensitivity_cross_gbm_q. Solo soportado para
+        // contratos de una unica fecha terminal y para el par ("spot","volatility") en cualquier
+        // orden.
+        #[allow(clippy::too_many_arguments)]
+        fn payoff_sensitivity_cross_gbm_q(
+            spec_json: String,
+            observable: String,
+            risk_factor: String,
+            cross_factor: String,
+            s0: f64,
+            r: f64,
+            q: f64,
+            sigma: f64,
+            n_paths: u64,
+            seed: u64,
+        ) -> Result<PayoffSensitivityResult>;
+
+        // Extension bajo P de payoff_sensitivity_cross_gbm_q -- ver
+        // engine_core::payoff::payoff_sensitivity_cross_gbm_p.
+        #[allow(clippy::too_many_arguments)]
+        fn payoff_sensitivity_cross_gbm_p(
+            spec_json: String,
+            observable: String,
+            risk_factor: String,
+            cross_factor: String,
+            s0: f64,
+            mu: f64,
+            sigma: f64,
+            n_paths: u64,
+            seed: u64,
+        ) -> Result<PayoffSensitivityResult>;
+
+        // PLAN_HYPERDUAL.md §5: `true` si spec_json compila y depende del subyacente en una unica
+        // fecha terminal -- consulta de capacidad que engine::greeks::compute_greek (C++) usa
+        // ANTES de intentar Gamma/Vanna via likelihood ratio, mismo criterio que
+        // payoff_contains_exercise.
+        fn payoff_supports_second_order_lrm(spec_json: String) -> Result<bool>;
+
+        // Extension bajo P de payoff_supports_second_order_lrm.
+        fn payoff_supports_second_order_lrm_p(spec_json: String) -> Result<bool>;
+
         // PLAN_PRODUCTS.md §11/§12 Fase 11 (item pendiente): sintetiza una cobertura bajo GBM/Q
         // para target_spec_json con el universo instrument_specs_json -- ver
         // engine_core::payoff::synthesize_hedge_gbm_q/HedgeConstraints. Convenciones de
@@ -1449,6 +1524,108 @@ fn payoff_sensitivity_gbm_p(
 
 fn payoff_contains_exercise(spec_json: String) -> Result<bool, String> {
     engine_core::payoff::payoff_contains_exercise(&spec_json)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn payoff_sensitivity2_gbm_q(
+    spec_json: String,
+    observable: String,
+    greek: String,
+    s0: f64,
+    r: f64,
+    q: f64,
+    sigma: f64,
+    n_paths: u64,
+    seed: u64,
+) -> Result<ffi::PayoffSensitivityResult, String> {
+    let estimate = engine_core::payoff::payoff_sensitivity2_gbm_q(
+        "cpu", &spec_json, &observable, &greek, s0, r, q, sigma, n_paths, seed,
+    )?;
+    Ok(ffi::PayoffSensitivityResult {
+        value: estimate.mean,
+        std_error: estimate.std_error,
+        ci_low: estimate.ci_low,
+        ci_high: estimate.ci_high,
+        n_paths: estimate.n_paths,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn payoff_sensitivity2_gbm_p(
+    spec_json: String,
+    observable: String,
+    greek: String,
+    s0: f64,
+    mu: f64,
+    sigma: f64,
+    n_paths: u64,
+    seed: u64,
+) -> Result<ffi::PayoffSensitivityResult, String> {
+    let estimate = engine_core::payoff::payoff_sensitivity2_gbm_p(&spec_json, &observable, &greek, s0, mu, sigma, n_paths, seed)?;
+    Ok(ffi::PayoffSensitivityResult {
+        value: estimate.mean,
+        std_error: estimate.std_error,
+        ci_low: estimate.ci_low,
+        ci_high: estimate.ci_high,
+        n_paths: estimate.n_paths,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn payoff_sensitivity_cross_gbm_q(
+    spec_json: String,
+    observable: String,
+    risk_factor: String,
+    cross_factor: String,
+    s0: f64,
+    r: f64,
+    q: f64,
+    sigma: f64,
+    n_paths: u64,
+    seed: u64,
+) -> Result<ffi::PayoffSensitivityResult, String> {
+    let estimate = engine_core::payoff::payoff_sensitivity_cross_gbm_q(
+        "cpu", &spec_json, &observable, &risk_factor, &cross_factor, s0, r, q, sigma, n_paths, seed,
+    )?;
+    Ok(ffi::PayoffSensitivityResult {
+        value: estimate.mean,
+        std_error: estimate.std_error,
+        ci_low: estimate.ci_low,
+        ci_high: estimate.ci_high,
+        n_paths: estimate.n_paths,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn payoff_sensitivity_cross_gbm_p(
+    spec_json: String,
+    observable: String,
+    risk_factor: String,
+    cross_factor: String,
+    s0: f64,
+    mu: f64,
+    sigma: f64,
+    n_paths: u64,
+    seed: u64,
+) -> Result<ffi::PayoffSensitivityResult, String> {
+    let estimate = engine_core::payoff::payoff_sensitivity_cross_gbm_p(
+        &spec_json, &observable, &risk_factor, &cross_factor, s0, mu, sigma, n_paths, seed,
+    )?;
+    Ok(ffi::PayoffSensitivityResult {
+        value: estimate.mean,
+        std_error: estimate.std_error,
+        ci_low: estimate.ci_low,
+        ci_high: estimate.ci_high,
+        n_paths: estimate.n_paths,
+    })
+}
+
+fn payoff_supports_second_order_lrm(spec_json: String) -> Result<bool, String> {
+    engine_core::payoff::payoff_supports_second_order_lrm(&spec_json)
+}
+
+fn payoff_supports_second_order_lrm_p(spec_json: String) -> Result<bool, String> {
+    engine_core::payoff::payoff_supports_second_order_lrm_p(&spec_json)
 }
 
 #[allow(clippy::too_many_arguments)]

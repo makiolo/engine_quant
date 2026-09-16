@@ -30,6 +30,7 @@ use crate::payoff::compile::compile;
 use crate::payoff::dual::Dual;
 use crate::payoff::eval::{evaluate_with_events_seeded, evaluate_with_resolved_states, resolve_trigger_states, ObservablePath};
 use crate::payoff::ir::CompiledPayoff;
+use crate::payoff::lrm;
 use crate::payoff::lsm::{self, ExerciseDateDiagnostic};
 use crate::payoff::sensitivity::{contains_exercise, evaluate_dual, GbmDualPath, GbmGreek};
 use burn::tensor::backend::Backend;
@@ -459,6 +460,177 @@ fn payoff_sensitivity_pathwise_on<B: Backend<FloatElem = f64>>(
     Ok(mc::aggregate(&samples, mc::Z_95))
 }
 
+/// Gamma pathwise EXACTA (segunda derivada PURA respecto de "spot") de `price_payoff_gbm_q`, via
+/// el metodo del ratio de verosimilitud (`crate::payoff::lrm`, PLAN_HYPERDUAL.md §5 -- revision:
+/// la generalizacion original con `Dual2` resulto matematicamente incorrecta para payoffs con kink,
+/// ver el doc-comment de `lrm`). Solo soportado para contratos de una UNICA fecha terminal
+/// (`lrm::single_terminal_time`) y para `greek == "spot"`; cualquier otro caso (payoff
+/// path-dependiente, `Exercise`, u otro parametro) se rechaza explicito -- `compute_greek` (C++)
+/// cae a su estencil generico de bump-and-reval de 3 puntos para esos casos, no hay aproximacion
+/// silenciosa aqui.
+#[allow(clippy::too_many_arguments)]
+pub fn payoff_sensitivity2_gbm_q(
+    backend: &str,
+    spec_json: &str,
+    observable: &str,
+    greek: &str,
+    s0: f64,
+    r: f64,
+    q: f64,
+    sigma: f64,
+    n_paths: u64,
+    seed: u64,
+) -> Result<McEstimate, String> {
+    let payoff = compile(spec_json)?;
+    check_single_observable(&payoff, observable, n_paths)?;
+    lrm::single_terminal_time(&payoff)?;
+    if GbmGreek::parse(greek)? != GbmGreek::Spot {
+        return Err(format!(
+            "payoff: Gamma via likelihood ratio solo soportada para 'spot' (recibido '{greek}') -- \
+             PLAN_HYPERDUAL.md §5"
+        ));
+    }
+    match resolve_backend(backend) {
+        ComputeBackend::Cpu => {
+            let device = burn::tensor::Device::<CpuBackend>::default();
+            payoff_sensitivity2_lrm_on::<CpuBackend>(&device, &payoff, s0, r, q, sigma, n_paths, seed)
+        }
+        ComputeBackend::Gpu => {
+            #[cfg(feature = "gpu")]
+            {
+                let device = burn::tensor::Device::<crate::backend::GpuBackend>::default();
+                payoff_sensitivity2_lrm_on::<crate::backend::GpuBackend>(&device, &payoff, s0, r, q, sigma, n_paths, seed)
+            }
+            #[cfg(not(feature = "gpu"))]
+            {
+                let device = burn::tensor::Device::<CpuBackend>::default();
+                payoff_sensitivity2_lrm_on::<CpuBackend>(&device, &payoff, s0, r, q, sigma, n_paths, seed)
+            }
+        }
+    }
+}
+
+/// Vanna pathwise EXACTA (derivada cruzada "spot"/"volatility") de `price_payoff_gbm_q`, mismo
+/// mecanismo/alcance que `payoff_sensitivity2_gbm_q` (ver su doc-comment): solo contratos de una
+/// unica fecha terminal, solo el par `("spot","volatility")` (en cualquier orden).
+#[allow(clippy::too_many_arguments)]
+pub fn payoff_sensitivity_cross_gbm_q(
+    backend: &str,
+    spec_json: &str,
+    observable: &str,
+    risk_factor: &str,
+    cross_factor: &str,
+    s0: f64,
+    r: f64,
+    q: f64,
+    sigma: f64,
+    n_paths: u64,
+    seed: u64,
+) -> Result<McEstimate, String> {
+    let payoff = compile(spec_json)?;
+    check_single_observable(&payoff, observable, n_paths)?;
+    lrm::single_terminal_time(&payoff)?;
+    let is_vanna_pair = matches!(
+        (GbmGreek::parse(risk_factor)?, GbmGreek::parse(cross_factor)?),
+        (GbmGreek::Spot, GbmGreek::Volatility) | (GbmGreek::Volatility, GbmGreek::Spot)
+    );
+    if !is_vanna_pair {
+        return Err(format!(
+            "payoff: derivada cruzada via likelihood ratio solo soportada para el par ('spot', \
+             'volatility') (Vanna) -- recibido ('{risk_factor}', '{cross_factor}'), PLAN_HYPERDUAL.md §5"
+        ));
+    }
+    match resolve_backend(backend) {
+        ComputeBackend::Cpu => {
+            let device = burn::tensor::Device::<CpuBackend>::default();
+            payoff_sensitivity_cross_lrm_on::<CpuBackend>(&device, &payoff, s0, r, q, sigma, n_paths, seed)
+        }
+        ComputeBackend::Gpu => {
+            #[cfg(feature = "gpu")]
+            {
+                let device = burn::tensor::Device::<crate::backend::GpuBackend>::default();
+                payoff_sensitivity_cross_lrm_on::<crate::backend::GpuBackend>(&device, &payoff, s0, r, q, sigma, n_paths, seed)
+            }
+            #[cfg(not(feature = "gpu"))]
+            {
+                let device = burn::tensor::Device::<CpuBackend>::default();
+                payoff_sensitivity_cross_lrm_on::<CpuBackend>(&device, &payoff, s0, r, q, sigma, n_paths, seed)
+            }
+        }
+    }
+}
+
+/// Ledger presente (descontado) de una unica ruta terminal ya simulada -- compartido por
+/// `payoff_sensitivity2_lrm_on`/`payoff_sensitivity_cross_lrm_on` (la unica diferencia entre Gamma
+/// y Vanna es el peso que multiplica este valor, ver `lrm::gamma_weight`/`lrm::vanna_weight`).
+fn discounted_present_value_at_terminal(
+    payoff: &CompiledPayoff,
+    t: f64,
+    s_t: f64,
+    r: f64,
+    sigma: f64,
+    seed: u64,
+    path_idx: usize,
+) -> f64 {
+    let times = [t];
+    let values = [s_t];
+    let f64_path = SinglePath { times: &times, values: &values, sigma };
+    let (ledger, _events) = evaluate_with_events_seeded(payoff, &f64_path, bridge_seed_for_path(seed, path_idx));
+    ledger.iter().map(|cf| cf.amount * (-r * cf.payment_time).exp()).sum()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn payoff_sensitivity2_lrm_on<B: Backend<FloatElem = f64>>(
+    device: &burn::tensor::Device<B>,
+    payoff: &CompiledPayoff,
+    s0: f64,
+    r: f64,
+    q: f64,
+    sigma: f64,
+    n_paths: u64,
+    seed: u64,
+) -> Result<McEstimate, String> {
+    let (times, columns) = simulate_gbm_columns::<B>(device, payoff, s0, r, q, sigma, n_paths, seed, 0.0)?;
+    let t = times[0]; // lrm::single_terminal_time ya garantizo una unica fecha antes de llegar aqui
+    let n_paths_usize = n_paths as usize;
+
+    let mut samples = Vec::with_capacity(n_paths_usize);
+    for path_idx in 0..n_paths_usize {
+        let s_t = columns[0][path_idx];
+        let present_value = discounted_present_value_at_terminal(payoff, t, s_t, r, sigma, seed, path_idx);
+        let z = lrm::recover_terminal_z(s0, r, q, sigma, t, s_t);
+        samples.push(present_value * lrm::gamma_weight(z, s0, sigma, t));
+    }
+
+    Ok(mc::aggregate(&samples, mc::Z_95))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn payoff_sensitivity_cross_lrm_on<B: Backend<FloatElem = f64>>(
+    device: &burn::tensor::Device<B>,
+    payoff: &CompiledPayoff,
+    s0: f64,
+    r: f64,
+    q: f64,
+    sigma: f64,
+    n_paths: u64,
+    seed: u64,
+) -> Result<McEstimate, String> {
+    let (times, columns) = simulate_gbm_columns::<B>(device, payoff, s0, r, q, sigma, n_paths, seed, 0.0)?;
+    let t = times[0];
+    let n_paths_usize = n_paths as usize;
+
+    let mut samples = Vec::with_capacity(n_paths_usize);
+    for path_idx in 0..n_paths_usize {
+        let s_t = columns[0][path_idx];
+        let present_value = discounted_present_value_at_terminal(payoff, t, s_t, r, sigma, seed, path_idx);
+        let z = lrm::recover_terminal_z(s0, r, q, sigma, t, s_t);
+        samples.push(present_value * lrm::vanna_weight(z, s0, sigma, t));
+    }
+
+    Ok(mc::aggregate(&samples, mc::Z_95))
+}
+
 /// Fallback bump-and-reval (diferencia central, numeros aleatorios comunes) para contratos con
 /// `ContractOp::Exercise` -- ver el doc-comment de `payoff_sensitivity_gbm_q`. `h` es un bump
 /// relativo (`1e-4`), con un piso absoluto (`1e-6`) para el caso de un parametro nominalmente cero
@@ -741,6 +913,18 @@ fn payoff_exposure_profile_gbm_q_on<B: Backend<FloatElem = f64>>(
 pub fn payoff_contains_exercise(spec_json: &str) -> Result<bool, String> {
     let payoff = compile(spec_json)?;
     Ok(contains_exercise(&payoff))
+}
+
+/// `true` si `spec_json` compila y depende del subyacente en una UNICA fecha terminal (sin
+/// dependencia de trayectoria) -- consulta de capacidad usada por `engine::greeks::compute_greek`
+/// (C++) para decidir, ANTES de llamar a `payoff_sensitivity2_gbm_q`/`payoff_sensitivity_cross_gbm_q`,
+/// si Gamma/Vanna via likelihood ratio aplican a este contrato (PLAN_HYPERDUAL.md §5) o si debe
+/// caer a su estencil generico de bump-and-reval. Mismo criterio de preflight que
+/// `payoff_contains_exercise` (`Err` si `spec_json` no compila, nunca oculta un JSON invalido
+/// detras de un `false`).
+pub fn payoff_supports_second_order_lrm(spec_json: &str) -> Result<bool, String> {
+    let payoff = compile(spec_json)?;
+    Ok(lrm::single_terminal_time(&payoff).is_ok())
 }
 
 #[cfg(test)]
@@ -1515,6 +1699,94 @@ mod tests {
             sensitivity.mean,
             sensitivity.std_error
         );
+    }
+
+    // PLAN_HYPERDUAL.md §5: Gamma/Vanna via likelihood ratio (payoff::lrm) contra la formula
+    // cerrada de Black-Scholes -- mismo oraculo/criterio que los tests de orden 1 de arriba.
+    #[test]
+    fn sensitivity2_gamma_of_a_call_matches_second_finite_difference_of_black_scholes() {
+        let _guard = crate::rng_test_lock::LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (s0, strike, r, q, sigma, maturity) = (100.0, 100.0, 0.05, 0.0, 0.2, 1.0);
+        let spec = CALL_JSON_TEMPLATE.replace("{maturity}", &maturity.to_string()).replace("{strike}", &strike.to_string());
+        let (n_paths, seed) = (500_000, 7);
+
+        let gamma =
+            payoff_sensitivity2_gbm_q("cpu", &spec, "EQ.SPOT.XYZ", "spot", s0, r, q, sigma, n_paths, seed).unwrap();
+
+        let h = 1e-2;
+        let analytic_gamma = (black_scholes_call(s0 + h, strike, r, q, sigma, maturity)
+            - 2.0 * black_scholes_call(s0, strike, r, q, sigma, maturity)
+            + black_scholes_call(s0 - h, strike, r, q, sigma, maturity))
+            / (h * h);
+
+        let tolerance = 8.0 * gamma.std_error;
+        assert!(gamma.mean > 0.0, "la Gamma de una call vainilla es siempre positiva");
+        assert!(
+            (gamma.mean - analytic_gamma).abs() < tolerance,
+            "gamma MC={} (se={}) gamma analitica={analytic_gamma} tol={tolerance}",
+            gamma.mean,
+            gamma.std_error
+        );
+    }
+
+    #[test]
+    fn sensitivity_cross_vanna_of_a_call_matches_mixed_finite_difference_of_black_scholes() {
+        let _guard = crate::rng_test_lock::LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (s0, strike, r, q, sigma, maturity) = (100.0, 100.0, 0.05, 0.0, 0.2, 1.0);
+        let spec = CALL_JSON_TEMPLATE.replace("{maturity}", &maturity.to_string()).replace("{strike}", &strike.to_string());
+        let (n_paths, seed) = (500_000, 11);
+
+        let vanna = payoff_sensitivity_cross_gbm_q(
+            "cpu", &spec, "EQ.SPOT.XYZ", "spot", "volatility", s0, r, q, sigma, n_paths, seed,
+        )
+        .unwrap();
+
+        let (h_spot, h_vol) = (1.0, 0.002);
+        let analytic_vanna = (black_scholes_call(s0 + h_spot, strike, r, q, sigma + h_vol, maturity)
+            - black_scholes_call(s0 + h_spot, strike, r, q, sigma - h_vol, maturity)
+            - black_scholes_call(s0 - h_spot, strike, r, q, sigma + h_vol, maturity)
+            + black_scholes_call(s0 - h_spot, strike, r, q, sigma - h_vol, maturity))
+            / (4.0 * h_spot * h_vol);
+
+        let tolerance = 8.0 * vanna.std_error;
+        assert!(
+            (vanna.mean - analytic_vanna).abs() < tolerance,
+            "vanna MC={} (se={}) vanna analitica={analytic_vanna} tol={tolerance}",
+            vanna.mean,
+            vanna.std_error
+        );
+    }
+
+    #[test]
+    fn sensitivity2_and_cross_are_rejected_explicitly_for_a_path_dependent_contract() {
+        // PLAN_HYPERDUAL.md §5: Gamma/Vanna via likelihood ratio solo aplican a una unica fecha
+        // terminal -- un contrato path-dependiente (aqui, una bermuda con Exercise) se rechaza
+        // explicito, sin aproximar en silencio. `compute_greek` (C++) cae a bump-and-reval para
+        // este caso.
+        let spec = bermuda_json("put", 100.0, 1.0, &[0.25, 0.5, 0.75]);
+        let err2 = payoff_sensitivity2_gbm_q("cpu", &spec, "EQ.SPOT.XYZ", "spot", 100.0, 0.05, 0.0, 0.2, 1_000, 7)
+            .expect_err("un contrato de varias fechas debe rechazarse explicito");
+        assert!(err2.contains("fecha"));
+
+        let err_cross = payoff_sensitivity_cross_gbm_q(
+            "cpu", &spec, "EQ.SPOT.XYZ", "spot", "volatility", 100.0, 0.05, 0.0, 0.2, 1_000, 7,
+        )
+        .expect_err("un contrato de varias fechas debe rechazarse explicito");
+        assert!(err_cross.contains("fecha"));
+
+        assert!(!payoff_supports_second_order_lrm(&spec).unwrap());
+        let vanilla = CALL_JSON_TEMPLATE.replace("{maturity}", "1.0").replace("{strike}", "100.0");
+        assert!(payoff_supports_second_order_lrm(&vanilla).unwrap());
+    }
+
+    #[test]
+    fn sensitivity_cross_rejects_a_pair_other_than_spot_and_volatility() {
+        let spec = CALL_JSON_TEMPLATE.replace("{maturity}", "1.0").replace("{strike}", "100.0");
+        let err = payoff_sensitivity_cross_gbm_q(
+            "cpu", &spec, "EQ.SPOT.XYZ", "spot", "rate", 100.0, 0.05, 0.0, 0.2, 1_000, 7,
+        )
+        .expect_err("solo el par (spot, volatility) esta soportado");
+        assert!(err.contains("volatility"));
     }
 
     #[test]

@@ -11,6 +11,22 @@
 > implementadas las fases: cada una se migra a `PLAN.md` únicamente después de quedar construida y
 > verificada de extremo a extremo, mismo criterio editorial que PLAN_PRODUCTS.md/PLAN_GREEKS.md.
 
+> **REVISIÓN (post-Fase 1, antes de Fase 2)**: la verificación obligatoria de §6/§8.3 — el mismo
+> mecanismo que este documento diseñó para no dejar pasar una combinación no probada — encontró que
+> la premisa central de §0/§3.3/§3.4 (generalizar `Dual` a `Dual2`/`HyperDual` y propagar la
+> aritmética dual DOS veces a través del intérprete de `ScalarOp`) es **matemáticamente incorrecta**
+> para cualquier payoff cuya ramificación (`Max`/`Min`/`Abs`/`If`/`Trigger`) dependa del propio
+> parámetro que se deriva — es decir, prácticamente cualquier call/put/barrera real. La Gamma de una
+> call vainilla vía `Dual2` daba **exactamente 0** (no ruido de Monte Carlo: cero determinista en
+> cada ruta), porque bajo GBM con el Browniano fijado `S_T` es lineal en `s0`, y el payoff
+> `max(S_T-K,0)` es entonces afín a trozos en `s0` en cada rama — la curvatura real de la Gamma viene
+> de la FRONTERA entre ramas al mover `s0`, no de dentro de una rama, y fijar la rama (como hace
+> pathwise) descarta exactamente ese término. Ver **§5 (reescrita)** para la explicación completa y
+> el mecanismo de reemplazo (likelihood ratio / Malliavin, Broadie-Glasserman 1996) que sí es
+> correcto para payoffs con kink. `Dual2`/`HyperDual` (§3.3/§3.4 originales) se abandonan por
+> completo — no hay ningún consumidor de esos tipos en el código final; el trait `DualNumber` y el
+> intérprete genérico de Fase 1 siguen en pie (correctos y con un único consumidor, `Dual`, orden 1).
+
 ## 0. Decisión ejecutiva
 
 `rust/crates/engine-core/src/payoff/dual.rs::Dual` es hoy un struct concreto de dos `f64`
@@ -175,7 +191,13 @@ tiene); el struct, sus campos públicos-de-crate (`value`→expuesto via `re()`,
 aritmética **no cambian una línea de comportamiento** — mismos tests de `dual.rs` en verde sin
 tocar sus aserciones (criterio de aceptación de la Fase 1, §7).
 
-### 3.3 `Dual2` (orden 2 puro) — nuevo
+### 3.3 `Dual2` (orden 2 puro) — ABANDONADO, ver §5.0
+
+> **No implementado.** El diseño de esta sección (propagar la aritmética dual dos veces a través
+> del intérprete de `ScalarOp`) resultó matemáticamente incorrecto para payoffs con kink — ver la
+> nota de REVISIÓN al inicio del documento y §5.0 para la prueba. Se conserva el texto original
+> como registro de qué se intentó y por qué no funciona; el reemplazo real es `payoff::lrm`
+> (§5.1).
 
 ```rust
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -209,7 +231,10 @@ impl Mul for Dual2 {
 }
 ```
 
-### 3.4 `HyperDual` (orden 1 cruzado) — nuevo
+### 3.4 `HyperDual` (orden 1 cruzado) — ABANDONADO, ver §5.0
+
+> **No implementado**, mismo motivo que `Dual2` (§3.3) aplicado a la derivada cruzada. Reemplazo
+> real: `payoff::lrm::vanna_weight` (§5.1).
 
 ```rust
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -274,58 +299,113 @@ de riesgo que PLAN_PRODUCTS.md/PLAN_GREEKS.md evitan sistemáticamente ("aditivo
   `T=Dual2`, `variable` en la única dirección pedida; para `T=HyperDual`, `variable_x` en
   `risk_factor` y `variable_y` en `cross_factor`.
 
-## 5. Selección en runtime (compila una vez por tipo, elige en cada llamada)
+## 5. Gamma/Vanna reales: likelihood ratio, no `Dual2`/`HyperDual` (REESCRITA)
 
-`engine::greeks::compute_greek` (`cpp/engine/src/greeks.cpp`) ya tiene el punto de decisión
-correcto — el bloque que hoy (PLAN_GREEKS.md §11 Fase 7) comprueba `order.order==1 &&
-!cross_factor` antes de intentar `try_pathwise`/`try_aad_reverse` (greeks.cpp:660-681). Se amplía
-con dos ramas nuevas, mismo patrón exacto:
+### 5.0 Por qué `Dual2`/`HyperDual` no funcionan (la prueba)
+
+Bajo GBM con el Browniano `W_t` fijado (el truco pathwise de `sensitivity.rs`), `S_T = s0 · C` con
+`C = exp((r-q-0.5σ²)T + σW_t)` **constante dada la ruta** — `S_T` es **lineal** en `s0`. El payoff de
+una call es `h(S_T) = max(S_T-K, 0)`. En cada ruta simulada, o bien `S_T > K` (rama activa `S_T-K`,
+lineal en `s0` ⟹ segunda derivada exactamente 0) o `S_T < K` (rama activa `0`, constante ⟹ segunda
+derivada 0). El método pathwise **fija la rama** (la decisión discreta se resuelve una vez sobre la
+ruta `f64` realizada, ver el doc-comment de `sensitivity.rs`) y deriva DOS veces dentro de ella — la
+curvatura real de la Gamma viene de la FRONTERA entre ramas al mover `s0` (la densidad de `S_T` en
+el strike), nunca de dentro de una rama, así que **pathwise de segundo orden puro es exactamente 0
+en cada ruta** para cualquier payoff con `Max`/`Min`/`Abs`/`If`/`Trigger` que dependa del parámetro
+derivado — no es ruido de Monte Carlo, es un sesgo determinista de la propia construcción. Un test
+Rust intentando `payoff_sensitivity2_gbm_q` con `Dual2` sobre una call vainilla confirmó esto
+empíricamente: `mean=0.0`, `std_error=0.0` en 500k rutas. Vanna sufre el mismo problema por el mismo
+argumento (la cruzada requiere derivar dos veces una cantidad que incluye un indicador de rama).
+Esta es exactamente la razón, bien documentada en la literatura (Broadie & Glasserman 1996), por la
+que el método pathwise sirve para Delta/Vega/Rho (payoffs Lipschitz, UNA derivada) pero no para
+Gamma/Vanna de payoffs con kink sin una corrección adicional.
+
+### 5.1 El mecanismo correcto: diferenciar la densidad, no el payoff
+
+En vez de derivar `h(S_T)` (que exige que `h` sea suave, y falla en el kink), se deriva la DENSIDAD
+de `S_T` y se deja `h` intacto — identidad de "ratio de verosimilitud" (Broadie-Glasserman 1996,
+equivalente al caso escalar de Malliavin/Fournié et al. 1999):
+
+```text
+d/dtheta E[h(S_T)] = d/dtheta integral h(s) f(s;theta) ds = E[h(S_T) * (d ln f/dtheta)(S_T)]
+```
+
+Esta identidad NO exige que `h` sea diferenciable en ningún punto — `h` nunca se deriva, solo se
+EVALÚA (con el intérprete `f64` normal, sin `Dual`/`Dual2` en absoluto) y se pondera por un peso
+DETERMINISTA de la normal estándar `Z` realizada en esa ruta. `S_T` bajo GBM es lognormal (densidad
+cerrada), así que aplicar la identidad una y dos veces da fórmulas cerradas para Delta/Gamma/Vanna
+sin necesitar `h'`/`h''` en ningún momento — implementado en
+`rust/crates/engine-core/src/payoff/lrm.rs`:
+
+- `gamma_weight(Z, s0, σ, T) = (Z² - 1 - σ√T·Z) / (s0²σ²T)` — `Gamma = E[valor_presente(ruta) · gamma_weight]`.
+- `vanna_weight(Z, s0, σ, T) = (1/s0)·[Z(Z²-3)/(σ²√T) + (1-Z²)/σ]` — `Vanna = E[valor_presente(ruta) · vanna_weight]`.
+
+Ambas verificadas por CUADRATURA DETERMINISTA (sin ruido de Monte Carlo, `lrm.rs::tests`) contra la
+segunda diferencia finita de la propia integral `E[h(S_T)]` — incluida una call con kink real — y
+por Monte Carlo end-to-end contra Black-Scholes cerrado (`api.rs`/`api_p.rs::tests`).
+
+### 5.2 Alcance deliberadamente limitado: solo una fecha terminal
+
+`f` arriba es la densidad MARGINAL de `S_T` en una ÚNICA fecha — generalizar a un payoff
+path-dependiente (barreras, triggers, `Exercise`) exigiría la densidad conjunta de TODA la
+trayectoria (Malliavin calculus sobre el proceso completo), fuera de alcance de esta revisión.
+`payoff::lrm::single_terminal_time`/`payoff_supports_second_order_lrm[_p]` son el guard que impide
+aplicar estas fórmulas fuera de su dominio de validez: `payoff.required_times().len() != 1` (o
+`ContractOp::Exercise`, que por construcción necesita más de una fecha) se rechaza explícito, nunca
+se aproxima en silencio; `compute_greek` (C++) cae a su estencil genérico de bump-and-reval para
+esos casos, exactamente como ya hacía para Delta/Vega/Rho con `Exercise` (PLAN_GREEKS.md §5.1).
+`Vanna` además solo cubre el par `("spot","volatility")` — no se derivaron formulas para pares con
+`rate`/`dividend_yield` (bajo demanda futura, mismo criterio que Fase 4 original).
+
+### 5.3 Selección en runtime (sin cambios de espíritu respecto del diseño original)
+
+`engine::greeks::compute_greek` amplía su bloque de rutas especializadas (PLAN_GREEKS.md §11 Fase 7,
+`order.order==1 && !cross_factor`) con dos ramas nuevas, mismo patrón exacto:
 
 ```text
 si order == 2 y sin cross_factor y risk_factor.kind == ModelParameter:
-    si method in {Auto, Pathwise} y (modelo, metrica) esta en pathwise2_capabilities():
-        intentar try_pathwise2 (Dual2, via payoff_sensitivity2_gbm_q/_p del bridge cxx)
-        # mismo fallback que hoy: Auto cae a bump-and-reval si no aplica; Pathwise explicito
-        # sobre una combinacion no verificada es error inmediato (PLAN_GREEKS.md §5.4)
+    si method in {Auto, Pathwise} y (modelo, metrica) esta en pathwise2_capabilities()
+       y payoff_supports_second_order_lrm(_p)(spec_json) y greek == "spot":
+        intentar try_pathwise2 (likelihood ratio, via payoff_sensitivity2_gbm_q/_p del bridge cxx)
 
 si order == 1 y cross_factor presente y ambos risk_factor/cross_factor.kind == ModelParameter:
-    si method in {Auto, Pathwise} y (modelo, metrica) esta en pathwise_cross_capabilities():
-        intentar try_pathwise_cross (HyperDual, via payoff_sensitivity_cross_gbm_q/_p)
+    si method in {Auto, Pathwise} y (modelo, metrica) esta en pathwise_cross_capabilities()
+       y payoff_supports_second_order_lrm(_p)(spec_json) y el par es ("spot","volatility"):
+        intentar try_pathwise_cross (likelihood ratio, via payoff_sensitivity_cross_gbm_q/_p)
 ```
 
-Esto es exactamente el mismo `match`/tabla de capacidades que ya existe (§5.4 de PLAN_GREEKS.md),
-ampliado con dos entradas — **no** un mecanismo de selección nuevo. La "generación en runtime" que
-motivó la pregunta original es, con precisión: el compilador genera `try_pathwise2::<Dual2>` y
-`try_pathwise_cross::<HyperDual>` como código de máquina en tiempo de compilación (monomorphización
-de Rust); `compute_greek`, en tiempo de EJECUCIÓN, decide cuál de esas funciones ya compiladas
-llamar según `GreekRequest`. Nunca se genera código nuevo al vuelo (eso sería un JIT — fuera de
-alcance, sin motivo aquí) y nunca se ejecuta el camino de un tipo que no se pidió.
+Mismo criterio que siempre: `Auto` cae a bump-and-reval en silencio si algo no aplica; `Pathwise`
+explícito sobre una combinación no soportada es error inmediato con la razón exacta.
 
-### 5.1 Guard rails heredados de PLAN_GREEKS.md (sin relajar ninguno)
+### 5.4 Guard rails heredados de PLAN_GREEKS.md (sin relajar ninguno)
 
-- Un contrato con `ContractOp::Exercise` sigue cayendo a bump-and-reval para `Dual2`/`HyperDual`,
-  exactamente por la misma razón que hoy lo hace para `Dual` (PLAN_GREEKS.md §5.1: re-decidir
-  Longstaff-Schwartz bajo el parámetro perturbado no es pathwise-diferenciable) — `try_pathwise2`/
-  `try_pathwise_cross` comparten el mismo chequeo `payoff_contains_exercise` que `try_pathwise`.
-- Una métrica de tipo indicador/probabilidad (`PayoffHitProbabilityQ/P`) NUNCA declara soporte
-  pathwise en ningún orden — la derivada pathwise exacta de una función indicador sigue siendo 0 en
-  casi todo punto en la segunda derivada tanto como en la primera (PLAN_GREEKS.md §4.5). No cambia.
-- Hull-White/Burn: este documento **no** toca la ruta AAD reverse-mode (`irs_hull_white_npv_all_greeks`).
-  Burn no expone Hessiano de tensores de forma directa (PLAN_GREEKS.md §5.2/§15); `Dual2`/
-  `HyperDual` son un mecanismo del intérprete de PAYOFF (`ScalarOp`), no de los tensores de
-  Hull-White — Gamma/Vanna de Hull-White siguen sirviéndose por bump-and-reval, sin cambios.
+- Un contrato con `ContractOp::Exercise` sigue cayendo a bump-and-reval (nunca tiene una única
+  fecha terminal, así que `payoff_supports_second_order_lrm` ya lo excluye estructuralmente, mismo
+  efecto que el chequeo explícito de `payoff_contains_exercise` en la ruta de orden 1).
+- Una métrica de tipo indicador/probabilidad (`PayoffHitProbabilityQ/P`) NUNCA declara soporte en
+  ningún orden (PLAN_GREEKS.md §4.5). No cambia.
+- Hull-White/Burn: esta revisión **no** toca la ruta AAD reverse-mode. Gamma/Vanna de Hull-White
+  siguen sirviéndose por bump-and-reval, sin cambios.
 
 ## 6. Verificación obligatoria
 
 Misma disciplina que PLAN_GREEKS.md §5.3: cada combinación (modelo, métrica, orden) que se active
-bajo `method=Auto` necesita, antes de mezclarla, un test diferencial contra bump-and-reval con
-tolerancia declarada:
+bajo `method=Auto` necesita, antes de mezclarla, un test diferencial con tolerancia declarada:
 
-- `Dual2` (Gamma de una call europea bajo GBM) contra `GreeksFase6Test.GammaOfACallMatchesClosedFormSecondDerivative`
-  (ya existe como oráculo — comparar `Dual2` contra Black-Scholes cerrado Y contra bump-and-reval a
-  la vez, triple verificación).
-- `HyperDual` (Vanna de una call europea bajo GBM) contra `GreeksFase6Test.VannaOfACallHasExpectedSignAndMatchesClosedFormMixedFiniteDifference`.
-- Sin ese test en verde, la combinación se sirve solo bajo `method` explícito, nunca como default
+- **Rust, determinista (sin Monte Carlo)**: `gamma_weight`/`vanna_weight` contra la segunda
+  diferencia finita de `E[h(S_T)]` calculada por cuadratura directa, para `h` suave Y para `h` con
+  kink real (`lrm.rs::tests`) — el oráculo MÁS FUERTE posible porque no depende de simular nada.
+- **Rust, Monte Carlo end-to-end**: Gamma/Vanna de una call europea bajo GBM/Q y GBM/P contra
+  Black-Scholes cerrado / diferencias finitas de `forecast_gbm_p` con números aleatorios comunes
+  (`api.rs`/`api_p.rs::tests`).
+- **C++**: Gamma/Vanna vía `method=Auto` (que ahora resuelve a Pathwise/likelihood-ratio para
+  `(GBM, PayoffPriceQ)`/`(GBM_P, PayoffForecastP)` de una call europea) contra los mismos oráculos
+  cerrados que ya usaban `GreeksFase6Test.GammaOfACallMatchesClosedFormSecondDerivative`/
+  `VannaOfACallHasExpectedSignAndMatchesClosedFormMixedFiniteDifference` (esos dos tests se
+  reapuntan a `method=BumpAndReval` explícito para seguir verificando el estencil genérico
+  independientemente de qué prefiera `Auto`) más un test nuevo confirmando que un contrato
+  path-dependiente (bermuda/barrera) sigue cayendo a bump-and-reval bajo `Auto`.
+- Sin esos tests en verde, la combinación se sirve solo bajo `method` explícito, nunca como default
   de `Auto` (mismo criterio exacto que ya aplica a Fase 7 de PLAN_GREEKS.md).
 
 ## 7. Plan por fases
@@ -389,30 +469,45 @@ Reduce la duplicacion de Fase 2/3 al minimo: cada tipo nuevo solo aporta su prop
 no una copia de `value_at`. Instrumentacion añadida en Fase 1 para §8.4: `dual.rs::mul_f64` cuenta
 multiplicaciones reales en builds de test (cero coste en release, `#[inline(always)]` + `#[cfg(test)]`).
 
-### Fase 2 — `Dual2` (Gamma/Volga pathwise)
+### Fase 2 — Gamma pathwise — REESCRITA: likelihood ratio, no `Dual2` — DONE (lado Rust)
 
-- `Dual2` + su aritmética (§3.3);
-- `GbmDualPath<Dual2>`/`GbmDualPath::param_duals` extendido a orden 2;
-- `payoff::api::payoff_sensitivity2_gbm_q`/`_p` (nueva función pública Rust, mismo patrón que
-  `payoff_sensitivity_gbm_q`/`_p`: decide `Dual2` vs fallback si `contains_exercise`);
-- puente cxx (`engine-ffi`) + `pathwise2_capabilities()`/`try_pathwise2` en `greeks.cpp` (§5);
-- test diferencial obligatorio (§6) antes de activar bajo `method=Auto`.
+`Dual2` (§3.3 original) se abandonó por completo tras encontrar, con la propia disciplina de
+verificación de este documento, que da Gamma exactamente 0 para cualquier payoff con kink (§5.0) —
+ver la nota de REVISIÓN al inicio del documento. Reemplazado por:
 
-**Aceptación**: Gamma de una call europea vía `Dual2` coincide con Black-Scholes cerrado Y con el
-bump-and-reval de `GreeksFase6Test` dentro de tolerancia; `method=auto` la prefiere sobre
-bump-and-reval para `(GBM, PayoffPriceQ)`/`(GBM_P, PayoffForecastP)` sin contrato `Exercise`.
+- `payoff::lrm` (nuevo módulo): `single_terminal_time` (guard de alcance, §5.2), `recover_terminal_z`,
+  `gamma_weight` — ver §5.1 para las fórmulas;
+- `payoff::api::payoff_sensitivity2_gbm_q`/`api_p::payoff_sensitivity2_gbm_p` (Gamma respecto de
+  "spot", ponderando el valor presente `f64` normal de cada ruta por `gamma_weight`, sin `Dual`/
+  `Dual2` en absoluto);
+- `payoff::api::payoff_supports_second_order_lrm`/`api_p::..._p` (consulta de capacidad para C++);
+- **Pendiente** (lado C++, siguiente paso): puente cxx + `pathwise2_capabilities()`/`try_pathwise2`
+  en `greeks.cpp`, reapuntar `GreeksFase6Test.GammaOfACallMatchesClosedFormSecondDerivative` a
+  `method=BumpAndReval` explícito, test nuevo confirmando `method=Auto` resuelve a Pathwise.
 
-### Fase 3 — `HyperDual` (Vanna/cross-gamma pathwise)
+**Aceptación (lado Rust, cumplida)**: `gamma_weight` verificado por cuadratura determinista contra
+la segunda diferencia finita de `E[h(S_T)]` para `h` suave Y con kink (`lrm.rs::tests`, sin ruido de
+Monte Carlo); Gamma de una call europea bajo GBM/Q y GBM/P vía Monte Carlo end-to-end coincide con
+Black-Scholes cerrado / diferencias finitas de `forecast_gbm_p` dentro de tolerancia
+(`api.rs`/`api_p.rs::tests`); un contrato path-dependiente se rechaza explícito, sin aproximar en
+silencio.
 
-- `HyperDual` + su aritmética (§3.4);
-- `GbmDualPath<HyperDual>` con `param_duals` seedeando dos direcciones (`risk_factor`/`cross_factor`);
-- `payoff::api::payoff_sensitivity_cross_gbm_q`/`_p`;
-- puente cxx + `pathwise_cross_capabilities()`/`try_pathwise_cross` en `greeks.cpp`;
-- test diferencial obligatorio (§6).
+### Fase 3 — Vanna pathwise — REESCRITA: likelihood ratio, no `HyperDual` — DONE (lado Rust)
 
-**Aceptación**: Vanna de una call europea vía `HyperDual` coincide con el estencil de 4 puntos de
-`GreeksFase6Test.VannaOfACallHasExpectedSignAndMatchesClosedFormMixedFiniteDifference` dentro de
-tolerancia, con una única pasada por ruta en vez de 4 evaluaciones bumpeadas.
+`HyperDual` (§3.4 original) tampoco se implementó — mismo argumento de §5.0 aplicado a la derivada
+cruzada. Reemplazado por:
+
+- `payoff::lrm::vanna_weight` (§5.1);
+- `payoff::api::payoff_sensitivity_cross_gbm_q`/`api_p::payoff_sensitivity_cross_gbm_p` (Vanna,
+  únicamente el par `("spot","volatility")`, §5.2);
+- **Pendiente** (lado C++): puente cxx + `pathwise_cross_capabilities()`/`try_pathwise_cross` en
+  `greeks.cpp`, reapuntar `GreeksFase6Test.VannaOfACallHasExpectedSignAndMatchesClosedFormMixedFiniteDifference`
+  a `method=BumpAndReval` explícito, test nuevo confirmando `method=Auto` resuelve a Pathwise.
+
+**Aceptación (lado Rust, cumplida)**: `vanna_weight` verificado por cuadratura determinista contra
+la diferencia mixta finita de `E[h(S_T)]` con kink real; Vanna de una call europea bajo GBM/Q y
+GBM/P vía Monte Carlo end-to-end coincide con Black-Scholes cerrado / diferencias finitas cruzadas
+de `forecast_gbm_p` dentro de tolerancia.
 
 ### Fase 4 — orden 3 (`Dual3`/`HyperDual` de 3 direcciones) — condicional a demanda real
 

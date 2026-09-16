@@ -24,6 +24,7 @@ use crate::payoff::compile::compile;
 use crate::payoff::dual::Dual;
 use crate::payoff::eval::{evaluate_with_events_seeded, resolve_trigger_states, ObservablePath};
 use crate::payoff::ir::CompiledPayoff;
+use crate::payoff::lrm;
 use crate::payoff::sensitivity::{contains_exercise, evaluate_dual, GbmDualPath, GbmPGreek};
 use burn::tensor::backend::Backend;
 use burn::tensor::{Tensor, TensorData};
@@ -267,6 +268,98 @@ pub fn payoff_sensitivity_gbm_p(
     Ok(mc::aggregate(&samples, mc::Z_95))
 }
 
+/// Extension bajo P de `api::payoff_sensitivity2_gbm_q` (Gamma via likelihood ratio,
+/// PLAN_HYPERDUAL.md §5): mismo mecanismo que `payoff_sensitivity_gbm_p` extiende a
+/// `payoff_sensitivity_gbm_q` -- sustituye `(r,q)` por `(mu,0.0)` en la formula lognormal (mismo
+/// truco que `GbmDualPath::new_p`) y no descuenta. Solo soportado para contratos de una unica
+/// fecha terminal y `greek == "spot"`.
+pub fn payoff_sensitivity2_gbm_p(
+    spec_json: &str,
+    observable: &str,
+    greek: &str,
+    s0: f64,
+    mu: f64,
+    sigma: f64,
+    n_paths: u64,
+    seed: u64,
+) -> Result<McEstimate, String> {
+    let payoff = compile(spec_json)?;
+    check_single_observable(&payoff, observable, n_paths)?;
+    let t = lrm::single_terminal_time(&payoff)?;
+    if GbmPGreek::parse(greek)? != GbmPGreek::Spot {
+        return Err(format!(
+            "payoff: Gamma via likelihood ratio bajo P solo soportada para 'spot' (recibido '{greek}')"
+        ));
+    }
+    let (_times, columns) = simulate_gbm_p_columns(&payoff, s0, mu, sigma, n_paths, seed)?;
+    let n_paths_usize = n_paths as usize;
+
+    let mut samples = Vec::with_capacity(n_paths_usize);
+    for path_idx in 0..n_paths_usize {
+        let s_t = columns[0][path_idx];
+        let present_value = undiscounted_ledger_sum_at_terminal(&payoff, t, s_t, sigma, seed, path_idx);
+        let z = lrm::recover_terminal_z(s0, mu, 0.0, sigma, t, s_t);
+        samples.push(present_value * lrm::gamma_weight(z, s0, sigma, t));
+    }
+
+    Ok(mc::aggregate(&samples, mc::Z_95))
+}
+
+/// Extension bajo P de `api::payoff_sensitivity_cross_gbm_q` (Vanna via likelihood ratio): mismo
+/// alcance/criterio que `payoff_sensitivity2_gbm_p`, solo el par `("spot","volatility")`.
+pub fn payoff_sensitivity_cross_gbm_p(
+    spec_json: &str,
+    observable: &str,
+    risk_factor: &str,
+    cross_factor: &str,
+    s0: f64,
+    mu: f64,
+    sigma: f64,
+    n_paths: u64,
+    seed: u64,
+) -> Result<McEstimate, String> {
+    let payoff = compile(spec_json)?;
+    check_single_observable(&payoff, observable, n_paths)?;
+    let t = lrm::single_terminal_time(&payoff)?;
+    let is_vanna_pair = matches!(
+        (GbmPGreek::parse(risk_factor)?, GbmPGreek::parse(cross_factor)?),
+        (GbmPGreek::Spot, GbmPGreek::Volatility) | (GbmPGreek::Volatility, GbmPGreek::Spot)
+    );
+    if !is_vanna_pair {
+        return Err(format!(
+            "payoff: derivada cruzada via likelihood ratio bajo P solo soportada para el par ('spot', \
+             'volatility') (Vanna) -- recibido ('{risk_factor}', '{cross_factor}')"
+        ));
+    }
+    let (_times, columns) = simulate_gbm_p_columns(&payoff, s0, mu, sigma, n_paths, seed)?;
+    let n_paths_usize = n_paths as usize;
+
+    let mut samples = Vec::with_capacity(n_paths_usize);
+    for path_idx in 0..n_paths_usize {
+        let s_t = columns[0][path_idx];
+        let present_value = undiscounted_ledger_sum_at_terminal(&payoff, t, s_t, sigma, seed, path_idx);
+        let z = lrm::recover_terminal_z(s0, mu, 0.0, sigma, t, s_t);
+        samples.push(present_value * lrm::vanna_weight(z, s0, sigma, t));
+    }
+
+    Ok(mc::aggregate(&samples, mc::Z_95))
+}
+
+fn undiscounted_ledger_sum_at_terminal(payoff: &CompiledPayoff, t: f64, s_t: f64, sigma: f64, seed: u64, path_idx: usize) -> f64 {
+    let times = [t];
+    let values = [s_t];
+    let f64_path = SinglePath { times: &times, values: &values, sigma };
+    let (ledger, _events) = evaluate_with_events_seeded(payoff, &f64_path, bridge_seed_for_path(seed, path_idx));
+    ledger.iter().map(|cf| cf.amount).sum()
+}
+
+/// `true` si `spec_json` compila y depende del subyacente en una unica fecha terminal -- extension
+/// bajo P de `api::payoff_supports_second_order_lrm` (mismo criterio, mismo `payoff::lrm`).
+pub fn payoff_supports_second_order_lrm_p(spec_json: &str) -> Result<bool, String> {
+    let payoff = compile(spec_json)?;
+    Ok(lrm::single_terminal_time(&payoff).is_ok())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -429,6 +522,56 @@ mod tests {
             "pathwise={} (se={}) finite_difference={} deberian coincidir dentro de tolerancia",
             pathwise.mean,
             pathwise.std_error,
+            finite_difference
+        );
+    }
+
+    // PLAN_HYPERDUAL.md §5: Gamma/Vanna via likelihood ratio bajo P, mismo seed en las evaluaciones
+    // de forecast_gbm_p (numeros aleatorios comunes) -- mismo criterio que
+    // sensitivity_spot_delta_under_p_matches_finite_difference_of_forecast.
+    #[test]
+    fn sensitivity2_gamma_under_p_matches_second_finite_difference_of_forecast() {
+        let (s0, mu, sigma) = (100.0, 0.05, 0.2);
+        let (n_paths, seed) = (500_000, 7);
+        let h = 1.0;
+
+        let gamma = payoff_sensitivity2_gbm_p(CALL_JSON, "EQ.SPOT.XYZ", "spot", s0, mu, sigma, n_paths, seed).unwrap();
+        let up = forecast_gbm_p(CALL_JSON, "EQ.SPOT.XYZ", s0 + h, mu, sigma, n_paths, seed).unwrap();
+        let base = forecast_gbm_p(CALL_JSON, "EQ.SPOT.XYZ", s0, mu, sigma, n_paths, seed).unwrap();
+        let down = forecast_gbm_p(CALL_JSON, "EQ.SPOT.XYZ", s0 - h, mu, sigma, n_paths, seed).unwrap();
+        let finite_difference = (up.mean - 2.0 * base.mean + down.mean) / (h * h);
+
+        let tolerance = 8.0 * gamma.std_error;
+        assert!(
+            (gamma.mean - finite_difference).abs() < tolerance,
+            "gamma={} (se={}) finite_difference={} deberian coincidir dentro de tolerancia",
+            gamma.mean,
+            gamma.std_error,
+            finite_difference
+        );
+    }
+
+    #[test]
+    fn sensitivity_cross_vanna_under_p_matches_mixed_finite_difference_of_forecast() {
+        let (s0, mu, sigma) = (100.0, 0.05, 0.2);
+        let (n_paths, seed) = (500_000, 11);
+        let (h_spot, h_vol) = (1.0, 0.002);
+
+        let vanna = payoff_sensitivity_cross_gbm_p(CALL_JSON, "EQ.SPOT.XYZ", "spot", "volatility", s0, mu, sigma, n_paths, seed)
+            .unwrap();
+        let up_up = forecast_gbm_p(CALL_JSON, "EQ.SPOT.XYZ", s0 + h_spot, mu, sigma + h_vol, n_paths, seed).unwrap();
+        let up_down = forecast_gbm_p(CALL_JSON, "EQ.SPOT.XYZ", s0 + h_spot, mu, sigma - h_vol, n_paths, seed).unwrap();
+        let down_up = forecast_gbm_p(CALL_JSON, "EQ.SPOT.XYZ", s0 - h_spot, mu, sigma + h_vol, n_paths, seed).unwrap();
+        let down_down = forecast_gbm_p(CALL_JSON, "EQ.SPOT.XYZ", s0 - h_spot, mu, sigma - h_vol, n_paths, seed).unwrap();
+        let finite_difference =
+            (up_up.mean - up_down.mean - down_up.mean + down_down.mean) / (4.0 * h_spot * h_vol);
+
+        let tolerance = 8.0 * vanna.std_error;
+        assert!(
+            (vanna.mean - finite_difference).abs() < tolerance,
+            "vanna={} (se={}) finite_difference={} deberian coincidir dentro de tolerancia",
+            vanna.mean,
+            vanna.std_error,
             finite_difference
         );
     }

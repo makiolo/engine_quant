@@ -265,10 +265,9 @@ mod tests {
         assert_eq!(Dual::variable(3.0).deriv, 1.0);
     }
 
-    // PLAN_HYPERDUAL.md §8.4/§0.1: coste MEDIDO (no solo calculado a mano) de una multiplicacion
-    // de cada miembro de la familia -- confirma que la tabla de §0.1 no se degrada en silencio si
-    // alguien "optimiza" la aritmetica de forma incorrecta. Extendida en Fase 2/3 con Dual2/
-    // HyperDual (mismo test, mismo nombre, mas aserciones).
+    // PLAN_HYPERDUAL.md §8.4/§0.1: coste MEDIDO (no solo calculado a mano) de la multiplicacion --
+    // confirma que la tabla de §0.1 no se degrada en silencio si alguien "optimiza" la aritmetica
+    // de forma incorrecta.
     #[test]
     fn multiplication_cost_matches_the_documented_cauchy_product_table() {
         mul_count::reset();
