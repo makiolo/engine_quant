@@ -5,6 +5,7 @@
 
 #include <nanobind/nanobind.h>
 #include <nanobind/stl/optional.h>
+#include <nanobind/stl/shared_ptr.h>
 #include <nanobind/stl/string.h>
 #include <nanobind/stl/unique_ptr.h>
 #include <nanobind/stl/vector.h>
@@ -14,6 +15,7 @@
 #include "engine/engine.hpp"
 #include "engine/greeks.hpp"
 #include "engine/payoff/payoff_product.hpp"
+#include "engine/portfolio.hpp"
 
 namespace nb = nanobind;
 using namespace nb::literals;
@@ -99,6 +101,25 @@ nb::dict params_to_dict(const engine::Params& params) {
         std::visit([&](const auto& v) { result[key.c_str()] = v; }, value);
     }
     return result;
+}
+
+// engine::Portfolio::price/hessian/hvp (PLAN_BACKWARD.md §9 Fase 6) toman `const Registries&`
+// como parametro explicito (no lo guardan como miembro, a diferencia de `Engine` de abajo) --
+// el `Portfolio` de nanobind se expone DIRECTAMENTE (nb::class_<engine::Portfolio>, sin
+// dataclass/fachada intermedia, mismo criterio que all_greeks/hessian/hvp de `Engine`, ver el
+// comentario de la seccion "Portfolio" en NB_MODULE mas abajo), asi que sus metodos necesitan
+// una `Registries` de algun sitio sin que el usuario de Python tenga que construir una a mano
+// (no esta expuesta como tipo Python). Mismo patron que `registries()` en cpp/engine/src/
+// abi.cpp: una unica instancia de proceso, poblada una vez -- register_builtins es puramente
+// declarativo (rellena mapas de factories), asi que compartir esta instancia entre todos los
+// `Portfolio`/`Engine` de un mismo proceso es equivalente a que cada uno tuviera la suya.
+engine::Registries& shared_registries() {
+    static engine::Registries instance = [] {
+        engine::Registries r;
+        engine::register_builtins(r);
+        return r;
+    }();
+    return instance;
 }
 
 // Envuelve engine::Registries + register_builtins (PLAN.md §5.4, §7.6) en un único objeto
@@ -380,6 +401,104 @@ NB_MODULE(engine, m) {
             "AST propio) -- PLAN_PRODUCTS.md Fase 10, SS5.1."
         )
         .def("__repr__", [](const engine::IProduct& self) { return "<Product '" + self.type_name() + "'>"; });
+
+    // --- Portfolio (PLAN_BACKWARD.md §6.4/§9 Fase 6) ----------------------------------------
+    // Se expone `engine::Portfolio` DIRECTAMENTE (nb::class_, sin dataclass/fachada Python
+    // intermedia): PLAN_BACKWARD.md §6.4 esboza una fachada de dataclass
+    // (`engine_typed/portfolio.py`), pero eso no es como funciona el resto de este fichero --
+    // `all_greeks`/`Engine.hessian`/`Engine.hvp` exponen sus tipos C++ tal cual, sin dataclasses
+    // intermedias -- asi que Portfolio sigue el mismo patron real por consistencia (una fachada
+    // Python fina no aporta nada aqui: Portfolio ya tiene una API mínima de 4 metodos, igual
+    // de "pythonica" expuesta directamente).
+    //
+    // Ownership (PLAN_BACKWARD.md §9 Fase 6): `add()` liga directamente a
+    // `engine::Portfolio::add(std::shared_ptr<const IProduct>)` -- nanobind construye ese
+    // `shared_ptr` a partir de CUALQUIER objeto Python `Product` ya existente (creado por
+    // `Engine.create_product`, que hoy lo gestiona con su propio mecanismo interno de
+    // ownership) sin necesitar que `Product` se haya registrado con un holder `shared_ptr`
+    // explicito: `nanobind/stl/shared_ptr.h` sabe crear un `shared_ptr<T>` que simplemente
+    // mantiene viva la referencia al objeto Python (`shared_from_python`, incrementa/decrementa
+    // el refcount de CPython) para CUALQUIER tipo ya registrado via `nb::class_`, sea cual sea
+    // su holder original -- verificado en clients/python/tests (un mismo Product se pasa a
+    // Engine.price(...) Y a Portfolio.add(...) y ambos siguen funcionando).
+    nb::class_<engine::Portfolio>(m, "Portfolio")
+        .def(nb::init<>())
+        .def(
+            "add", &engine::Portfolio::add, nb::arg("trade"),
+            "Anade un trade (Product) al portfolio -- no le roba la propiedad: el mismo Product "
+            "se puede seguir usando en Engine.price(...)/otro Portfolio despues de anadirlo aqui."
+        )
+        .def("size", &engine::Portfolio::size)
+        .def("__len__", &engine::Portfolio::size)
+        .def_prop_ro(
+            "trades", [](const engine::Portfolio& self) { return self.trades(); },
+            "list[Product] -- copia de los trades ya anadidos, mismo orden que add()."
+        )
+        .def(
+            "price",
+            [](const engine::Portfolio& self, const std::vector<std::string>& measures, const engine::IModel& model,
+               const engine::MarketSnapshot& market, const engine::PricingContext& pricing,
+               const engine::ExecutionContext& execution) {
+                return self.price(shared_registries(), measures, model, market, pricing, execution);
+            },
+            nb::arg("measures"), nb::arg("model"), nb::arg("market"), nb::arg("pricing"), nb::arg("execution"),
+            "Envoltorio fino sobre engine::price_many (PLAN_BACKWARD.md §6.4): calcula "
+            "`measures` (nombres 'pelados', ver list_measures()) sobre TODOS los trades del "
+            "portfolio bajo el mismo model/market/pricing/execution. Devuelve list[BatchResult], "
+            "identico en forma a Engine.price_many(portfolio.trades, measures, ...)."
+        )
+        .def(
+            "hessian",
+            [](const engine::Portfolio& self, const std::string& metric_name, const engine::IModel& model,
+               const engine::MarketSnapshot& market, const engine::PricingContext& pricing,
+               const engine::ExecutionContext& execution, const nb::dict& metric_params,
+               const std::optional<std::vector<std::string>>& risk_factors) {
+                std::vector<engine::greeks::RiskFactor> factors;
+                if (risk_factors.has_value()) factors = parse_risk_factor_list(*risk_factors);
+                return self.hessian(
+                    shared_registries(), metric_name, dict_to_params(metric_params), model, market, pricing, execution,
+                    factors
+                );
+            },
+            nb::arg("metric_name"), nb::arg("model"), nb::arg("market"), nb::arg("pricing"), nb::arg("execution"),
+            nb::arg("metric_params") = nb::dict(), nb::arg("risk_factors") = nb::none(),
+            "Suma, trade a trade, los HessianReport de compute_hessian (PLAN_BACKWARD.md §9 Fase "
+            "6) -- exacto matematicamente bajo el modelo/mercado compartido de este portfolio. "
+            "Un par (factor_i,factor_j) que no aparezca en TODOS los trades nunca se suma como "
+            "si el que falta aportara 0.0: va a HessianReport.skipped nombrando el par y el "
+            "indice de trade exacto. std_error de una entrada agregada es la suma en cuadratura "
+            "SOLO si todos los trades que la aportan tienen std_error (Monte Carlo); ausente si "
+            "cualquiera es formula cerrada (Hull-White)."
+        )
+        .def(
+            "hvp",
+            [](const engine::Portfolio& self, const std::string& metric_name, const engine::IModel& model,
+               const engine::MarketSnapshot& market, const engine::PricingContext& pricing,
+               const engine::ExecutionContext& execution, const nb::dict& direction, const nb::dict& metric_params) {
+                if (direction.size() == 0) {
+                    throw std::invalid_argument("Portfolio.hvp: direction no puede estar vacio (siempre obligatorio)");
+                }
+                std::vector<engine::greeks::RiskFactor> factors;
+                std::vector<double> weights;
+                factors.reserve(direction.size());
+                weights.reserve(direction.size());
+                for (auto item : direction) {
+                    factors.push_back(engine::greeks::parse_risk_factor(nb::cast<std::string>(item.first)));
+                    weights.push_back(nb::cast<double>(item.second));
+                }
+                return self.hvp(
+                    shared_registries(), metric_name, dict_to_params(metric_params), model, market, pricing, execution,
+                    factors, weights
+                );
+            },
+            nb::arg("metric_name"), nb::arg("model"), nb::arg("market"), nb::arg("pricing"), nb::arg("execution"),
+            nb::arg("direction"), nb::arg("metric_params") = nb::dict(),
+            "Suma, trade a trade, los HvpReport de compute_hvp (PLAN_BACKWARD.md §9 Fase 6) -- "
+            "mismo criterio de interseccion/skip que hessian() de arriba, por factor en vez de "
+            "por par. `direction` es un dict disperso {'model.a': 1.0, ...} (factores ausentes = "
+            "peso 0)."
+        )
+        .def("__repr__", [](const engine::Portfolio& self) { return "<Portfolio trades=" + std::to_string(self.size()) + ">"; });
 
     nb::class_<engine::MeasureResult>(m, "MeasureResult")
         .def_ro("times", &engine::MeasureResult::times)

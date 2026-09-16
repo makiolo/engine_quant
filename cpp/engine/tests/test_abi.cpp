@@ -172,6 +172,48 @@ const EnginePriceResultEntry* find_measure(const EnginePriceResultEntry* entries
     return nullptr;
 }
 
+// PLAN_BACKWARD.md §9 Fase 6: RAII para EnginePortfolio y para los dos structs de salida que
+// engine_abi_portfolio_hessian/_hvp comparten con engine_abi_hessian/_hvp de trade unico
+// (EngineHessianEntry/EngineHvpComponent) -- mismo patron que ModelHandle/ProductHandle de
+// arriba.
+struct PortfolioHandle {
+    EnginePortfolio* ptr;
+    ~PortfolioHandle() { engine_abi_free_portfolio(ptr); }
+};
+
+struct HessianResultsHandle {
+    EngineHessianEntry* entries = nullptr;
+    std::size_t n_entries = 0;
+    char** skipped = nullptr;
+    std::size_t n_skipped = 0;
+    ~HessianResultsHandle() { engine_abi_free_hessian(entries, n_entries, skipped, n_skipped); }
+
+    const EngineHessianEntry* find(const std::string& i, const std::string& j) const {
+        for (std::size_t k = 0; k < n_entries; ++k) {
+            if ((entries[k].risk_factor_i == i && entries[k].risk_factor_j == j) ||
+                (entries[k].risk_factor_i == j && entries[k].risk_factor_j == i)) {
+                return &entries[k];
+            }
+        }
+        return nullptr;
+    }
+};
+
+struct HvpResultsHandle {
+    EngineHvpComponent* components = nullptr;
+    std::size_t n_components = 0;
+    char** skipped = nullptr;
+    std::size_t n_skipped = 0;
+    ~HvpResultsHandle() { engine_abi_free_hvp(components, n_components, skipped, n_skipped); }
+
+    const EngineHvpComponent* find(const std::string& factor) const {
+        for (std::size_t k = 0; k < n_components; ++k) {
+            if (components[k].risk_factor == factor) return &components[k];
+        }
+        return nullptr;
+    }
+};
+
 } // namespace
 
 TEST(Abi, VersionIsAtLeastTwo) {
@@ -818,5 +860,290 @@ TEST(Abi, ExplainProductRejectsNullProduct) {
     char buffer[16];
     std::size_t len = engine_abi_explain_product(nullptr, buffer, sizeof(buffer));
     EXPECT_EQ(len, 0u);
+    EXPECT_FALSE(last_error().empty());
+}
+
+// --- ENGINE.PORTFOLIO (PLAN_BACKWARD.md §6.4/§9 Fase 6) -------------------------------------
+// Mismo criterio "trade a trade, oraculo independiente" que el test C++ de aceptacion
+// (cpp/engine/tests/test_portfolio.cpp), pero pasando exclusivamente por la superficie extern
+// "C" de abi.h -- confirma que engine_abi_create_portfolio/_add_trade/_size/_free y
+// engine_abi_portfolio_price/_hessian/_hvp traducen igual que engine::Portfolio subyacente.
+
+TEST(Abi, PortfolioStartsEmptyAndSizeGrowsOneByOne) {
+    PortfolioHandle portfolio{engine_abi_create_portfolio()};
+    ASSERT_NE(portfolio.ptr, nullptr);
+    EXPECT_EQ(engine_abi_portfolio_size(portfolio.ptr), 0u);
+
+    Irs5y irs_a{1'000'000.0, 0.02};
+    Irs5y irs_b{2'000'000.0, 0.025};
+    ProductHandle product_a = irs_a.create();
+    ProductHandle product_b = irs_b.create();
+    ASSERT_NE(product_a.ptr, nullptr) << last_error();
+    ASSERT_NE(product_b.ptr, nullptr) << last_error();
+
+    engine_abi_portfolio_add_trade(portfolio.ptr, product_a.ptr);
+    EXPECT_EQ(engine_abi_portfolio_size(portfolio.ptr), 1u);
+    engine_abi_portfolio_add_trade(portfolio.ptr, product_b.ptr);
+    EXPECT_EQ(engine_abi_portfolio_size(portfolio.ptr), 2u);
+}
+
+TEST(Abi, PortfolioAddTradeRejectsNullHandlesWithoutCrashing) {
+    PortfolioHandle portfolio{engine_abi_create_portfolio()};
+    ASSERT_NE(portfolio.ptr, nullptr);
+
+    engine_abi_portfolio_add_trade(nullptr, nullptr);
+    EXPECT_FALSE(last_error().empty());
+    engine_abi_portfolio_add_trade(portfolio.ptr, nullptr);
+    EXPECT_FALSE(last_error().empty());
+    EXPECT_EQ(engine_abi_portfolio_size(portfolio.ptr), 0u);
+    EXPECT_EQ(engine_abi_portfolio_size(nullptr), 0u);
+}
+
+// Ownership (PLAN_BACKWARD.md §9 Fase 6): anadir un EngineProduct a un EnginePortfolio no le
+// roba la propiedad al handle original -- sigue siendo valido para engine_abi_price directamente
+// DESPUES de anadirlo a un Portfolio, y liberar el EngineProduct original con
+// engine_abi_free_product NO invalida al Portfolio (shared_ptr, no unique_ptr -- ver el
+// comentario de EngineProduct en abi.cpp).
+TEST(Abi, ProductSurvivesInsidePortfolioAfterItsOwnHandleIsFreed) {
+    ModelHandle model = create_hull_white();
+    Irs5y irs{1'000'000.0, 0.02};
+
+    PortfolioHandle portfolio{engine_abi_create_portfolio()};
+    ASSERT_NE(portfolio.ptr, nullptr);
+    {
+        ProductHandle product = irs.create();
+        ASSERT_NE(product.ptr, nullptr) << last_error();
+        engine_abi_portfolio_add_trade(portfolio.ptr, product.ptr);
+        EXPECT_EQ(engine_abi_portfolio_size(portfolio.ptr), 1u);
+        // `product` sale de scope aqui y se libera (~ProductHandle -> engine_abi_free_product):
+        // el trade dentro de `portfolio` debe seguir siendo valido despues.
+    }
+
+    double pillar = 1.0, rate = 0.02;
+    EngineMarketSnapshot market{&pillar, &rate, 1, 0.0, 0.0};
+    EnginePricingContext pricing{0.0, 1'000, 1, 7};
+    EngineExecutionContext execution{"cpu", "fp64"};
+    const char* names[] = {"PV"};
+
+    PriceBatchResultsHandle batch;
+    int rc = engine_abi_portfolio_price(portfolio.ptr, names, 1, model.ptr, &market, &pricing, &execution, &batch.entries, &batch.count);
+    ASSERT_EQ(rc, 0) << last_error();
+    ASSERT_EQ(batch.count, 1u);
+    const EnginePriceResultEntry* pv = find_measure(batch.entries[0].measures, batch.entries[0].n_measures, "PV");
+    ASSERT_NE(pv, nullptr);
+    EXPECT_TRUE(pv->result.has_scalar);
+}
+
+// engine_abi_portfolio_price es un envoltorio fino sobre Portfolio::price (-> price_many): debe
+// coincidir EXACTAMENTE con engine_abi_price_batch sobre el mismo vector de trades (mismo caso
+// que Abi.PriceBatchMatchesALoopOfScalarCallsPerTrade de arriba, pero via Portfolio).
+TEST(Abi, PortfolioPriceMatchesPriceBatchOnTheSameTrades) {
+    ModelHandle model = create_hull_white();
+    Irs5y irs_a{1'000'000.0, 0.02};
+    Irs5y irs_b{2'500'000.0, 0.015};
+    Irs5y irs_c{500'000.0, 0.025};
+    ProductHandle product_a = irs_a.create();
+    ProductHandle product_b = irs_b.create();
+    ProductHandle product_c = irs_c.create();
+    ASSERT_NE(product_a.ptr, nullptr) << last_error();
+    ASSERT_NE(product_b.ptr, nullptr) << last_error();
+    ASSERT_NE(product_c.ptr, nullptr) << last_error();
+
+    PortfolioHandle portfolio{engine_abi_create_portfolio()};
+    engine_abi_portfolio_add_trade(portfolio.ptr, product_a.ptr);
+    engine_abi_portfolio_add_trade(portfolio.ptr, product_b.ptr);
+    engine_abi_portfolio_add_trade(portfolio.ptr, product_c.ptr);
+    ASSERT_EQ(engine_abi_portfolio_size(portfolio.ptr), 3u);
+
+    double pillar = 1.0, rate = 0.02;
+    EngineMarketSnapshot market{&pillar, &rate, 1, 0.0, 0.0};
+    EnginePricingContext pricing{0.0, 1'000, 1, 7};
+    EngineExecutionContext execution{"cpu", "fp64"};
+    const char* names[] = {"PV", "DV01"};
+    const EngineProduct* products[] = {product_a.ptr, product_b.ptr, product_c.ptr};
+
+    PriceBatchResultsHandle from_portfolio;
+    int rc_portfolio = engine_abi_portfolio_price(
+        portfolio.ptr, names, 2, model.ptr, &market, &pricing, &execution, &from_portfolio.entries, &from_portfolio.count
+    );
+    ASSERT_EQ(rc_portfolio, 0) << last_error();
+
+    PriceBatchResultsHandle from_batch;
+    int rc_batch = engine_abi_price_batch(
+        products, 3, names, 2, model.ptr, &market, &pricing, &execution, &from_batch.entries, &from_batch.count
+    );
+    ASSERT_EQ(rc_batch, 0) << last_error();
+
+    ASSERT_EQ(from_portfolio.count, from_batch.count);
+    for (std::size_t i = 0; i < from_portfolio.count; ++i) {
+        EXPECT_EQ(from_portfolio.entries[i].trade_index, from_batch.entries[i].trade_index);
+        for (const char* name : names) {
+            const EnginePriceResultEntry* a = find_measure(from_portfolio.entries[i].measures, from_portfolio.entries[i].n_measures, name);
+            const EnginePriceResultEntry* b = find_measure(from_batch.entries[i].measures, from_batch.entries[i].n_measures, name);
+            ASSERT_NE(a, nullptr);
+            ASSERT_NE(b, nullptr);
+            EXPECT_DOUBLE_EQ(a->result.scalar, b->result.scalar) << name;
+        }
+    }
+}
+
+TEST(Abi, PortfolioPriceRejectsNullHandles) {
+    double pillar = 1.0, rate = 0.02;
+    EngineMarketSnapshot market{&pillar, &rate, 1, 0.0, 0.0};
+    EnginePricingContext pricing{0.0, 1'000, 1, 7};
+    EngineExecutionContext execution{"cpu", "fp64"};
+    const char* names[] = {"PV"};
+
+    PriceBatchResultsHandle batch;
+    int rc = engine_abi_portfolio_price(nullptr, names, 1, nullptr, &market, &pricing, &execution, &batch.entries, &batch.count);
+    EXPECT_NE(rc, 0);
+    EXPECT_EQ(batch.entries, nullptr);
+    EXPECT_EQ(batch.count, 0u);
+    EXPECT_FALSE(last_error().empty());
+}
+
+// Aceptacion EXACTA del plan (§13 DoD), via ABI: Portfolio::hessian() de 3 IrSwapProduct bajo el
+// MISMO HullWhite1FModel coincide, entrada a entrada, con sumar A MANO los EngineHessianEntry de
+// engine_abi_hessian llamado trade a trade -- identidad exacta.
+TEST(Abi, PortfolioHessianMatchesManualSumOfPerTradeAbiHessianExactly) {
+    ModelHandle model = create_hull_white();
+    Irs5y irs_a{1'000'000.0, 0.02};
+    Irs5y irs_b{2'500'000.0, 0.015};
+    Irs5y irs_c{500'000.0, 0.025};
+    ProductHandle product_a = irs_a.create();
+    ProductHandle product_b = irs_b.create();
+    ProductHandle product_c = irs_c.create();
+    const EngineProduct* products[] = {product_a.ptr, product_b.ptr, product_c.ptr};
+
+    PortfolioHandle portfolio{engine_abi_create_portfolio()};
+    for (const EngineProduct* p : products) engine_abi_portfolio_add_trade(portfolio.ptr, p);
+    ASSERT_EQ(engine_abi_portfolio_size(portfolio.ptr), 3u);
+
+    double pillar = 1.0, rate = 0.02;
+    EngineMarketSnapshot market{&pillar, &rate, 1, 0.0, 0.0};
+    EnginePricingContext pricing{0.0, 1'000, 1, 7};
+    EngineExecutionContext execution{"cpu", "fp64"};
+
+    HessianResultsHandle portfolio_hessian;
+    int rc = engine_abi_portfolio_hessian(
+        portfolio.ptr, "HullWhiteModelNpv", nullptr, 0, model.ptr, &market, &pricing, &execution, nullptr, 0,
+        &portfolio_hessian.entries, &portfolio_hessian.n_entries, &portfolio_hessian.skipped, &portfolio_hessian.n_skipped
+    );
+    ASSERT_EQ(rc, 0) << last_error();
+    EXPECT_EQ(portfolio_hessian.n_skipped, 0u);
+    ASSERT_EQ(portfolio_hessian.n_entries, 10u);
+
+    // Oraculo: engine_abi_hessian llamado a mano, trade a trade, sumado manualmente.
+    HessianResultsHandle per_trade[3];
+    for (std::size_t k = 0; k < 3; ++k) {
+        int rc_trade = engine_abi_hessian(
+            products[k], "HullWhiteModelNpv", nullptr, 0, model.ptr, &market, &pricing, &execution, nullptr, 0,
+            &per_trade[k].entries, &per_trade[k].n_entries, &per_trade[k].skipped, &per_trade[k].n_skipped
+        );
+        ASSERT_EQ(rc_trade, 0) << last_error();
+        ASSERT_EQ(per_trade[k].n_skipped, 0u);
+        ASSERT_EQ(per_trade[k].n_entries, 10u);
+    }
+
+    for (std::size_t i = 0; i < portfolio_hessian.n_entries; ++i) {
+        const EngineHessianEntry& entry = portfolio_hessian.entries[i];
+        double manual_sum = 0.0;
+        for (std::size_t k = 0; k < 3; ++k) {
+            const EngineHessianEntry* found = per_trade[k].find(entry.risk_factor_i, entry.risk_factor_j);
+            ASSERT_NE(found, nullptr) << entry.risk_factor_i << "/" << entry.risk_factor_j << " trade " << k;
+            manual_sum += found->value;
+        }
+        EXPECT_NEAR(entry.value, manual_sum, 1e-9 * std::max(1.0, std::abs(manual_sum)))
+            << entry.risk_factor_i << "/" << entry.risk_factor_j;
+        // Hull-White (forward-over-forward) es formula cerrada: nunca lleva std_error.
+        EXPECT_EQ(entry.has_std_error, 0);
+    }
+}
+
+// Mismo criterio de aceptacion, para engine_abi_portfolio_hvp.
+TEST(Abi, PortfolioHvpMatchesManualSumOfPerTradeAbiHvpExactly) {
+    ModelHandle model = create_hull_white();
+    Irs5y irs_a{1'000'000.0, 0.02};
+    Irs5y irs_b{2'500'000.0, 0.015};
+    Irs5y irs_c{500'000.0, 0.025};
+    ProductHandle product_a = irs_a.create();
+    ProductHandle product_b = irs_b.create();
+    ProductHandle product_c = irs_c.create();
+    const EngineProduct* products[] = {product_a.ptr, product_b.ptr, product_c.ptr};
+
+    PortfolioHandle portfolio{engine_abi_create_portfolio()};
+    for (const EngineProduct* p : products) engine_abi_portfolio_add_trade(portfolio.ptr, p);
+
+    double pillar = 1.0, rate = 0.02;
+    EngineMarketSnapshot market{&pillar, &rate, 1, 0.0, 0.0};
+    EnginePricingContext pricing{0.0, 1'000, 1, 7};
+    EngineExecutionContext execution{"cpu", "fp64"};
+
+    const char* direction_factors[] = {"model.a", "model.b", "model.sigma", "model.r0"};
+    const double direction_weights[] = {1.0, 0.5, -0.25, 2.0};
+
+    HvpResultsHandle portfolio_hvp;
+    int rc = engine_abi_portfolio_hvp(
+        portfolio.ptr, "HullWhiteModelNpv", nullptr, 0, model.ptr, &market, &pricing, &execution, direction_factors,
+        direction_weights, 4, &portfolio_hvp.components, &portfolio_hvp.n_components, &portfolio_hvp.skipped,
+        &portfolio_hvp.n_skipped
+    );
+    ASSERT_EQ(rc, 0) << last_error();
+    EXPECT_EQ(portfolio_hvp.n_skipped, 0u);
+    ASSERT_EQ(portfolio_hvp.n_components, 4u);
+
+    HvpResultsHandle per_trade[3];
+    for (std::size_t k = 0; k < 3; ++k) {
+        int rc_trade = engine_abi_hvp(
+            products[k], "HullWhiteModelNpv", nullptr, 0, model.ptr, &market, &pricing, &execution, direction_factors,
+            direction_weights, 4, &per_trade[k].components, &per_trade[k].n_components, &per_trade[k].skipped,
+            &per_trade[k].n_skipped
+        );
+        ASSERT_EQ(rc_trade, 0) << last_error();
+        ASSERT_EQ(per_trade[k].n_components, 4u);
+    }
+
+    for (std::size_t i = 0; i < portfolio_hvp.n_components; ++i) {
+        const EngineHvpComponent& component = portfolio_hvp.components[i];
+        double manual_sum = 0.0;
+        for (std::size_t k = 0; k < 3; ++k) {
+            const EngineHvpComponent* found = per_trade[k].find(component.risk_factor);
+            ASSERT_NE(found, nullptr) << component.risk_factor << " trade " << k;
+            manual_sum += found->value;
+        }
+        EXPECT_NEAR(component.value, manual_sum, 1e-9 * std::max(1.0, std::abs(manual_sum))) << component.risk_factor;
+    }
+}
+
+TEST(Abi, PortfolioHessianRejectsNullHandles) {
+    HessianResultsHandle result;
+    int rc = engine_abi_portfolio_hessian(
+        nullptr, "HullWhiteModelNpv", nullptr, 0, nullptr, nullptr, nullptr, nullptr, nullptr, 0,
+        &result.entries, &result.n_entries, &result.skipped, &result.n_skipped
+    );
+    EXPECT_NE(rc, 0);
+    EXPECT_EQ(result.entries, nullptr);
+    EXPECT_EQ(result.n_entries, 0u);
+    EXPECT_FALSE(last_error().empty());
+}
+
+TEST(Abi, PortfolioHvpRejectsMissingDirection) {
+    ModelHandle model = create_hull_white();
+    PortfolioHandle portfolio{engine_abi_create_portfolio()};
+    Irs5y irs{1'000'000.0, 0.02};
+    ProductHandle product = irs.create();
+    engine_abi_portfolio_add_trade(portfolio.ptr, product.ptr);
+
+    double pillar = 1.0, rate = 0.02;
+    EngineMarketSnapshot market{&pillar, &rate, 1, 0.0, 0.0};
+    EnginePricingContext pricing{0.0, 1'000, 1, 7};
+    EngineExecutionContext execution{"cpu", "fp64"};
+
+    HvpResultsHandle result;
+    int rc = engine_abi_portfolio_hvp(
+        portfolio.ptr, "HullWhiteModelNpv", nullptr, 0, model.ptr, &market, &pricing, &execution, nullptr, nullptr, 0,
+        &result.components, &result.n_components, &result.skipped, &result.n_skipped
+    );
+    EXPECT_NE(rc, 0);
     EXPECT_FALSE(last_error().empty());
 }

@@ -13,6 +13,7 @@
 #include "engine/engine.hpp"
 #include "engine/greeks.hpp"
 #include "engine/payoff/payoff_product.hpp"
+#include "engine/portfolio.hpp"
 
 #include <algorithm>
 #include <cstring>
@@ -330,11 +331,27 @@ std::size_t export_string_list(const std::vector<std::string>& names, const char
 struct EngineModel {
     std::unique_ptr<engine::IModel> ptr;
 };
+// PLAN_BACKWARD.md §9 Fase 6: shared_ptr (no unique_ptr) para que un EngineProduct ya creado
+// (usado en engine_abi_price/_price_batch/_price_many/etc.) pueda compartirse con uno o mas
+// EnginePortfolio sin robarle la propiedad al handle original -- Registry<IProduct>::create
+// devuelve std::unique_ptr<IProduct> (registry.hpp), que se convierte implicitamente a
+// shared_ptr en la construccion agregada `EngineProduct{std::move(product)}` de
+// engine_abi_create_product, sin tocar ningun llamante (todos los demas usos de
+// EngineProduct::ptr en este fichero son ->/.get(), identicos para unique_ptr/shared_ptr).
+// Mejora de seguridad de memoria como efecto secundario: engine_abi_free_product sobre un
+// producto que sigue vivo DENTRO de un EnginePortfolio es seguro -- el Portfolio mantiene su
+// propia copia del shared_ptr, el IProduct no se destruye hasta que la ULTIMA referencia
+// desaparezca (a diferencia de un unique_ptr, donde free_product habria dejado un
+// use-after-free si el Portfolio hubiera guardado el puntero crudo).
 struct EngineProduct {
-    std::unique_ptr<engine::IProduct> ptr;
+    std::shared_ptr<engine::IProduct> ptr;
 };
 struct EngineCalibrator {
     std::unique_ptr<engine::ICalibrator> ptr;
+};
+// PLAN_BACKWARD.md §9 Fase 6: handle opaco mas, mismo patron que EngineModel/EngineProduct.
+struct EnginePortfolio {
+    engine::Portfolio ptr;
 };
 
 namespace {
@@ -900,6 +917,181 @@ void engine_abi_free_price_grid_results(EnginePriceGridResultEntry* entries, std
         engine_abi_free_price_results(entries[i].measures, entries[i].n_measures);
     }
     delete[] entries;
+}
+
+// --- ENGINE.PORTFOLIO (PLAN_BACKWARD.md §6.4/§9 Fase 6) -----------------------------------
+
+EnginePortfolio* engine_abi_create_portfolio(void) { return new EnginePortfolio{}; }
+
+void engine_abi_portfolio_add_trade(EnginePortfolio* portfolio, const EngineProduct* trade) {
+    try {
+        if (!portfolio || !trade) {
+            throw std::invalid_argument("engine_abi_portfolio_add_trade: portfolio/trade no pueden ser NULL");
+        }
+        // trade->ptr es shared_ptr<IProduct> (ver el comentario de EngineProduct arriba): se
+        // comparte tal cual con el Portfolio, sin robarle la propiedad al EngineProduct original
+        // -- `trade` se puede seguir usando (o liberar con engine_abi_free_product) despues de
+        // esta llamada sin invalidar el Portfolio.
+        portfolio->ptr.add(trade->ptr);
+        clear_last_error();
+    } catch (const std::exception& e) {
+        set_last_error(e);
+    }
+}
+
+std::size_t engine_abi_portfolio_size(const EnginePortfolio* portfolio) {
+    return portfolio ? portfolio->ptr.size() : 0;
+}
+
+void engine_abi_free_portfolio(EnginePortfolio* portfolio) { delete portfolio; }
+
+int engine_abi_portfolio_price(
+    const EnginePortfolio* portfolio,
+    const char** measure_names,
+    std::size_t n_measure_names,
+    const EngineModel* model,
+    const EngineMarketSnapshot* market,
+    const EnginePricingContext* pricing,
+    const EngineExecutionContext* execution,
+    EnginePriceBatchResultEntry** out_entries,
+    std::size_t* out_count
+) {
+    *out_entries = nullptr;
+    *out_count = 0;
+    try {
+        if (!portfolio || !model || !market || !pricing || !execution) {
+            throw std::invalid_argument(
+                "engine_abi_portfolio_price: portfolio/model/market/pricing/execution no pueden ser NULL");
+        }
+        engine::PriceBatchResult result = portfolio->ptr.price(
+            registries(), to_string_vector(measure_names, n_measure_names), *model->ptr, to_market(*market),
+            to_pricing_context(*pricing), to_execution_context(*execution)
+        );
+
+        auto* entries = new EnginePriceBatchResultEntry[result.size()]{};
+        for (std::size_t i = 0; i < result.size(); ++i) {
+            entries[i].trade_index = result[i].trade_index;
+            entries[i].measures = export_calc_result(result[i].measures);
+            entries[i].n_measures = result[i].measures.size();
+        }
+        *out_entries = entries;
+        *out_count = result.size();
+        clear_last_error();
+        return 0;
+    } catch (const std::exception& e) {
+        set_last_error(e);
+        *out_entries = nullptr;
+        *out_count = 0;
+        return 1;
+    }
+}
+
+int engine_abi_portfolio_hessian(
+    const EnginePortfolio* portfolio,
+    const char* metric_name,
+    const EngineParam* metric_params,
+    std::size_t n_metric_params,
+    const EngineModel* model,
+    const EngineMarketSnapshot* market,
+    const EnginePricingContext* pricing,
+    const EngineExecutionContext* execution,
+    const char** risk_factors,
+    std::size_t n_risk_factors,
+    EngineHessianEntry** out_entries,
+    std::size_t* out_n_entries,
+    char*** out_skipped,
+    std::size_t* out_n_skipped
+) {
+    *out_entries = nullptr;
+    *out_n_entries = 0;
+    *out_skipped = nullptr;
+    *out_n_skipped = 0;
+    try {
+        if (!portfolio || !model || !market || !pricing || !execution) {
+            throw std::invalid_argument(
+                "engine_abi_portfolio_hessian: portfolio/model/market/pricing/execution no pueden ser NULL");
+        }
+        if (!metric_name) {
+            throw std::invalid_argument("engine_abi_portfolio_hessian: metric_name no puede ser NULL");
+        }
+        std::vector<engine::greeks::RiskFactor> factors = to_risk_factor_vector(risk_factors, n_risk_factors);
+
+        engine::greeks::HessianReport report = portfolio->ptr.hessian(
+            registries(), metric_name, to_params(metric_params, n_metric_params), *model->ptr, to_market(*market),
+            to_pricing_context(*pricing), to_execution_context(*execution), factors
+        );
+
+        *out_entries = export_hessian_report(report.entries);
+        *out_n_entries = report.entries.size();
+        *out_skipped = export_skipped(report.skipped, out_n_skipped);
+        clear_last_error();
+        return 0;
+    } catch (const std::exception& e) {
+        set_last_error(e);
+        *out_entries = nullptr;
+        *out_n_entries = 0;
+        *out_skipped = nullptr;
+        *out_n_skipped = 0;
+        return 1;
+    }
+}
+
+int engine_abi_portfolio_hvp(
+    const EnginePortfolio* portfolio,
+    const char* metric_name,
+    const EngineParam* metric_params,
+    std::size_t n_metric_params,
+    const EngineModel* model,
+    const EngineMarketSnapshot* market,
+    const EnginePricingContext* pricing,
+    const EngineExecutionContext* execution,
+    const char** direction_factors,
+    const double* direction_weights,
+    std::size_t n_direction,
+    EngineHvpComponent** out_components,
+    std::size_t* out_n_components,
+    char*** out_skipped,
+    std::size_t* out_n_skipped
+) {
+    *out_components = nullptr;
+    *out_n_components = 0;
+    *out_skipped = nullptr;
+    *out_n_skipped = 0;
+    try {
+        if (!portfolio || !model || !market || !pricing || !execution) {
+            throw std::invalid_argument(
+                "engine_abi_portfolio_hvp: portfolio/model/market/pricing/execution no pueden ser NULL");
+        }
+        if (!metric_name) {
+            throw std::invalid_argument("engine_abi_portfolio_hvp: metric_name no puede ser NULL");
+        }
+        if (!direction_factors || !direction_weights || n_direction == 0) {
+            throw std::invalid_argument(
+                "engine_abi_portfolio_hvp: direction_factors/direction_weights no pueden ser NULL/vacios (siempre "
+                "obligatorios, sin auto-enumeracion, igual que engine_abi_hvp)"
+            );
+        }
+        std::vector<engine::greeks::RiskFactor> factors = to_risk_factor_vector(direction_factors, n_direction);
+        std::vector<double> direction(direction_weights, direction_weights + n_direction);
+
+        engine::greeks::HvpReport report = portfolio->ptr.hvp(
+            registries(), metric_name, to_params(metric_params, n_metric_params), *model->ptr, to_market(*market),
+            to_pricing_context(*pricing), to_execution_context(*execution), factors, direction
+        );
+
+        *out_components = export_hvp_report(report.components);
+        *out_n_components = report.components.size();
+        *out_skipped = export_skipped(report.skipped, out_n_skipped);
+        clear_last_error();
+        return 0;
+    } catch (const std::exception& e) {
+        set_last_error(e);
+        *out_components = nullptr;
+        *out_n_components = 0;
+        *out_skipped = nullptr;
+        *out_n_skipped = 0;
+        return 1;
+    }
 }
 
 int engine_abi_is_gpu_backend_available(void) { return engine::is_gpu_backend_available() ? 1 : 0; }

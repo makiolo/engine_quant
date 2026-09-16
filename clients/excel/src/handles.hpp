@@ -17,6 +17,7 @@
 // (Fase 3): añadir un modelo/producto/medida nuevo en bootstrap.cpp lo deja disponible aquí
 // sin tocar este fichero (PLAN.md §5.4, §4).
 
+#include <memory>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -35,6 +36,7 @@
 #include "engine/execution_context.hpp"
 #include "engine/greeks.hpp"
 #include "engine/market.hpp"
+#include "engine/portfolio.hpp"
 #include "engine/pricing_context.hpp"
 
 namespace xlbridge {
@@ -171,17 +173,72 @@ public:
         const std::string& calibrator_handle, const std::string& market_handle, const XLOPER12& initial_guess_arg
     ) const;
 
+    // --- Portfolio (PLAN_BACKWARD.md §6.4/§9 Fase 6) ----------------------------------------
+    // Tension de diseño resuelta como Opcion B (documentada en handles.cpp, junto a la
+    // implementacion): un `ENGINE.PORTFOLIO.CREATE` FUNCIONAL que construye el Portfolio
+    // COMPLETO de una vez a partir de un rango de handles de trade ya creados -- memoizado por
+    // esa lista EXACTA (mismo patron de clave canonica que create_model/create_product/
+    // create_market), en vez de una UDF `.ADD` MUTANTE sobre un handle ya existente. Una `.ADD`
+    // mutante rompería el modelo de memoizacion determinista de HandleRegistry (mismos
+    // parametros -> mismo handle, sin gestion de ciclo de vida por celda -- ver el comentario de
+    // cabecera de este fichero, lineas 1-20): cada recalculo de Excel de la celda que la contiene
+    // volveria a anadir el trade al MISMO portfolio, salvo que `.ADD` fuera idempotente
+    // comprobando membresia -- complejidad no prevista por PLAN_BACKWARD.md §6.4.
+    std::string create_portfolio(const std::vector<std::string>& trade_handles);
+
+    // Mismos handles/parametros que price/hessian/hvp de trade unico, sustituyendo
+    // product_handle por portfolio_handle -- misma forma de resultado (Portfolio::price/hessian/
+    // hvp son envoltorios que suman/delegan sobre compute_hessian/compute_hvp/price_many YA
+    // EXISTENTES, ver engine/portfolio.hpp).
+    engine::PriceBatchResult portfolio_price(
+        const std::string& portfolio_handle,
+        const std::vector<std::string>& measure_names,
+        const std::string& model_handle,
+        const std::string& market_handle,
+        const std::string& pricing_handle,
+        const std::string& execution_handle
+    ) const;
+
+    engine::greeks::HessianReport portfolio_hessian(
+        const std::string& portfolio_handle,
+        const std::string& metric_name,
+        const XLOPER12& metric_params_arg,
+        const std::string& model_handle,
+        const std::string& market_handle,
+        const std::string& pricing_handle,
+        const std::string& execution_handle,
+        const XLOPER12& factors_arg
+    ) const;
+
+    engine::greeks::HvpReport portfolio_hvp(
+        const std::string& portfolio_handle,
+        const std::string& metric_name,
+        const XLOPER12& metric_params_arg,
+        const std::string& model_handle,
+        const std::string& market_handle,
+        const std::string& pricing_handle,
+        const std::string& execution_handle,
+        const XLOPER12& direction_arg
+    ) const;
+
     // Libera todas las instancias memoizadas (xlAutoClose, engine_excel.cpp).
     void clear();
 
 private:
     engine::Registries registries_;
     std::unordered_map<std::string, std::unique_ptr<engine::IModel>> models_;
-    std::unordered_map<std::string, std::unique_ptr<engine::IProduct>> products_;
+    // shared_ptr (no unique_ptr, PLAN_BACKWARD.md §9 Fase 6): un mismo product_handle ya creado
+    // se comparte con uno o mas Portfolio (portfolios_ de abajo) sin perder la entrada de este
+    // mapa -- mismo cambio de ownership, y mismo motivo, que EngineProduct::ptr en la C ABI
+    // (cpp/engine/src/abi.cpp). Todos los usos existentes de este mapa (resolve_products,
+    // explain_product, price/price_batch/price_many/price_grid) solo hacen ->/.get()/dereferencia,
+    // identicos para unique_ptr/shared_ptr.
+    std::unordered_map<std::string, std::shared_ptr<engine::IProduct>> products_;
     std::unordered_map<std::string, engine::MarketSnapshot> markets_;
     std::unordered_map<std::string, engine::PricingContext> pricing_contexts_;
     std::unordered_map<std::string, engine::ExecutionContext> execution_contexts_;
     std::unordered_map<std::string, std::unique_ptr<engine::ICalibrator>> calibrators_;
+    std::unordered_map<std::string, engine::Portfolio> portfolios_;
 };
 
 // Instancia única de proceso (una por XLL cargado en Excel), usada desde engine_excel.cpp.

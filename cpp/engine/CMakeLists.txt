@@ -28,6 +28,7 @@ add_library(engine STATIC
     src/calibrator.cpp
     src/bootstrap.cpp
     src/greeks.cpp
+    src/portfolio.cpp
     src/payoff/ids.cpp
     src/payoff/expression.cpp
     src/payoff/predicate.cpp

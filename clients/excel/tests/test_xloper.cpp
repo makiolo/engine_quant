@@ -1202,3 +1202,188 @@ TEST(HandleRegistry, ExplainProductRejectsUnknownHandle) {
     xlbridge::HandleRegistry registry = make_registry();
     EXPECT_THROW(registry.explain_product("product:Payoff#no-existe"), std::out_of_range);
 }
+
+// --- Portfolio (PLAN_BACKWARD.md §6.4/§9 Fase 6) ---------------------------------------------
+// Opcion B de la tension de diseño (ver el comentario extenso en handles.cpp/.hpp junto a
+// create_portfolio): ENGINE.PORTFOLIO.CREATE es FUNCIONAL, memoizado por la lista exacta de
+// trade handles -- estos tests confirman esa memoizacion y que portfolio_price/_hessian/_hvp
+// delegan en engine::Portfolio::price/hessian/hvp exactamente igual que price/hessian/hvp de
+// trade unico (mismo oraculo "suma manual" que PortfolioTest en cpp/engine/tests/
+// test_portfolio.cpp, aqui pasando por el bridge de Excel).
+
+TEST(HandleRegistry, CreatePortfolioIsMemoizedByTheExactListOfTradeHandles) {
+    xlbridge::HandleRegistry registry = make_registry();
+    std::vector<std::vector<XCHAR>> product_a_bufs, product_b_bufs;
+    std::vector<XLOPER12> product_a_cells, product_b_cells;
+    std::string product_a = registry.create_product("IRSwap", irs_5y_params_table(product_a_bufs, product_a_cells, 1'000'000.0, 0.02));
+    std::string product_b = registry.create_product("IRSwap", irs_5y_params_table(product_b_bufs, product_b_cells, 2'500'000.0, 0.015));
+
+    std::vector<std::vector<XCHAR>> bufs1, bufs2, bufs3;
+    std::vector<XLOPER12> cells1 = {str_cell(bufs1, product_a), str_cell(bufs1, product_b)};
+    std::vector<XLOPER12> cells2 = {str_cell(bufs2, product_a), str_cell(bufs2, product_b)};
+    // Mismos handles en OTRO orden -> portfolio DISTINTO (es una lista, no un conjunto -- la
+    // clave canonica preserva el orden tal cual se paso).
+    std::vector<XLOPER12> cells3 = {str_cell(bufs3, product_b), str_cell(bufs3, product_a)};
+
+    std::string portfolio1 = registry.create_portfolio(xlbridge::read_string_list(make_table(cells1, 2, 1)));
+    std::string portfolio2 = registry.create_portfolio(xlbridge::read_string_list(make_table(cells2, 2, 1)));
+    std::string portfolio3 = registry.create_portfolio(xlbridge::read_string_list(make_table(cells3, 2, 1)));
+
+    EXPECT_EQ(portfolio1, portfolio2);
+    EXPECT_NE(portfolio1, portfolio3);
+}
+
+TEST(HandleRegistry, CreatePortfolioRejectsUnknownTradeHandle) {
+    xlbridge::HandleRegistry registry = make_registry();
+    EXPECT_THROW(registry.create_portfolio({"product:IRSwap#no-existe"}), std::out_of_range);
+}
+
+// portfolio_price debe coincidir, trade a trade, con price_many/price_batch sobre el mismo
+// vector de trades (mismo criterio que Abi.PortfolioPriceMatchesPriceBatchOnTheSameTrades en
+// cpp/engine/tests/test_abi.cpp).
+TEST(HandleRegistry, PortfolioPriceMatchesPriceBatchOnTheSameTrades) {
+    xlbridge::HandleRegistry registry = make_registry();
+    std::vector<std::vector<XCHAR>> model_bufs, product_a_bufs, product_b_bufs, market_bufs, pricing_bufs, execution_bufs;
+    std::vector<XLOPER12> model_cells, product_a_cells, product_b_cells, market_cells, pricing_cells, execution_cells;
+
+    std::string model = registry.create_model("HullWhite1F", hull_white_params_table(model_bufs, model_cells));
+    std::string product_a = registry.create_product("IRSwap", irs_5y_params_table(product_a_bufs, product_a_cells, 1'000'000.0, 0.02));
+    std::string product_b = registry.create_product("IRSwap", irs_5y_params_table(product_b_bufs, product_b_cells, 2'500'000.0, 0.015));
+    std::string market = registry.create_market(market_params_table(market_bufs, market_cells, 0.02, 0.4));
+    std::string pricing = registry.create_context(pricing_context_table(pricing_bufs, pricing_cells, 5000.0, 7.0));
+    std::string execution = registry.create_execution(cpu_execution_table(execution_bufs, execution_cells));
+
+    std::vector<std::string> trades{product_a, product_b};
+    std::vector<std::string> measures{"PV", "DV01"};
+
+    std::vector<std::vector<XCHAR>> trades_bufs;
+    std::vector<XLOPER12> trades_cells = {str_cell(trades_bufs, product_a), str_cell(trades_bufs, product_b)};
+    std::string portfolio = registry.create_portfolio(xlbridge::read_string_list(make_table(trades_cells, 2, 1)));
+
+    engine::PriceBatchResult from_portfolio = registry.portfolio_price(portfolio, measures, model, market, pricing, execution);
+    engine::PriceBatchResult from_batch = registry.price_batch(trades, measures, model, market, pricing, execution);
+
+    ASSERT_EQ(from_portfolio.size(), from_batch.size());
+    for (std::size_t i = 0; i < from_portfolio.size(); ++i) {
+        EXPECT_EQ(from_portfolio[i].trade_index, from_batch[i].trade_index);
+        for (std::size_t m = 0; m < measures.size(); ++m) {
+            EXPECT_NEAR(from_portfolio[i].measures[m].result.scalar, from_batch[i].measures[m].result.scalar, 1e-9);
+        }
+    }
+}
+
+// Aceptacion EXACTA del plan (§13 DoD), via el bridge de Excel: portfolio_hessian de 3
+// IrSwapProduct bajo el MISMO HullWhite1FModel coincide, entrada a entrada, con sumar A MANO
+// los HessianReport de hessian() (trade unico) llamado trade a trade.
+TEST(HandleRegistry, PortfolioHessianMatchesManualSumOfPerTradeHessianExactly) {
+    xlbridge::HandleRegistry registry = make_registry();
+    std::vector<std::vector<XCHAR>> model_bufs, product_a_bufs, product_b_bufs, product_c_bufs, market_bufs, pricing_bufs,
+        execution_bufs;
+    std::vector<XLOPER12> model_cells, product_a_cells, product_b_cells, product_c_cells, market_cells, pricing_cells,
+        execution_cells;
+
+    std::string model = registry.create_model("HullWhite1F", hull_white_params_table(model_bufs, model_cells));
+    std::string product_a = registry.create_product("IRSwap", irs_5y_params_table(product_a_bufs, product_a_cells, 1'000'000.0, 0.02));
+    std::string product_b = registry.create_product("IRSwap", irs_5y_params_table(product_b_bufs, product_b_cells, 2'500'000.0, 0.015));
+    std::string product_c = registry.create_product("IRSwap", irs_5y_params_table(product_c_bufs, product_c_cells, 500'000.0, 0.025));
+    std::string market = registry.create_market(market_params_table(market_bufs, market_cells));
+    std::string pricing = registry.create_context(pricing_context_table(pricing_bufs, pricing_cells, 1000.0, 7.0));
+    std::string execution = registry.create_execution(cpu_execution_table(execution_bufs, execution_cells));
+
+    std::vector<std::string> trades{product_a, product_b, product_c};
+    std::vector<std::vector<XCHAR>> trades_bufs;
+    std::vector<XLOPER12> trades_cells = {
+        str_cell(trades_bufs, product_a), str_cell(trades_bufs, product_b), str_cell(trades_bufs, product_c)
+    };
+    std::string portfolio = registry.create_portfolio(xlbridge::read_string_list(make_table(trades_cells, 3, 1)));
+
+    XLOPER12 no_metric_params = missing_arg();
+    XLOPER12 no_factors = missing_arg();
+    engine::greeks::HessianReport portfolio_report = registry.portfolio_hessian(
+        portfolio, "HullWhiteModelNpv", no_metric_params, model, market, pricing, execution, no_factors
+    );
+    ASSERT_TRUE(portfolio_report.skipped.empty());
+    ASSERT_EQ(portfolio_report.entries.size(), 10u);
+
+    std::vector<engine::greeks::HessianReport> manual_per_trade;
+    for (const std::string& trade : trades) {
+        manual_per_trade.push_back(
+            registry.hessian(trade, "HullWhiteModelNpv", no_metric_params, model, market, pricing, execution, no_factors)
+        );
+        ASSERT_TRUE(manual_per_trade.back().skipped.empty());
+        ASSERT_EQ(manual_per_trade.back().entries.size(), 10u);
+    }
+
+    for (const auto& entry : portfolio_report.entries) {
+        double manual_sum = 0.0;
+        for (const auto& report : manual_per_trade) {
+            const engine::greeks::HessianEntry* found = nullptr;
+            for (const auto& e : report.entries) {
+                bool same_ij = (e.factor_i.name == entry.factor_i.name && e.factor_j.name == entry.factor_j.name) ||
+                                (e.factor_i.name == entry.factor_j.name && e.factor_j.name == entry.factor_i.name);
+                if (same_ij) { found = &e; break; }
+            }
+            ASSERT_NE(found, nullptr) << entry.factor_i.name << "/" << entry.factor_j.name;
+            manual_sum += found->value;
+        }
+        EXPECT_NEAR(entry.value, manual_sum, 1e-9 * std::max(1.0, std::abs(manual_sum)))
+            << entry.factor_i.name << "/" << entry.factor_j.name;
+        EXPECT_FALSE(entry.std_error.has_value()); // Hull-White: formula cerrada, nunca std_error.
+    }
+}
+
+// Mismo criterio de aceptacion, para portfolio_hvp.
+TEST(HandleRegistry, PortfolioHvpMatchesManualSumOfPerTradeHvpExactly) {
+    xlbridge::HandleRegistry registry = make_registry();
+    std::vector<std::vector<XCHAR>> model_bufs, product_a_bufs, product_b_bufs, market_bufs, pricing_bufs, execution_bufs,
+        direction_bufs;
+    std::vector<XLOPER12> model_cells, product_a_cells, product_b_cells, market_cells, pricing_cells, execution_cells,
+        direction_cells;
+
+    std::string model = registry.create_model("HullWhite1F", hull_white_params_table(model_bufs, model_cells));
+    std::string product_a = registry.create_product("IRSwap", irs_5y_params_table(product_a_bufs, product_a_cells, 1'000'000.0, 0.02));
+    std::string product_b = registry.create_product("IRSwap", irs_5y_params_table(product_b_bufs, product_b_cells, 2'500'000.0, 0.015));
+    std::string market = registry.create_market(market_params_table(market_bufs, market_cells));
+    std::string pricing = registry.create_context(pricing_context_table(pricing_bufs, pricing_cells, 1000.0, 7.0));
+    std::string execution = registry.create_execution(cpu_execution_table(execution_bufs, execution_cells));
+
+    std::vector<std::string> trades{product_a, product_b};
+    std::vector<std::vector<XCHAR>> trades_bufs;
+    std::vector<XLOPER12> trades_cells = {str_cell(trades_bufs, product_a), str_cell(trades_bufs, product_b)};
+    std::string portfolio = registry.create_portfolio(xlbridge::read_string_list(make_table(trades_cells, 2, 1)));
+
+    direction_cells = {
+        str_cell(direction_bufs, "model.a"), num_cell(1.0),
+        str_cell(direction_bufs, "model.b"), num_cell(0.5),
+        str_cell(direction_bufs, "model.sigma"), num_cell(-0.25),
+        str_cell(direction_bufs, "model.r0"), num_cell(2.0),
+    };
+    XLOPER12 direction_table = make_table(direction_cells, 4, 2);
+    XLOPER12 no_metric_params = missing_arg();
+
+    engine::greeks::HvpReport portfolio_hvp = registry.portfolio_hvp(
+        portfolio, "HullWhiteModelNpv", no_metric_params, model, market, pricing, execution, direction_table
+    );
+    ASSERT_TRUE(portfolio_hvp.skipped.empty());
+    ASSERT_EQ(portfolio_hvp.components.size(), 4u);
+
+    std::vector<engine::greeks::HvpReport> manual_per_trade;
+    for (const std::string& trade : trades) {
+        manual_per_trade.push_back(
+            registry.hvp(trade, "HullWhiteModelNpv", no_metric_params, model, market, pricing, execution, direction_table)
+        );
+    }
+
+    for (const auto& component : portfolio_hvp.components) {
+        double manual_sum = 0.0;
+        for (const auto& report : manual_per_trade) {
+            const engine::greeks::HvpComponent* found = nullptr;
+            for (const auto& c : report.components) {
+                if (c.factor.name == component.factor.name) { found = &c; break; }
+            }
+            ASSERT_NE(found, nullptr) << component.factor.name;
+            manual_sum += found->value;
+        }
+        EXPECT_NEAR(component.value, manual_sum, 1e-9 * std::max(1.0, std::abs(manual_sum))) << component.factor.name;
+    }
+}

@@ -120,7 +120,7 @@ namespace {
 // compartido por price_batch/price_many/price_grid, mismo mensaje de error que ya usa price() por
 // handle individual.
 std::vector<const engine::IProduct*> resolve_products(
-    const std::unordered_map<std::string, std::unique_ptr<engine::IProduct>>& products,
+    const std::unordered_map<std::string, std::shared_ptr<engine::IProduct>>& products,
     const std::vector<std::string>& handles
 ) {
     std::vector<const engine::IProduct*> out;
@@ -406,6 +406,180 @@ engine::greeks::HvpReport HandleRegistry::hvp(
     );
 }
 
+// --- Portfolio (PLAN_BACKWARD.md §6.4/§9 Fase 6) --------------------------------------------
+// Opcion B de la tension de diseño documentada en handles.hpp (junto a la declaracion de este
+// metodo): un `ENGINE.PORTFOLIO.CREATE` FUNCIONAL, memoizado por la lista EXACTA (ordenada, tal
+// cual se paso) de trade_handles -- mismo patron de clave canonica que create_model/
+// create_product/create_market (`table_to_params`/`ParsedParams::canonical` no aplica aqui
+// porque el "parametro" no es un rango clave/valor sino una lista de handles ya construidos, asi
+// que la clave se construye concatenandolos directamente, en el mismo espiritu). Se descarto la
+// alternativa fiel al boceto original de PLAN_BACKWARD.md §6.4 (`ENGINE.PORTFOLIO.ADD(portfolio,
+// trade) -> ok`, una UDF MUTANTE sobre un handle ya creado) porque rompe la invariante central de
+// `HandleRegistry` (handles.hpp lineas 1-20: "los mismos parametros producen siempre el mismo
+// handle", sin gestion de ciclo de vida por celda) -- Excel recalcula una formula dependiente en
+// cualquier evento de recalculo, no solo la primera vez, asi que una `.ADD` mutante añadiria el
+// trade otra vez al MISMO portfolio en cada recalculo salvo que fuera idempotente comprobando
+// membresia primero (complejidad de deduplicacion no trivial, no prevista por PLAN_BACKWARD.md
+// §6.4). La forma funcional es memoizable sin ese problema: mismos handles de entrada (mismo
+// orden) -> mismo handle de portfolio, determinista bajo recalculo repetido, sin logica de
+// idempotencia extra.
+std::string HandleRegistry::create_portfolio(const std::vector<std::string>& trade_handles) {
+    std::string canonical;
+    for (const std::string& trade_handle : trade_handles) {
+        canonical += trade_handle;
+        canonical += '|';
+    }
+    std::string handle = "portfolio:" + canonical;
+    if (portfolios_.find(handle) == portfolios_.end()) {
+        engine::Portfolio portfolio;
+        for (const std::string& trade_handle : trade_handles) {
+            auto it = products_.find(trade_handle);
+            if (it == products_.end()) {
+                throw std::out_of_range("xlbridge: handle de producto desconocido: " + trade_handle);
+            }
+            // it->second es shared_ptr<IProduct> (ver el comentario de `products_` en
+            // handles.hpp) -- se comparte tal cual con el Portfolio, sin robarle la propiedad a
+            // este mapa: el product_handle original sigue siendo valido para price/hessian/hvp de
+            // trade unico despues de esta llamada.
+            portfolio.add(it->second);
+        }
+        portfolios_.emplace(handle, std::move(portfolio));
+    }
+    return handle;
+}
+
+engine::PriceBatchResult HandleRegistry::portfolio_price(
+    const std::string& portfolio_handle,
+    const std::vector<std::string>& measure_names,
+    const std::string& model_handle,
+    const std::string& market_handle,
+    const std::string& pricing_handle,
+    const std::string& execution_handle
+) const {
+    auto portfolio_it = portfolios_.find(portfolio_handle);
+    if (portfolio_it == portfolios_.end()) {
+        throw std::out_of_range("xlbridge: handle de portfolio desconocido: " + portfolio_handle);
+    }
+    auto model_it = models_.find(model_handle);
+    if (model_it == models_.end()) {
+        throw std::out_of_range("xlbridge: handle de modelo desconocido: " + model_handle);
+    }
+    auto market_it = markets_.find(market_handle);
+    if (market_it == markets_.end()) {
+        throw std::out_of_range("xlbridge: handle de mercado desconocido: " + market_handle);
+    }
+    auto pricing_it = pricing_contexts_.find(pricing_handle);
+    if (pricing_it == pricing_contexts_.end()) {
+        throw std::out_of_range("xlbridge: handle de contexto de valoracion desconocido: " + pricing_handle);
+    }
+    auto execution_it = execution_contexts_.find(execution_handle);
+    if (execution_it == execution_contexts_.end()) {
+        throw std::out_of_range("xlbridge: handle de contexto de ejecucion desconocido: " + execution_handle);
+    }
+
+    return portfolio_it->second.price(
+        registries_, measure_names, *model_it->second, market_it->second, pricing_it->second, execution_it->second
+    );
+}
+
+engine::greeks::HessianReport HandleRegistry::portfolio_hessian(
+    const std::string& portfolio_handle,
+    const std::string& metric_name,
+    const XLOPER12& metric_params_arg,
+    const std::string& model_handle,
+    const std::string& market_handle,
+    const std::string& pricing_handle,
+    const std::string& execution_handle,
+    const XLOPER12& factors_arg
+) const {
+    auto portfolio_it = portfolios_.find(portfolio_handle);
+    if (portfolio_it == portfolios_.end()) {
+        throw std::out_of_range("xlbridge: handle de portfolio desconocido: " + portfolio_handle);
+    }
+    auto model_it = models_.find(model_handle);
+    if (model_it == models_.end()) {
+        throw std::out_of_range("xlbridge: handle de modelo desconocido: " + model_handle);
+    }
+    auto market_it = markets_.find(market_handle);
+    if (market_it == markets_.end()) {
+        throw std::out_of_range("xlbridge: handle de mercado desconocido: " + market_handle);
+    }
+    auto pricing_it = pricing_contexts_.find(pricing_handle);
+    if (pricing_it == pricing_contexts_.end()) {
+        throw std::out_of_range("xlbridge: handle de contexto de valoracion desconocido: " + pricing_handle);
+    }
+    auto execution_it = execution_contexts_.find(execution_handle);
+    if (execution_it == execution_contexts_.end()) {
+        throw std::out_of_range("xlbridge: handle de contexto de ejecucion desconocido: " + execution_handle);
+    }
+
+    ParsedParams metric_params = table_to_params(metric_params_arg);
+
+    std::vector<engine::greeks::RiskFactor> factors;
+    if (!is_blank(factors_arg)) {
+        for (const std::string& name : read_string_list(factors_arg)) {
+            factors.push_back(engine::greeks::parse_risk_factor(name));
+        }
+    }
+
+    return portfolio_it->second.hessian(
+        registries_, metric_name, metric_params.params, *model_it->second, market_it->second, pricing_it->second,
+        execution_it->second, factors
+    );
+}
+
+engine::greeks::HvpReport HandleRegistry::portfolio_hvp(
+    const std::string& portfolio_handle,
+    const std::string& metric_name,
+    const XLOPER12& metric_params_arg,
+    const std::string& model_handle,
+    const std::string& market_handle,
+    const std::string& pricing_handle,
+    const std::string& execution_handle,
+    const XLOPER12& direction_arg
+) const {
+    auto portfolio_it = portfolios_.find(portfolio_handle);
+    if (portfolio_it == portfolios_.end()) {
+        throw std::out_of_range("xlbridge: handle de portfolio desconocido: " + portfolio_handle);
+    }
+    auto model_it = models_.find(model_handle);
+    if (model_it == models_.end()) {
+        throw std::out_of_range("xlbridge: handle de modelo desconocido: " + model_handle);
+    }
+    auto market_it = markets_.find(market_handle);
+    if (market_it == markets_.end()) {
+        throw std::out_of_range("xlbridge: handle de mercado desconocido: " + market_handle);
+    }
+    auto pricing_it = pricing_contexts_.find(pricing_handle);
+    if (pricing_it == pricing_contexts_.end()) {
+        throw std::out_of_range("xlbridge: handle de contexto de valoracion desconocido: " + pricing_handle);
+    }
+    auto execution_it = execution_contexts_.find(execution_handle);
+    if (execution_it == execution_contexts_.end()) {
+        throw std::out_of_range("xlbridge: handle de contexto de ejecucion desconocido: " + execution_handle);
+    }
+
+    ParsedParams metric_params = table_to_params(metric_params_arg);
+
+    std::vector<std::pair<std::string, double>> raw_direction = read_string_double_pairs(direction_arg);
+    if (raw_direction.empty()) {
+        throw std::invalid_argument("xlbridge: ENGINE.PORTFOLIO.HVP requiere una direccion no vacia [RiskFactor, Peso]");
+    }
+    std::vector<engine::greeks::RiskFactor> factors;
+    std::vector<double> direction;
+    factors.reserve(raw_direction.size());
+    direction.reserve(raw_direction.size());
+    for (auto& [name, weight] : raw_direction) {
+        factors.push_back(engine::greeks::parse_risk_factor(name));
+        direction.push_back(weight);
+    }
+
+    return portfolio_it->second.hvp(
+        registries_, metric_name, metric_params.params, *model_it->second, market_it->second, pricing_it->second,
+        execution_it->second, factors, direction
+    );
+}
+
 void HandleRegistry::clear() {
     models_.clear();
     products_.clear();
@@ -413,6 +587,7 @@ void HandleRegistry::clear() {
     pricing_contexts_.clear();
     execution_contexts_.clear();
     calibrators_.clear();
+    portfolios_.clear();
 }
 
 HandleRegistry& shared() {

@@ -253,6 +253,55 @@ extern "C" __declspec(dllexport) LPXLOPER12 WINAPI xlEngineHvp(
     });
 }
 
+// Portfolio (PLAN_BACKWARD.md §6.4/§9 Fase 6): ENGINE.PORTFOLIO.CREATE es FUNCIONAL (construye
+// el Portfolio completo de una vez a partir de una COLUMNA de handles de trade, memoizado por
+// esa lista exacta -- Opcion B de la tension de diseño documentada en handles.cpp/.hpp) en vez
+// de una UDF .ADD mutante sobre un handle ya creado. ENGINE.PORTFOLIO.PRICE/.HESSIAN/.HVP tienen
+// la MISMA forma/argumentos que ENGINE.PRICE_MANY/ENGINE.HESSIAN/ENGINE.HVP, sustituyendo el
+// trade/columna de trades por un unico handle de portfolio.
+
+extern "C" __declspec(dllexport) LPXLOPER12 WINAPI xlEnginePortfolioCreate(LPXLOPER12 trades) {
+    return xlbridge::guarded([&] {
+        return xlbridge::new_str(xlbridge::shared().create_portfolio(xlbridge::read_string_list(*trades)));
+    });
+}
+
+extern "C" __declspec(dllexport) LPXLOPER12 WINAPI xlEnginePortfolioPrice(
+    LPXLOPER12 portfolio, LPXLOPER12 measure_names, LPXLOPER12 model, LPXLOPER12 market,
+    LPXLOPER12 pricing, LPXLOPER12 execution
+) {
+    return xlbridge::guarded([&] {
+        return xlbridge::new_price_batch_result(xlbridge::shared().portfolio_price(
+            xlbridge::read_string(*portfolio), xlbridge::read_string_list(*measure_names),
+            xlbridge::read_string(*model), xlbridge::read_string(*market),
+            xlbridge::read_string(*pricing), xlbridge::read_string(*execution)));
+    });
+}
+
+extern "C" __declspec(dllexport) LPXLOPER12 WINAPI xlEnginePortfolioHessian(
+    LPXLOPER12 portfolio, LPXLOPER12 metric_name, LPXLOPER12 metric_params, LPXLOPER12 model,
+    LPXLOPER12 market, LPXLOPER12 pricing, LPXLOPER12 execution, LPXLOPER12 risk_factors
+) {
+    return xlbridge::guarded([&] {
+        return xlbridge::new_hessian_report(xlbridge::shared().portfolio_hessian(
+            xlbridge::read_string(*portfolio), xlbridge::read_string(*metric_name), *metric_params,
+            xlbridge::read_string(*model), xlbridge::read_string(*market), xlbridge::read_string(*pricing),
+            xlbridge::read_string(*execution), *risk_factors));
+    });
+}
+
+extern "C" __declspec(dllexport) LPXLOPER12 WINAPI xlEnginePortfolioHvp(
+    LPXLOPER12 portfolio, LPXLOPER12 metric_name, LPXLOPER12 metric_params, LPXLOPER12 model,
+    LPXLOPER12 market, LPXLOPER12 pricing, LPXLOPER12 execution, LPXLOPER12 direction
+) {
+    return xlbridge::guarded([&] {
+        return xlbridge::new_hvp_report(xlbridge::shared().portfolio_hvp(
+            xlbridge::read_string(*portfolio), xlbridge::read_string(*metric_name), *metric_params,
+            xlbridge::read_string(*model), xlbridge::read_string(*market), xlbridge::read_string(*pricing),
+            xlbridge::read_string(*execution), *direction));
+    });
+}
+
 // Calibración (PLAN.md §7.14): mismo modelo mental que list_models/create_model. El mercado
 // se pasa como handle (ENGINE.CREATE_MARKET, PLAN.md §7.15) en vez de un rango inline; el
 // resultado es una tabla clave/valor pensada para poder pasarse tal cual a
@@ -365,6 +414,38 @@ constexpr FnSpec kFunctions[] = {
         L"'direccion' es un rango obligatorio de 2 columnas [RiskFactor, Peso] (factores "
         L"ausentes = peso 0). Resultado en formato largo: [RiskFactor, Value, Method], con los "
         L"candidatos omitidos al final (Method=\"skipped\")."
+    ),
+    ENGINE_XLL_ENTRY(
+        xlEnginePortfolioCreate, L"UQ", L"ENGINE.PORTFOLIO.CREATE", L"trades",
+        L"Construye un Portfolio (PLAN_BACKWARD.md §6.4) a partir de una COLUMNA de handles de "
+        L"trade ya creados (ENGINE.CREATE_PRODUCT) y devuelve su handle, memoizado por esa lista "
+        L"EXACTA (mismos handles, mismo orden -> mismo Portfolio). Funcional, no mutante: no "
+        L"existe ENGINE.PORTFOLIO.ADD -- para cambiar la composicion de un Portfolio, se llama de "
+        L"nuevo a esta funcion con la columna de trades actualizada."
+    ),
+    ENGINE_XLL_ENTRY(
+        xlEnginePortfolioPrice, L"UQQQQQQ", L"ENGINE.PORTFOLIO.PRICE",
+        L"portfolio,medidas,modelo,mercado,contexto,ejecucion",
+        L"Como ENGINE.PRICE_MANY pero sobre un Portfolio ya creado (ENGINE.PORTFOLIO.CREATE) en "
+        L"vez de una columna de trades sueltos -- envoltorio fino sobre price_many, misma tabla "
+        L"larga de resultado: [TradeIndex, MeasureName, Time, Value]."
+    ),
+    ENGINE_XLL_ENTRY(
+        xlEnginePortfolioHessian, L"UQQQQQQQQ", L"ENGINE.PORTFOLIO.HESSIAN",
+        L"portfolio,metrica,parametros_metrica,modelo,mercado,contexto,ejecucion,factores_de_riesgo",
+        L"Hessiano de un Portfolio (PLAN_BACKWARD.md §9 Fase 6): suma, trade a trade, los "
+        L"HessianReport de ENGINE.HESSIAN sobre cada trade del portfolio -- exacto bajo el "
+        L"modelo/mercado compartido. Un par que no aparezca en TODOS los trades cae en el "
+        L"'skipped' del resultado (nunca se suma como si el que falta aportara 0). Misma forma "
+        L"de resultado que ENGINE.HESSIAN: [RiskFactorI, RiskFactorJ, Value, Method, Measure, "
+        L"StdError]."
+    ),
+    ENGINE_XLL_ENTRY(
+        xlEnginePortfolioHvp, L"UQQQQQQQQ", L"ENGINE.PORTFOLIO.HVP",
+        L"portfolio,metrica,parametros_metrica,modelo,mercado,contexto,ejecucion,direccion",
+        L"Producto Hessiano-vector de un Portfolio: suma, trade a trade, los HvpReport de "
+        L"ENGINE.HVP sobre cada trade. Misma forma de resultado que ENGINE.HVP: [RiskFactor, "
+        L"Value, Method]."
     ),
     ENGINE_XLL_ENTRY(xlEngineListCalibrators, L"U", L"ENGINE.LIST_CALIBRATORS", L"",
                       L"Lista los calibradores registrados en el motor."),

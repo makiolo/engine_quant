@@ -466,6 +466,104 @@ ENGINE_ABI_API void engine_abi_free_hvp(
     EngineHvpComponent* components, size_t n_components, char** skipped, size_t n_skipped
 );
 
+/* --- ENGINE.PORTFOLIO (PLAN_BACKWARD.md §6.4/§9 Fase 6) ----------------------------------
+ * `EnginePortfolio` es un handle opaco mas, mismo molde EXACTO que EngineModel/EngineProduct
+ * (crear con engine_abi_create_portfolio, liberar exactamente una vez con
+ * engine_abi_free_portfolio). Conceptualmente, una lista de trades (EngineProduct) valorados/
+ * arriesgados juntos bajo un UNICO EngineModel/EngineMarketSnapshot por llamada -- alcance
+ * explicitamente minimo (PLAN_BACKWARD.md §6.4/§12: sin netting/colateral/multi-moneda/
+ * multi-modelo). engine_abi_portfolio_add_trade NO transfiere la propiedad de `trade` (a
+ * diferencia de engine_abi_create_portfolio/engine_abi_free_portfolio sobre el propio
+ * EnginePortfolio): `trade` sigue siendo responsabilidad de quien lo creo, y se puede seguir
+ * usando (engine_abi_price, otro EnginePortfolio, ...) o liberar con engine_abi_free_product
+ * en cualquier momento DESPUES de anadirlo a un Portfolio sin invalidar este ultimo -- ver el
+ * comentario de `EngineProduct` en abi.cpp (shared_ptr, no unique_ptr) para el porque.
+ *
+ * engine_abi_portfolio_price/_hessian/_hvp reutilizan los MISMOS structs de salida owned-copy
+ * que ya usan engine_abi_price_many/engine_abi_hessian/engine_abi_hvp
+ * (EnginePriceBatchResultEntry/EngineHessianEntry/EngineHvpComponent) -- un Portfolio no
+ * necesita un formato de tabla nuevo, el resultado tiene la MISMA forma que la version de un
+ * solo trade/lista de trades. Se liberan con esos mismos engine_abi_free_price_batch_results/
+ * engine_abi_free_hessian/engine_abi_free_hvp ya existentes, sin funciones _free nuevas. */
+
+typedef struct EnginePortfolio EnginePortfolio;
+
+ENGINE_ABI_API EnginePortfolio* engine_abi_create_portfolio(void);
+/* No-op silencioso (ver engine_abi_last_error) si portfolio/trade son NULL -- sin valor de
+ * retorno que comprobar (mismo molde que el boceto original de PLAN_BACKWARD.md §6.4), pero el
+ * detalle de un NULL queda igualmente en engine_abi_last_error() para quien quiera
+ * comprobarlo. */
+ENGINE_ABI_API void engine_abi_portfolio_add_trade(EnginePortfolio* portfolio, const EngineProduct* trade);
+ENGINE_ABI_API size_t engine_abi_portfolio_size(const EnginePortfolio* portfolio);
+ENGINE_ABI_API void engine_abi_free_portfolio(EnginePortfolio* portfolio);
+
+/* Envoltorio fino sobre engine::Portfolio::price (-> engine::price_many): mismos parametros que
+ * engine_abi_price_many, sustituyendo products/n_products por un unico EnginePortfolio*. Devuelve
+ * 0 en exito (*out_entries/*out_count rellenos, liberar con
+ * engine_abi_free_price_batch_results) o != 0 en error (portfolio/model/market/pricing/execution
+ * NULL, portfolio vacio, nombre de medida desconocido -- ver engine_abi_last_error). */
+ENGINE_ABI_API int engine_abi_portfolio_price(
+    const EnginePortfolio* portfolio,
+    const char** measure_names,
+    size_t n_measure_names,
+    const EngineModel* model,
+    const EngineMarketSnapshot* market,
+    const EnginePricingContext* pricing,
+    const EngineExecutionContext* execution,
+    EnginePriceBatchResultEntry** out_entries,
+    size_t* out_count
+);
+
+/* Envoltorio sobre engine::Portfolio::hessian (suma, trade a trade, los HessianReport de
+ * engine::greeks::compute_hessian -- ver el doc-comment de esa funcion y de engine/portfolio.hpp
+ * para el criterio de interseccion/skip: un par que no aparezca en TODOS los trades del
+ * portfolio nunca se suma como si el trade que falta aportara 0.0, va a *out_skipped
+ * nombrando el par y el/los indice(s) de trade exacto(s)). Mismos parametros que
+ * engine_abi_hessian, sustituyendo product por portfolio. Devuelve 0 en exito (liberar con
+ * engine_abi_free_hessian) o != 0 en error (portfolio/model/market/pricing/execution/
+ * metric_name NULL -- ver engine_abi_last_error). */
+ENGINE_ABI_API int engine_abi_portfolio_hessian(
+    const EnginePortfolio* portfolio,
+    const char* metric_name,
+    const EngineParam* metric_params,
+    size_t n_metric_params,
+    const EngineModel* model,
+    const EngineMarketSnapshot* market,
+    const EnginePricingContext* pricing,
+    const EngineExecutionContext* execution,
+    const char** risk_factors,
+    size_t n_risk_factors,
+    EngineHessianEntry** out_entries,
+    size_t* out_n_entries,
+    char*** out_skipped,
+    size_t* out_n_skipped
+);
+
+/* Envoltorio sobre engine::Portfolio::hvp (suma, trade a trade, los HvpReport de
+ * engine::greeks::compute_hvp -- mismo criterio de interseccion/skip que
+ * engine_abi_portfolio_hessian, pero por factor en vez de por par). Mismos parametros que
+ * engine_abi_hvp, sustituyendo product por portfolio. Devuelve 0 en exito (liberar con
+ * engine_abi_free_hvp) o != 0 en error (portfolio/model/market/pricing/execution/metric_name
+ * NULL, o direction_factors/direction_weights NULL/0 -- siempre obligatorios, sin auto-
+ * enumeracion, igual que engine_abi_hvp -- ver engine_abi_last_error). */
+ENGINE_ABI_API int engine_abi_portfolio_hvp(
+    const EnginePortfolio* portfolio,
+    const char* metric_name,
+    const EngineParam* metric_params,
+    size_t n_metric_params,
+    const EngineModel* model,
+    const EngineMarketSnapshot* market,
+    const EnginePricingContext* pricing,
+    const EngineExecutionContext* execution,
+    const char** direction_factors,
+    const double* direction_weights,
+    size_t n_direction,
+    EngineHvpComponent** out_components,
+    size_t* out_n_components,
+    char*** out_skipped,
+    size_t* out_n_skipped
+);
+
 ENGINE_ABI_API int engine_abi_is_gpu_backend_available(void);
 
 /* --- Errores --------------------------------------------------------------------------
