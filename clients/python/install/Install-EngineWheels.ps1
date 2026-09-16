@@ -112,16 +112,23 @@ function Get-CandidateInterpreters {
 # Una sola llamada a Python devuelve tanto version/arquitectura como -- si esta instalado -- la
 # version de engine-quant ya instalada en ese interprete (para -DiscoverOnly: saber que
 # interpretes hace falta actualizar sin lanzar un segundo proceso de Python por cada uno).
+# Comillas simples adentro a proposito (no dobles): al pasar este script multilinea como
+# argumento -c de un proceso nativo, PowerShell no escapa comillas dobles embebidas para la
+# linea de comandos de Win32 -- se "comen" y rompen la sintaxis de Python (probado: con
+# struct.calcsize("P") y print("") aqui, python.exe fallaba con "SyntaxError: unterminated
+# string literal" en TODOS los interpretes, incluido uno que si tenia engine-quant instalado,
+# y por tanto no se instalaba nada en ningun lado sin ningun error visible, porque el paso se
+# ejecuta oculto con runhidden).
 $InterpreterInfoScript = @'
 import sys, struct
 print(sys.version_info[0])
 print(sys.version_info[1])
-print(struct.calcsize("P") * 8)
+print(struct.calcsize('P') * 8)
 try:
     import importlib.metadata as m
-    print(m.version("engine-quant"))
+    print(m.version('engine-quant'))
 except Exception:
-    print("")
+    print('')
 '@
 
 function Get-InterpreterInfo {
