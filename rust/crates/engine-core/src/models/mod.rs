@@ -4,6 +4,7 @@ pub mod gbm;
 pub mod gbm_p;
 pub mod hull_white;
 pub mod hull_white_2f;
+pub mod hull_white_dual;
 
 use burn::tensor::backend::Backend;
 use burn::tensor::Tensor;

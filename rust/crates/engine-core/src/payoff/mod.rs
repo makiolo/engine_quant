@@ -37,7 +37,7 @@
 pub mod api;
 pub mod api_p;
 pub mod compile;
-mod dual;
+pub(crate) mod dual;
 pub mod eval;
 pub mod hedge;
 pub mod ir;

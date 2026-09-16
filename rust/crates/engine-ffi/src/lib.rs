@@ -189,6 +189,31 @@ mod ffi {
         d_r0: f64,
     }
 
+    /// Valor + Hessiano 4x4 completo (10 pares) del NPV determinista de Hull-White 1F
+    /// (PLAN_BACKWARD.md §9 Fase 2), ver `engine_core::models::hull_white_dual::HullWhite1FHessian`/
+    /// `hull_white_1f_hessian`. Calculado con `Dual2`/`HyperDual` NUEVOS (forward-over-forward
+    /// cerrado, no AAD reverse-mode de Burn -- Burn no anida `Autodiff<Autodiff<_>>`,
+    /// PLAN_BACKWARD.md §1.2), verificado en valor/gradiente contra `HullWhite1FGreeksResult`
+    /// (mismo modelo, dos implementaciones independientes) y en Hessiano contra bump-and-reval de
+    /// segundo orden (ver los tests de `hull_white_dual`).
+    struct HullWhite1FHessianResult {
+        value: f64,
+        d_a: f64,
+        d_b: f64,
+        d_sigma: f64,
+        d_r0: f64,
+        d_aa: f64,
+        d_bb: f64,
+        d_sigmasigma: f64,
+        d_r0r0: f64,
+        d_ab: f64,
+        d_asigma: f64,
+        d_ar0: f64,
+        d_bsigma: f64,
+        d_br0: f64,
+        d_sigmar0: f64,
+    }
+
     /// Equivalente de dos factores de `HullWhite1FGreeksResult` -- sin `d_rho` (`rho` no es un
     /// tensor diferenciable en `HullWhite2F`, ver `engine_core::api::HullWhite2FGreeks`).
     struct HullWhite2FGreeksResult {
@@ -309,6 +334,24 @@ mod ffi {
             payment_times: Vec<f64>,
             accruals: Vec<f64>,
         ) -> HullWhite1FGreeksResult;
+
+        // Hessiano cerrado de Hull-White 1F (PLAN_BACKWARD.md §9 Fase 2): valor + gradiente + las
+        // 10 entradas del Hessiano 4x4, via Dual2/HyperDual nuevos (forward-over-forward), no via
+        // Burn (que no anida Autodiff para un Hessiano, PLAN_BACKWARD.md §1.2). Mismos parámetros
+        // que `irs_hull_white_npv_all_greeks` -- ver `engine_core::models::hull_white_dual::
+        // hull_white_1f_hessian`.
+        fn hull_white_1f_hessian(
+            a: f64,
+            b: f64,
+            sigma: f64,
+            r0: f64,
+            notional: f64,
+            fixed_rate: f64,
+            use_par_rate: bool,
+            start: f64,
+            payment_times: Vec<f64>,
+            accruals: Vec<f64>,
+        ) -> HullWhite1FHessianResult;
 
         // Lote homogéneo (PLAN.md §7.17/§7.19): las cinco medidas de ENGINE.PRICE vectorizadas
         // sobre N trades del mismo tipo/calendario, sin bucle escalar en la frontera C++ --
@@ -999,6 +1042,41 @@ fn irs_hull_white_npv_all_greeks(
         a, b, sigma, r0, notional, fixed_rate, use_par_rate, start, payment_times, accruals,
     );
     ffi::HullWhite1FGreeksResult { d_a: greeks.d_a, d_b: greeks.d_b, d_sigma: greeks.d_sigma, d_r0: greeks.d_r0 }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn hull_white_1f_hessian(
+    a: f64,
+    b: f64,
+    sigma: f64,
+    r0: f64,
+    notional: f64,
+    fixed_rate: f64,
+    use_par_rate: bool,
+    start: f64,
+    payment_times: Vec<f64>,
+    accruals: Vec<f64>,
+) -> ffi::HullWhite1FHessianResult {
+    let hessian = engine_core::models::hull_white_dual::hull_white_1f_hessian(
+        a, b, sigma, r0, notional, fixed_rate, use_par_rate, start, &payment_times, &accruals,
+    );
+    ffi::HullWhite1FHessianResult {
+        value: hessian.value,
+        d_a: hessian.d_a,
+        d_b: hessian.d_b,
+        d_sigma: hessian.d_sigma,
+        d_r0: hessian.d_r0,
+        d_aa: hessian.d_aa,
+        d_bb: hessian.d_bb,
+        d_sigmasigma: hessian.d_sigmasigma,
+        d_r0r0: hessian.d_r0r0,
+        d_ab: hessian.d_ab,
+        d_asigma: hessian.d_asigma,
+        d_ar0: hessian.d_ar0,
+        d_bsigma: hessian.d_bsigma,
+        d_br0: hessian.d_br0,
+        d_sigmar0: hessian.d_sigmar0,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -110,6 +110,35 @@ HullWhite1FGreeks irs_hull_white_npv_all_greeks(
     const std::vector<double>& payment_times, const std::vector<double>& accruals
 );
 
+// Valor + Hessiano 4x4 completo (10 pares) del NPV determinista de Hull-White 1F
+// (PLAN_BACKWARD.md §9 Fase 2), via Dual2/HyperDual NUEVOS (forward-over-forward cerrado) --
+// Burn no anida Autodiff para dar un Hessiano (PLAN_BACKWARD.md §1.2), asi que esta es una
+// SEGUNDA implementacion escalar del mismo pricer, verificada en valor/gradiente contra
+// HullWhite1FGreeks (ver engine_core::models::hull_white_dual, tests de Rust) antes de confiar en
+// su Hessiano. Mismos parametros que irs_hull_white_npv_all_greeks.
+struct HullWhite1FHessian {
+    double value = 0.0;
+    double d_a = 0.0;
+    double d_b = 0.0;
+    double d_sigma = 0.0;
+    double d_r0 = 0.0;
+    double d_aa = 0.0;
+    double d_bb = 0.0;
+    double d_sigmasigma = 0.0;
+    double d_r0r0 = 0.0;
+    double d_ab = 0.0;
+    double d_asigma = 0.0;
+    double d_ar0 = 0.0;
+    double d_bsigma = 0.0;
+    double d_br0 = 0.0;
+    double d_sigmar0 = 0.0;
+};
+HullWhite1FHessian hull_white_1f_hessian(
+    double a, double b, double sigma, double r0,
+    double notional, double fixed_rate, bool use_par_rate, double start,
+    const std::vector<double>& payment_times, const std::vector<double>& accruals
+);
+
 // Lote homogéneo (PLAN.md §7.17/§7.19): las mismas cuatro medidas de arriba vectorizadas sobre
 // N trades del mismo calendario -- notionals/fixed_rates son columnas (un valor por trade), sin
 // use_par_rate (cada trade del lote debe traer su fixed_rate explícito). irs_hull_white_npv_
