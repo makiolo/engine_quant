@@ -14,11 +14,17 @@ sigue disponible para quien la prefiera o quiera automatizarla de otra forma.
   `-Optional` para no fallar si la máquina no tiene Excel instalado.
 - **Paquete de Python** (casilla marcable en el asistente): detecta todos los intérpretes de
   Python de 64 bits instalados (vía el registro, PEP 514, y el lanzador `py` si está
-  presente) e instala en cada uno la rueda que le corresponda — internamente ejecuta
-  `Install-EngineWheels.ps1` (`clients/python/install/`), sin necesitar una lista fija de
+  presente) y muestra una página propia del asistente ("Intérpretes de Python") con uno
+  marcable por cada uno — todos vienen premarcados, pero se puede desmarcar el que no
+  interese, o pulsar "Añadir manualmente..." para señalar con un selector de fichero un
+  `python.exe` que no se haya detectado solo (p.ej. un Miniconda/Anaconda instalado "solo para
+  mí" que no se registró vía PEP 514 ni el lanzador `py`). Solo instala en los que queden
+  marcados al llegar a "Instalar" — internamente ejecuta `Install-EngineWheels.ps1`
+  (`clients/python/install/`) con `-TargetPythonsFile`, sin necesitar una lista fija de
   versiones: cualquier intérprete ≥ 3.10 para el que la release incluya una rueda
-  (`cp310`–`cp314` hoy, futuras versiones de Python en cuanto tengan su rueda) se detecta
-  automáticamente.
+  (`cp310`–`cp314` hoy, futuras versiones de Python en cuanto tengan su rueda) se puede elegir.
+  Una instalación desatendida (`/VERYSILENT`) no muestra esta página pero se comporta igual
+  que antes: instala en todos los intérpretes detectados válidos.
 - **Desinstalar**: Panel de control → Programas y características → "Motor XVA
   (engine-quant)" → Desinstalar. Deshace exactamente lo anterior (desregistra el complemento,
   ejecuta `pip uninstall` en los mismos intérpretes donde se instaló — un manifiesto interno
@@ -77,3 +83,13 @@ silencio: `"<carpeta de instalación>\unins000.exe" /VERYSILENT /SUPPRESSMSGBOXE
   por nombre de fichero (`*-cp<major><minor>-cp<major><minor>-*.whl`) — añadir una versión de
   Python nueva a la matriz de `build-wheels` (`.github/workflows/release.yml`) es lo único
   que hace falta para que el instalador la soporte, sin tocar este `.iss` ni el script.
+- **Página "Intérpretes de Python" (`[Code]` en `EngineQuantSetup.iss`)**: para poder listar
+  los intérpretes antes de que `[Files]` copie nada a `{app}\wheels`, el `.iss` embebe una
+  copia de `Install-EngineWheels.ps1` con `Flags: dontcopy` y la ejecuta con `-DiscoverOnly
+  -DiscoverOutputPath` durante el asistente (misma función `Get-CandidateInterpreters` que la
+  instalación real, no duplicada en Pascal Script). Lo que queda marcado se vuelca a
+  `{tmp}\selected_pythons.txt` justo antes de instalar (`CurStepChanged(ssInstall)`), y el
+  paso `[Run]` se lo pasa a `Install-EngineWheels.ps1` vía `-TargetPythonsFile`. Si ese
+  fichero no existe (página saltada, p.ej. `/VERYSILENT`), el script cae de vuelta a
+  autodetectar todos los intérpretes válidos — comportamiento idéntico al de antes de esta
+  página.

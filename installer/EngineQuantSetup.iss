@@ -58,6 +58,11 @@ Type: filesandordirs; Name: "{app}\xll"
 Source: "payload\xll\*"; DestDir: "{app}\xll"; Flags: ignoreversion recursesubdirs; Components: excel
 Source: "payload\wheels\*"; DestDir: "{app}\wheels"; Flags: ignoreversion recursesubdirs; Components: python
 
+; Copia embebida (no se instala en {app}) solo para poder ejecutar -DiscoverOnly durante el
+; asistente, antes de que [Files] copie nada a {app}\wheels -- ver la pagina "Interpretes de
+; Python" en [Code] mas abajo.
+Source: "..\clients\python\install\Install-EngineWheels.ps1"; DestDir: "{tmp}"; Flags: dontcopy
+
 ; runascurrentuser: tanto el complemento de Excel (registro en HKCU) como los interpretes de
 ; Python "solo para mi" del usuario deben instalarse/desinstalarse como el usuario que lanzo el
 ; instalador, no como el token elevado de administrador (PrivilegesRequired=admin arriba).
@@ -69,9 +74,13 @@ Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; \
     StatusMsg: "Registrando el complemento de Excel..."; \
     Components: excel; Flags: runhidden waituntilterminated runascurrentuser
 
+; -TargetPythonsFile: los interpretes que el usuario eligio/anadio en la pagina "Interpretes de
+; Python" del asistente (ver [Code]). Si esa pagina se salto (instalacion desatendida sin
+; interaccion, p.ej. /VERYSILENT) el fichero no existe y el script cae de vuelta a autodetectar
+; todos los interpretes validos, igual que antes.
 Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; \
-    Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\wheels\Install-EngineWheels.ps1"" -WheelsDir ""{app}\wheels"" -ManifestPath ""{app}\wheels\installed_pythons.txt"""; \
-    StatusMsg: "Instalando en los interpretes de Python detectados..."; \
+    Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\wheels\Install-EngineWheels.ps1"" -WheelsDir ""{app}\wheels"" -ManifestPath ""{app}\wheels\installed_pythons.txt"" -TargetPythonsFile ""{tmp}\selected_pythons.txt"""; \
+    StatusMsg: "Instalando en los interpretes de Python elegidos..."; \
     Components: python; Flags: runhidden waituntilterminated runascurrentuser
 
 [UninstallRun]
@@ -82,3 +91,131 @@ Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; \
 Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; \
     Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\wheels\Uninstall-EngineWheels.ps1"" -ManifestPath ""{app}\wheels\installed_pythons.txt"""; \
     Components: python; Flags: runhidden waituntilterminated runascurrentuser; RunOnceId: "UninstallPythonWheels"
+
+; Pagina extra del asistente, entre "Elige componentes" y "Elige carpeta de destino": deja
+; elegir en cuales interpretes de Python instalar (en vez de instalar siempre en TODOS los
+; detectados sin preguntar, que era el comportamiento anterior) y anadir a mano uno que el
+; autodetectado no encuentre (p.ej. un Miniconda/Anaconda que no se registro via PEP 514 ni
+; el lanzador `py`). Se salta por completo si el componente "python" no esta marcado.
+[Code]
+var
+  PythonPage: TWizardPage;
+  PythonList: TNewCheckListBox;
+  PythonAddButton: TNewButton;
+  PythonDiscovered: Boolean;
+
+procedure PythonAddButtonClick(Sender: TObject);
+var
+  FileName: String;
+begin
+  FileName := '';
+  if GetOpenFileName('Selecciona python.exe', FileName, '', 'python.exe|python.exe|Todos los ficheros|*.*', '') then
+    PythonList.AddCheckBox(FileName, '(anadido manualmente)', 0, True, True, False, True, nil);
+end;
+
+// Ejecuta Install-EngineWheels.ps1 -DiscoverOnly (misma logica de deteccion que la instalacion
+// real, sin duplicarla aqui en Pascal Script) y rellena PythonList con lo que encuentre, todo
+// marcado por defecto -- asi una instalacion desatendida (/VERYSILENT) que visite esta pagina
+// sin interaccion se comporta igual que antes: instala en todos los detectados.
+procedure DiscoverPythons;
+var
+  ScriptPath, OutPath, Params: String;
+  ResultCode: Integer;
+  Lines, Parts: TStringList;
+  I: Integer;
+begin
+  ExtractTemporaryFile('Install-EngineWheels.ps1');
+  ScriptPath := ExpandConstant('{tmp}\Install-EngineWheels.ps1');
+  OutPath := ExpandConstant('{tmp}\pythons_discovered.txt');
+  Params := '-NoProfile -ExecutionPolicy Bypass -File "' + ScriptPath + '" -DiscoverOnly -DiscoverOutputPath "' + OutPath + '"';
+  WizardForm.Cursor := crHourGlass;
+  try
+    Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'), Params, '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  finally
+    WizardForm.Cursor := crDefault;
+  end;
+
+  if not FileExists(OutPath) then Exit;
+
+  Lines := TStringList.Create;
+  Parts := TStringList.Create;
+  try
+    Lines.LoadFromFile(OutPath);
+    for I := 0 to Lines.Count - 1 do
+    begin
+      if Trim(Lines[I]) = '' then Continue;
+      Parts.Delimiter := '|';
+      Parts.StrictDelimiter := True;
+      Parts.DelimitedText := Lines[I];
+      if Parts.Count < 3 then Continue;
+      PythonList.AddCheckBox(Parts[0], '(Python ' + Parts[1] + ', ' + Parts[2] + ' bits)', 0, True, True, False, True, nil);
+    end;
+  finally
+    Lines.Free;
+    Parts.Free;
+  end;
+end;
+
+procedure InitializeWizard;
+begin
+  PythonPage := CreateCustomPage(wpSelectComponents, 'Interpretes de Python',
+    'Elige en cuales instalar engine-quant, o anade uno que no se haya detectado automaticamente.');
+
+  PythonList := TNewCheckListBox.Create(PythonPage);
+  PythonList.Parent := PythonPage.Surface;
+  PythonList.Left := 0;
+  PythonList.Top := 0;
+  PythonList.Width := PythonPage.SurfaceWidth;
+  PythonList.Height := PythonPage.SurfaceHeight - ScaleY(31);
+  PythonList.Flat := True;
+
+  PythonAddButton := TNewButton.Create(PythonPage);
+  PythonAddButton.Parent := PythonPage.Surface;
+  PythonAddButton.Caption := 'Anadir manualmente...';
+  PythonAddButton.Width := WizardForm.CalculateButtonWidth([PythonAddButton.Caption]);
+  PythonAddButton.Height := ScaleY(23);
+  PythonAddButton.Left := 0;
+  PythonAddButton.Top := PythonList.Top + PythonList.Height + ScaleY(8);
+  PythonAddButton.OnClick := @PythonAddButtonClick;
+
+  PythonDiscovered := False;
+end;
+
+function ShouldSkipPage(PageID: Integer): Boolean;
+begin
+  Result := False;
+  if (PythonPage <> nil) and (PageID = PythonPage.ID) then
+    Result := not IsComponentSelected('python');
+end;
+
+procedure CurPageChanged(CurPageID: Integer);
+begin
+  if (PythonPage <> nil) and (CurPageID = PythonPage.ID) and (not PythonDiscovered) then
+  begin
+    DiscoverPythons;
+    PythonDiscovered := True;
+    if PythonList.Items.Count = 0 then
+      PythonList.AddCheckBox('(Ninguno detectado automaticamente; usa "Anadir manualmente...")', '', 0, False, False, False, False, nil);
+  end;
+end;
+
+// Vuelca lo marcado en PythonList a {tmp}\selected_pythons.txt justo antes de instalar, para que
+// el paso [Run] de Install-EngineWheels.ps1 lo lea via -TargetPythonsFile.
+procedure CurStepChanged(CurStep: TSetupStep);
+var
+  I: Integer;
+  Selected: TStringList;
+begin
+  if (CurStep = ssInstall) and (PythonList <> nil) then
+  begin
+    Selected := TStringList.Create;
+    try
+      for I := 0 to PythonList.Items.Count - 1 do
+        if PythonList.Checked[I] then
+          Selected.Add(PythonList.Items[I]);
+      Selected.SaveToFile(ExpandConstant('{tmp}\selected_pythons.txt'));
+    finally
+      Selected.Free;
+    end;
+  end;
+end;

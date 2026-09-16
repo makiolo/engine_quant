@@ -1,8 +1,9 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    Instala `engine-quant` en todos los interpretes de Python de 64 bits detectados que
-    tengan una rueda compatible en esta carpeta.
+    Instala `engine-quant` en los interpretes de Python de 64 bits que tengan una rueda
+    compatible en esta carpeta: por defecto, en todos los detectados; con -TargetPythonsFile,
+    solo en los indicados ahi.
 .DESCRIPTION
     Descubre interpretes de Python instalados via el registro (PEP 514,
     HKLM/HKCU\SOFTWARE\Python\PythonCore, incluida la vista de 32 bits en un Windows de 64) y,
@@ -20,13 +21,29 @@
     Fichero donde se anota en que interpretes se instalo, para que
     Uninstall-EngineWheels.ps1 sepa de donde quitarlo despues. Por defecto,
     installed_pythons.txt junto a este script.
+.PARAMETER TargetPythonsFile
+    Fichero con una ruta a python.exe por linea: si se indica, instala EXACTAMENTE en esos
+    interpretes (los que el usuario eligio, p.ej. en el asistente del instalador .exe) en vez
+    de autodetectar todos los de la maquina. Cada ruta se sigue validando igual (version,
+    arquitectura, rueda disponible). Si el fichero no existe o esta vacio, se ignora y se
+    autodetecta como siempre.
+.PARAMETER DiscoverOnly
+    En vez de instalar, solo detecta los interpretes candidatos y escribe una linea por cada
+    uno en -DiscoverOutputPath con el formato "ruta|major.minor|bits", y termina. Pensado para
+    que el asistente del instalador .exe rellene la lista de interpretes entre los que elegir
+    (ver EngineQuantSetup.iss) sin duplicar la logica de deteccion en Pascal Script.
+.PARAMETER DiscoverOutputPath
+    Fichero de salida para -DiscoverOnly.
 .EXAMPLE
     .\Install-EngineWheels.ps1
 #>
 [CmdletBinding()]
 param(
     [string]$WheelsDir,
-    [string]$ManifestPath
+    [string]$ManifestPath,
+    [string]$TargetPythonsFile,
+    [switch]$DiscoverOnly,
+    [string]$DiscoverOutputPath
 )
 
 $ErrorActionPreference = "Stop"
@@ -100,8 +117,27 @@ function Get-InterpreterInfo {
     }
 }
 
-$candidates = Get-CandidateInterpreters
-Write-Host "Interpretes de Python detectados: $($candidates.Count)"
+if ($DiscoverOnly) {
+    if ([string]::IsNullOrEmpty($DiscoverOutputPath)) {
+        throw "Falta -DiscoverOutputPath con -DiscoverOnly"
+    }
+    $lines = New-Object System.Collections.Generic.List[string]
+    foreach ($exe in (Get-CandidateInterpreters)) {
+        $info = Get-InterpreterInfo -PythonExe $exe
+        if (-not $info) { continue }
+        $lines.Add("$($info.Path)|$($info.Major).$($info.Minor)|$($info.Bits)")
+    }
+    Set-Content -Path $DiscoverOutputPath -Value $lines -Encoding UTF8
+    return
+}
+
+if (-not [string]::IsNullOrEmpty($TargetPythonsFile) -and (Test-Path $TargetPythonsFile)) {
+    $candidates = Get-Content $TargetPythonsFile | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" }
+    Write-Host "Interpretes elegidos: $($candidates.Count)"
+} else {
+    $candidates = Get-CandidateInterpreters
+    Write-Host "Interpretes de Python detectados: $($candidates.Count)"
+}
 
 $manifestLines = New-Object System.Collections.Generic.List[string]
 $installedAny = $false

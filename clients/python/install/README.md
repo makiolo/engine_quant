@@ -1,13 +1,18 @@
 # Instalador del paquete de Python (multi-intérprete)
 
-Instala `engine-quant` en todos los intérpretes de Python de 64 bits detectados en la
-máquina, sin necesitar saber de antemano qué versiones hay instaladas. Usado tanto desde el
-instalador `.exe` (`installer/EngineQuantSetup.iss`) como de forma independiente, por ejemplo
-en un despliegue automatizado.
+Instala `engine-quant` en los intérpretes de Python de 64 bits detectados en la máquina, sin
+necesitar saber de antemano qué versiones hay instaladas. Usado tanto desde el instalador
+`.exe` (`installer/EngineQuantSetup.iss`, que deja elegir en cuáles vía una página del
+asistente — ver `installer/README.md`) como de forma independiente, por ejemplo en un
+despliegue automatizado.
 
 ```powershell
-# Instalar (en cada .whl de esta carpeta, en el interprete >= 3.10 que le corresponda)
+# Instalar (en cada .whl de esta carpeta, en todo interprete >= 3.10 detectado que le corresponda)
 .\Install-EngineWheels.ps1
+
+# Instalar solo en los intérpretes indicados (uno por línea en este fichero), en vez de
+# autodetectar todos los de la máquina
+.\Install-EngineWheels.ps1 -TargetPythonsFile mis_pythons.txt
 
 # Quitar (de los mismos interpretes donde se instaló, via el manifiesto que dejó el anterior)
 .\Uninstall-EngineWheels.ps1
