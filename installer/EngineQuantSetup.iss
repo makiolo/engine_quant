@@ -113,21 +113,64 @@ begin
     PythonList.AddCheckBox(FileName, '(anadido manualmente)', 0, True, True, False, True, nil);
 end;
 
+// Manifiesto que dejo una instalacion anterior (mismo AppId -> mismo {app}): un python.exe por
+// linea. Se usa para (a) sumarlo como candidato extra en la deteccion -- asi un interprete que
+// ya no se autodetecta solo (p.ej. un Miniconda "anadido manualmente" la vez anterior) sigue
+// apareciendo -- y (b) premarcar en la lista exactamente lo que se instalo la ultima vez, en
+// vez de marcarlo todo. Devuelve una lista vacia (no nil) si no hay instalacion anterior.
+function LoadPreviousManifest: TStringList;
+var
+  Raw: TStringList;
+  ManifestFile: String;
+  I: Integer;
+  S: String;
+begin
+  Result := TStringList.Create;
+  Result.CaseSensitive := False;
+  ManifestFile := ExpandConstant('{app}\wheels\installed_pythons.txt');
+  if not FileExists(ManifestFile) then Exit;
+  Raw := TStringList.Create;
+  try
+    Raw.LoadFromFile(ManifestFile);
+    for I := 0 to Raw.Count - 1 do
+    begin
+      S := Trim(Raw[I]);
+      if S <> '' then Result.Add(S);
+    end;
+  finally
+    Raw.Free;
+  end;
+end;
+
 // Ejecuta Install-EngineWheels.ps1 -DiscoverOnly (misma logica de deteccion que la instalacion
-// real, sin duplicarla aqui en Pascal Script) y rellena PythonList con lo que encuentre, todo
-// marcado por defecto -- asi una instalacion desatendida (/VERYSILENT) que visite esta pagina
-// sin interaccion se comporta igual que antes: instala en todos los detectados.
+// real, sin duplicarla aqui en Pascal Script) y rellena PythonList con lo que encuentre.
+// - Primera instalacion (sin manifiesto previo en {app}\wheels): todo marcado por defecto, para
+//   que una instalacion desatendida (/VERYSILENT) que visite esta pagina sin interaccion siga
+//   instalando en todos los detectados, como antes de que existiera esta pagina.
+// - Actualizacion (hay manifiesto previo): solo vienen marcados los interpretes en los que se
+//   instalo la ultima vez -- si mas tarde se instala en otro distinto, ese pasa a ser "el
+//   ultimo instalado" y sera el premarcado la proxima vez (el manifiesto se reescribe en cada
+//   instalacion con lo que quedo efectivamente instalado).
+// Tambien muestra, por interprete, si ya tiene engine-quant instalado y que version (para saber
+// cuales hace falta actualizar) vs. la version que se va a instalar ({#MyAppVersion}).
 procedure DiscoverPythons;
 var
-  ScriptPath, OutPath, Params: String;
+  ScriptPath, OutPath, ManifestFile, Params, InstalledVersion, SubItem: String;
   ResultCode: Integer;
-  Lines, Parts: TStringList;
+  Lines, Parts, PrevManifest: TStringList;
   I: Integer;
+  HasPrevManifest, ItemChecked: Boolean;
 begin
   ExtractTemporaryFile('Install-EngineWheels.ps1');
   ScriptPath := ExpandConstant('{tmp}\Install-EngineWheels.ps1');
   OutPath := ExpandConstant('{tmp}\pythons_discovered.txt');
+  ManifestFile := ExpandConstant('{app}\wheels\installed_pythons.txt');
+  HasPrevManifest := FileExists(ManifestFile);
+
   Params := '-NoProfile -ExecutionPolicy Bypass -File "' + ScriptPath + '" -DiscoverOnly -DiscoverOutputPath "' + OutPath + '"';
+  if HasPrevManifest then
+    Params := Params + ' -ExtraCandidatesFile "' + ManifestFile + '"';
+
   WizardForm.Cursor := crHourGlass;
   try
     Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'), Params, '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
@@ -137,6 +180,7 @@ begin
 
   if not FileExists(OutPath) then Exit;
 
+  PrevManifest := LoadPreviousManifest;
   Lines := TStringList.Create;
   Parts := TStringList.Create;
   try
@@ -148,11 +192,22 @@ begin
       Parts.StrictDelimiter := True;
       Parts.DelimitedText := Lines[I];
       if Parts.Count < 3 then Continue;
-      PythonList.AddCheckBox(Parts[0], '(Python ' + Parts[1] + ', ' + Parts[2] + ' bits)', 0, True, True, False, True, nil);
+
+      if Parts.Count >= 4 then InstalledVersion := Parts[3] else InstalledVersion := '';
+      if InstalledVersion = '' then
+        SubItem := '(Python ' + Parts[1] + ', ' + Parts[2] + ' bits -- no instalado)'
+      else if InstalledVersion = '{#MyAppVersion}' then
+        SubItem := '(Python ' + Parts[1] + ', ' + Parts[2] + ' bits -- ya al dia, v' + InstalledVersion + ')'
+      else
+        SubItem := '(Python ' + Parts[1] + ', ' + Parts[2] + ' bits -- v' + InstalledVersion + ', se actualizara a v{#MyAppVersion})';
+
+      ItemChecked := (not HasPrevManifest) or (PrevManifest.IndexOf(Parts[0]) >= 0);
+      PythonList.AddCheckBox(Parts[0], SubItem, 0, ItemChecked, True, False, True, nil);
     end;
   finally
     Lines.Free;
     Parts.Free;
+    PrevManifest.Free;
   end;
 end;
 
@@ -185,7 +240,7 @@ function ShouldSkipPage(PageID: Integer): Boolean;
 begin
   Result := False;
   if (PythonPage <> nil) and (PageID = PythonPage.ID) then
-    Result := not IsComponentSelected('python');
+    Result := not WizardIsComponentSelected('python');
 end;
 
 procedure CurPageChanged(CurPageID: Integer);

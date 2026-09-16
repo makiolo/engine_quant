@@ -29,11 +29,18 @@
     autodetecta como siempre.
 .PARAMETER DiscoverOnly
     En vez de instalar, solo detecta los interpretes candidatos y escribe una linea por cada
-    uno en -DiscoverOutputPath con el formato "ruta|major.minor|bits", y termina. Pensado para
-    que el asistente del instalador .exe rellene la lista de interpretes entre los que elegir
-    (ver EngineQuantSetup.iss) sin duplicar la logica de deteccion en Pascal Script.
+    uno en -DiscoverOutputPath con el formato "ruta|major.minor|bits|version_de_engine_quant_ya_instalada_o_vacio",
+    y termina. Pensado para que el asistente del instalador .exe rellene la lista de
+    interpretes entre los que elegir (ver EngineQuantSetup.iss) sin duplicar la logica de
+    deteccion en Pascal Script. El cuarto campo deja ver, por interprete, si ya tiene
+    engine-quant instalado y que version, para saber cuales hace falta actualizar.
 .PARAMETER DiscoverOutputPath
     Fichero de salida para -DiscoverOnly.
+.PARAMETER ExtraCandidatesFile
+    Solo con -DiscoverOnly: fichero adicional con una ruta a python.exe por linea (rutas que
+    ya no se autodetectan solas y aun asi interesa ofrecer, p.ej. el manifiesto de una
+    instalacion anterior -- ver EngineQuantSetup.iss) que se suma a los autodetectados. Una
+    ruta que ya no exista se descarta sin error.
 .EXAMPLE
     .\Install-EngineWheels.ps1
 #>
@@ -43,7 +50,8 @@ param(
     [string]$ManifestPath,
     [string]$TargetPythonsFile,
     [switch]$DiscoverOnly,
-    [string]$DiscoverOutputPath
+    [string]$DiscoverOutputPath,
+    [string]$ExtraCandidatesFile
 )
 
 $ErrorActionPreference = "Stop"
@@ -101,16 +109,32 @@ function Get-CandidateInterpreters {
     $paths | Where-Object { $_ -and (Test-Path $_) } | Select-Object -Unique
 }
 
+# Una sola llamada a Python devuelve tanto version/arquitectura como -- si esta instalado -- la
+# version de engine-quant ya instalada en ese interprete (para -DiscoverOnly: saber que
+# interpretes hace falta actualizar sin lanzar un segundo proceso de Python por cada uno).
+$InterpreterInfoScript = @'
+import sys, struct
+print(sys.version_info[0])
+print(sys.version_info[1])
+print(struct.calcsize("P") * 8)
+try:
+    import importlib.metadata as m
+    print(m.version("engine-quant"))
+except Exception:
+    print("")
+'@
+
 function Get-InterpreterInfo {
     param([string]$PythonExe)
     try {
-        $lines = & $PythonExe -c "import sys, struct; print(sys.version_info[0]); print(sys.version_info[1]); print(struct.calcsize('P') * 8)" 2>$null
+        $lines = & $PythonExe -c $InterpreterInfoScript 2>$null
         if ($LASTEXITCODE -ne 0 -or -not $lines -or $lines.Count -lt 3) { return $null }
         [pscustomobject]@{
-            Path  = $PythonExe
-            Major = [int]$lines[0]
-            Minor = [int]$lines[1]
-            Bits  = [int]$lines[2]
+            Path            = $PythonExe
+            Major           = [int]$lines[0]
+            Minor           = [int]$lines[1]
+            Bits            = [int]$lines[2]
+            InstalledVersion = if ($lines.Count -ge 4) { $lines[3] } else { "" }
         }
     } catch {
         return $null
@@ -121,11 +145,19 @@ if ($DiscoverOnly) {
     if ([string]::IsNullOrEmpty($DiscoverOutputPath)) {
         throw "Falta -DiscoverOutputPath con -DiscoverOnly"
     }
+    $candidateExes = New-Object System.Collections.Generic.List[string]
+    Get-CandidateInterpreters | ForEach-Object { $candidateExes.Add($_) }
+    if (-not [string]::IsNullOrEmpty($ExtraCandidatesFile) -and (Test-Path $ExtraCandidatesFile)) {
+        Get-Content $ExtraCandidatesFile | ForEach-Object { $_.Trim() } |
+            Where-Object { $_ -ne "" -and (Test-Path $_) } |
+            ForEach-Object { $candidateExes.Add($_) }
+    }
+
     $lines = New-Object System.Collections.Generic.List[string]
-    foreach ($exe in (Get-CandidateInterpreters)) {
+    foreach ($exe in ($candidateExes | Select-Object -Unique)) {
         $info = Get-InterpreterInfo -PythonExe $exe
         if (-not $info) { continue }
-        $lines.Add("$($info.Path)|$($info.Major).$($info.Minor)|$($info.Bits)")
+        $lines.Add("$($info.Path)|$($info.Major).$($info.Minor)|$($info.Bits)|$($info.InstalledVersion)")
     }
     Set-Content -Path $DiscoverOutputPath -Value $lines -Encoding UTF8
     return

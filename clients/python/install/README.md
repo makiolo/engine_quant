@@ -39,3 +39,17 @@ incluya rueda, se omite con un mensaje explicativo, sin detener el resto.
 indique `-ManifestPath`) en qué intérpretes instaló el paquete, para que
 `Uninstall-EngineWheels.ps1` sepa exactamente de dónde quitarlo después sin tener que repetir
 todo el proceso de detección ni arriesgarse a desinstalar de un intérprete que nunca lo tuvo.
+El instalador `.exe` también usa este mismo fichero para saber, en una actualización, en qué
+intérpretes se instaló la vez anterior y premarcar exactamente esos en su página de selección
+(ver "Persistencia de la selección entre instalaciones" en `installer/README.md`).
+
+## Modo de solo detección (`-DiscoverOnly`)
+
+`.\Install-EngineWheels.ps1 -DiscoverOnly -DiscoverOutputPath candidatos.txt` no instala nada:
+escribe una línea por intérprete candidato con el formato
+`ruta|major.minor|bits|version_de_engine_quant_ya_instalada_o_vacio` — el cuarto campo permite
+saber, sin instalar nada, qué intérpretes ya tienen el paquete y con qué versión (para decidir
+cuáles hace falta actualizar). Con `-ExtraCandidatesFile` se pueden sumar rutas que ya no se
+autodetectan solas (p.ej. un manifiesto de una instalación anterior). Pensado para que
+`installer/EngineQuantSetup.iss` rellene su página de selección sin duplicar la lógica de
+detección en Pascal Script.

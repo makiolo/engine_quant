@@ -15,16 +15,24 @@ sigue disponible para quien la prefiera o quiera automatizarla de otra forma.
 - **Paquete de Python** (casilla marcable en el asistente): detecta todos los intérpretes de
   Python de 64 bits instalados (vía el registro, PEP 514, y el lanzador `py` si está
   presente) y muestra una página propia del asistente ("Intérpretes de Python") con uno
-  marcable por cada uno — todos vienen premarcados, pero se puede desmarcar el que no
-  interese, o pulsar "Añadir manualmente..." para señalar con un selector de fichero un
-  `python.exe` que no se haya detectado solo (p.ej. un Miniconda/Anaconda instalado "solo para
-  mí" que no se registró vía PEP 514 ni el lanzador `py`). Solo instala en los que queden
-  marcados al llegar a "Instalar" — internamente ejecuta `Install-EngineWheels.ps1`
-  (`clients/python/install/`) con `-TargetPythonsFile`, sin necesitar una lista fija de
-  versiones: cualquier intérprete ≥ 3.10 para el que la release incluya una rueda
-  (`cp310`–`cp314` hoy, futuras versiones de Python en cuanto tengan su rueda) se puede elegir.
-  Una instalación desatendida (`/VERYSILENT`) no muestra esta página pero se comporta igual
-  que antes: instala en todos los intérpretes detectados válidos.
+  marcable por cada uno, indicando junto a cada uno si ya tiene `engine-quant` instalado y qué
+  versión ("no instalado" / "ya al día, vX.Y.Z" / "vX.Y.Z, se actualizará a vA.B.C") — se puede
+  desmarcar el que no interese, o pulsar "Añadir manualmente..." para señalar con un selector
+  de fichero un `python.exe` que no se haya detectado solo (p.ej. un Miniconda/Anaconda
+  instalado "solo para mí" que no se registró vía PEP 514 ni el lanzador `py`). Solo instala en
+  los que queden marcados al llegar a "Instalar" — internamente ejecuta
+  `Install-EngineWheels.ps1` (`clients/python/install/`) con `-TargetPythonsFile`, sin
+  necesitar una lista fija de versiones: cualquier intérprete ≥ 3.10 para el que la release
+  incluya una rueda (`cp310`–`cp314` hoy, futuras versiones de Python en cuanto tengan su
+  rueda) se puede elegir.
+  - **Preselección**: en la primera instalación vienen todos marcados. En una actualización,
+    solo vienen premarcados los intérpretes en los que se instaló la última vez (leído del
+    manifiesto que dejó esa instalación anterior) — si más adelante se instala en uno distinto
+    (p.ej. se cambia de Python), ese pasa a ser "el último instalado" y será el premarcado la
+    próxima vez, porque el manifiesto se reescribe en cada instalación con lo que quedó
+    efectivamente instalado.
+  - Una instalación desatendida (`/VERYSILENT`) no muestra esta página pero se comporta igual
+    que antes: instala en todos los intérpretes detectados válidos.
 - **Desinstalar**: Panel de control → Programas y características → "Motor XVA
   (engine-quant)" → Desinstalar. Deshace exactamente lo anterior (desregistra el complemento,
   ejecuta `pip uninstall` en los mismos intérpretes donde se instaló — un manifiesto interno
@@ -87,9 +95,18 @@ silencio: `"<carpeta de instalación>\unins000.exe" /VERYSILENT /SUPPRESSMSGBOXE
   los intérpretes antes de que `[Files]` copie nada a `{app}\wheels`, el `.iss` embebe una
   copia de `Install-EngineWheels.ps1` con `Flags: dontcopy` y la ejecuta con `-DiscoverOnly
   -DiscoverOutputPath` durante el asistente (misma función `Get-CandidateInterpreters` que la
-  instalación real, no duplicada en Pascal Script). Lo que queda marcado se vuelca a
-  `{tmp}\selected_pythons.txt` justo antes de instalar (`CurStepChanged(ssInstall)`), y el
-  paso `[Run]` se lo pasa a `Install-EngineWheels.ps1` vía `-TargetPythonsFile`. Si ese
+  instalación real, no duplicada en Pascal Script; el cuarto campo que devuelve cada línea es
+  la versión de `engine-quant` ya instalada en ese intérprete, o vacío). Lo que queda marcado
+  se vuelca a `{tmp}\selected_pythons.txt` justo antes de instalar (`CurStepChanged(ssInstall)`),
+  y el paso `[Run]` se lo pasa a `Install-EngineWheels.ps1` vía `-TargetPythonsFile`. Si ese
   fichero no existe (página saltada, p.ej. `/VERYSILENT`), el script cae de vuelta a
   autodetectar todos los intérpretes válidos — comportamiento idéntico al de antes de esta
   página.
+- **Persistencia de la selección entre instalaciones**: `{app}\wheels\installed_pythons.txt`
+  (el manifiesto que ya usaba `Uninstall-EngineWheels.ps1` para saber de dónde quitar el
+  paquete) es también la fuente de verdad de "qué se instaló la última vez". `DiscoverPythons`
+  lo lee (`LoadPreviousManifest`) *antes* de que `[InstallDelete]` borre `{app}\wheels` para
+  copiar los ficheros nuevos — se lee durante la navegación del asistente, no durante la
+  instalación en sí, así que todavía existe — y lo pasa también como
+  `-ExtraCandidatesFile` a la detección, para que un intérprete "añadido a mano" en una
+  instalación anterior (que sigue sin autodetectarse solo) reaparezca igualmente en la lista.
