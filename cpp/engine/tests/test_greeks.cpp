@@ -1183,6 +1183,11 @@ TEST(GreeksFase6Test, GammaOfACallMatchesClosedFormSecondDerivative) {
 
     GreekRequest request = payoff_price_q_request("spot");
     request.order = GreekOrder{2, std::nullopt};
+    // PLAN_HYPERDUAL.md §5: `method=Auto` ahora prefiere Pathwise (likelihood ratio) para esta
+    // combinacion (ver GreeksHyperdualTest.AutoResolvesGammaOfACallToLikelihoodRatioPathwise) --
+    // este test fija `BumpAndReval` explicito para seguir verificando el estencil GENERICO de 3
+    // puntos independientemente de que prefiera Auto.
+    request.method = GreekMethod::BumpAndReval;
 
     engine::greeks::GreekResult via_greek = engine::greeks::compute_greek(
         registries, request, model, product, flat_market(), pricing_context(500'000, 7), cpu_execution()
@@ -1193,6 +1198,7 @@ TEST(GreeksFase6Test, GammaOfACallMatchesClosedFormSecondDerivative) {
     EXPECT_TRUE(via_greek.has_scalar);
     EXPECT_EQ(via_greek.order.order, 2);
     EXPECT_FALSE(via_greek.order.cross_factor.has_value());
+    EXPECT_EQ(via_greek.method_used, GreekMethod::BumpAndReval);
     EXPECT_GT(via_greek.value, 0.0) << "la Gamma de una call vainilla es siempre positiva";
     EXPECT_NEAR(via_greek.value, analytic_gamma, 0.01)
         << "Greek=" << via_greek.value << " analytic=" << analytic_gamma;
@@ -1211,6 +1217,11 @@ TEST(GreeksFase6Test, VannaOfACallHasExpectedSignAndMatchesClosedFormMixedFinite
 
     GreekRequest request = payoff_price_q_request("spot");
     request.order = GreekOrder{1, RiskFactor{RiskFactorKind::ModelParameter, "model", "volatility", std::nullopt}};
+    // PLAN_HYPERDUAL.md §5: `method=Auto` ahora prefiere Pathwise (likelihood ratio) para esta
+    // combinacion (ver GreeksHyperdualTest.AutoResolvesVannaOfACallToLikelihoodRatioPathwise) --
+    // este test fija `BumpAndReval` explicito para seguir verificando el estencil GENERICO de 4
+    // puntos (que ademas es el unico que reporta `bump_used`/`warnings` para el cross_factor).
+    request.method = GreekMethod::BumpAndReval;
 
     engine::greeks::GreekResult via_greek = engine::greeks::compute_greek(
         registries, request, model, product, flat_market(), pricing_context(500'000, 7), cpu_execution()
@@ -1227,6 +1238,7 @@ TEST(GreeksFase6Test, VannaOfACallHasExpectedSignAndMatchesClosedFormMixedFinite
     EXPECT_EQ(via_greek.order.order, 1);
     ASSERT_TRUE(via_greek.order.cross_factor.has_value());
     EXPECT_EQ(via_greek.order.cross_factor->name, "volatility");
+    EXPECT_EQ(via_greek.method_used, GreekMethod::BumpAndReval);
     EXPECT_EQ(via_greek.bump_used, h_spot);
     EXPECT_FALSE(via_greek.warnings.empty()) << "el bump del cross_factor se documenta en warnings (§13)";
     EXPECT_NEAR(via_greek.value, manual, 0.02) << "Greek=" << via_greek.value << " manual=" << manual;
@@ -1939,4 +1951,160 @@ TEST(GreeksFase9Test, CoreAndAbiAgreeOnAllGreeksForTheCallFixture) {
     engine_abi_free_greeks_report(greek_entries, n_greeks, skipped, n_skipped);
     engine_abi_free_product(abi_product);
     engine_abi_free_model(abi_model);
+}
+
+// --- PLAN_HYPERDUAL.md §5 (revisado): Gamma/Vanna via likelihood ratio -------------------------
+//
+// La generalizacion original del documento (`Dual2`/`HyperDual`) resulto matematicamente
+// incorrecta para payoffs con kink (ver el doc-comment de `engine_core::payoff::lrm`). Estos tests
+// verifican el reemplazo real: `method=Auto` debe preferir Pathwise (likelihood ratio) sobre el
+// estencil generico de bump-and-reval para `(GBM, PayoffPriceQ)`/`(GBM_P, PayoffForecastP)` de un
+// contrato de una unica fecha terminal, y debe seguir cayendo a bump-and-reval para un contrato
+// path-dependiente (`payoff_supports_second_order_lrm` en `false`).
+
+TEST(GreeksHyperdualTest, AutoResolvesGammaOfACallToLikelihoodRatioPathwise) {
+    Registries registries;
+    register_builtins(registries);
+    const pf::ObservableId spot{"EQ.SPOT.XYZ"};
+    const double s0 = 100.0, strike = 100.0, r = 0.05, q = 0.0, sigma = 0.2, maturity = 1.0;
+
+    pf::PayoffProduct product("CALL", european_call(spot, strike, maturity));
+    engine::GbmModel model = make_gbm_q(s0, r, q, sigma, spot.value);
+
+    GreekRequest request = payoff_price_q_request("spot");
+    request.order = GreekOrder{2, std::nullopt};
+
+    engine::greeks::GreekResult via_auto = engine::greeks::compute_greek(
+        registries, request, model, product, flat_market(), pricing_context(500'000, 7), cpu_execution()
+    );
+
+    double analytic_gamma = black_scholes_gamma(s0, strike, r, q, sigma, maturity);
+
+    EXPECT_EQ(via_auto.method_used, engine::greeks::GreekMethod::Pathwise)
+        << "Auto debe preferir likelihood-ratio (verificado) sobre bump-and-reval";
+    EXPECT_NEAR(via_auto.value, analytic_gamma, 0.01) << "Greek=" << via_auto.value << " analytic=" << analytic_gamma;
+
+    request.method = GreekMethod::Pathwise;
+    engine::greeks::GreekResult via_explicit = engine::greeks::compute_greek(
+        registries, request, model, product, flat_market(), pricing_context(500'000, 7), cpu_execution()
+    );
+    EXPECT_EQ(via_explicit.method_used, engine::greeks::GreekMethod::Pathwise);
+    EXPECT_NEAR(via_explicit.value, analytic_gamma, 0.01);
+}
+
+TEST(GreeksHyperdualTest, AutoResolvesVannaOfACallToLikelihoodRatioPathwise) {
+    Registries registries;
+    register_builtins(registries);
+    const pf::ObservableId spot{"EQ.SPOT.XYZ"};
+    const double s0 = 100.0, strike = 100.0, r = 0.05, q = 0.0, sigma = 0.2, maturity = 1.0;
+    const double h_spot = 1.0, h_vol = 0.002;
+
+    pf::PayoffProduct product("CALL", european_call(spot, strike, maturity));
+    engine::GbmModel model = make_gbm_q(s0, r, q, sigma, spot.value);
+
+    GreekRequest request = payoff_price_q_request("spot");
+    request.order = GreekOrder{1, RiskFactor{RiskFactorKind::ModelParameter, "model", "volatility", std::nullopt}};
+
+    engine::greeks::GreekResult via_auto = engine::greeks::compute_greek(
+        registries, request, model, product, flat_market(), pricing_context(500'000, 7), cpu_execution()
+    );
+
+    double manual =
+        (black_scholes_call(s0 + h_spot, strike, r, q, sigma + h_vol, maturity) -
+         black_scholes_call(s0 + h_spot, strike, r, q, sigma - h_vol, maturity) -
+         black_scholes_call(s0 - h_spot, strike, r, q, sigma + h_vol, maturity) +
+         black_scholes_call(s0 - h_spot, strike, r, q, sigma - h_vol, maturity)) /
+        (4.0 * h_spot * h_vol);
+
+    EXPECT_EQ(via_auto.method_used, engine::greeks::GreekMethod::Pathwise);
+    ASSERT_TRUE(via_auto.std_error.has_value());
+    // El peso de Vanna via likelihood ratio involucra Z^3 (ver payoff::lrm::vanna_weight) -- mayor
+    // varianza que un estimador pathwise puro, asi que la tolerancia se ancla al propio error
+    // estandar del estimador Monte Carlo (mismo criterio que el resto de tests de sensibilidad
+    // pathwise, no un valor fijo).
+    double tolerance = 8.0 * *via_auto.std_error;
+    EXPECT_NEAR(via_auto.value, manual, tolerance)
+        << "Greek=" << via_auto.value << " (se=" << *via_auto.std_error << ") manual=" << manual;
+
+    // El par inverso (volatility, spot) debe dar el mismo resultado (Vanna es simetrica).
+    GreekRequest reversed = payoff_price_q_request("volatility");
+    reversed.order = GreekOrder{1, RiskFactor{RiskFactorKind::ModelParameter, "model", "spot", std::nullopt}};
+    engine::greeks::GreekResult via_reversed = engine::greeks::compute_greek(
+        registries, reversed, model, product, flat_market(), pricing_context(500'000, 7), cpu_execution()
+    );
+    EXPECT_EQ(via_reversed.method_used, engine::greeks::GreekMethod::Pathwise);
+    EXPECT_NEAR(via_reversed.value, via_auto.value, 1e-9);
+}
+
+TEST(GreeksHyperdualTest, AutoResolvesGammaOfAForecastUnderPToLikelihoodRatioPathwise) {
+    Registries registries;
+    register_builtins(registries);
+    const pf::ObservableId spot{"EQ.SPOT.XYZ"};
+    const double s0 = 100.0, strike = 100.0, mu = 0.08, sigma = 0.2, maturity = 1.0;
+
+    pf::PayoffProduct product("CALL", european_call(spot, strike, maturity));
+    engine::GbmPModel model = make_gbm_p(s0, mu, sigma, spot.value);
+
+    GreekRequest request;
+    request.metric_name = "PayoffForecastP";
+    request.risk_factor = RiskFactor{RiskFactorKind::ModelParameter, "model", "spot", std::nullopt};
+    request.order = GreekOrder{2, std::nullopt};
+    request.method = GreekMethod::Auto;
+
+    engine::greeks::GreekResult via_auto = engine::greeks::compute_greek(
+        registries, request, model, product, flat_market(), pricing_context(500'000, 7), cpu_execution()
+    );
+    EXPECT_EQ(via_auto.method_used, engine::greeks::GreekMethod::Pathwise);
+    EXPECT_EQ(via_auto.measure, pf::ProbabilityMeasure::PhysicalP);
+}
+
+TEST(GreeksHyperdualTest, AutoStillFallsBackToBumpAndRevalForAPathDependentContractsGamma) {
+    // Un contrato path-dependiente (bermuda, con Exercise -- y por tanto mas de una fecha
+    // requerida) no soporta Gamma/Vanna via likelihood ratio (PLAN_HYPERDUAL.md §5.2) --
+    // payoff_supports_second_order_lrm debe ser `false`, y Auto debe seguir cayendo al estencil
+    // generico de bump-and-reval, nunca aproximar en silencio de otra forma.
+    Registries registries;
+    register_builtins(registries);
+    const pf::ObservableId spot{"EQ.SPOT.XYZ"};
+    pf::PayoffProduct product("BERMUDA_PUT", bermuda_put(spot, 100.0, 1.0, {tp(0.25), tp(0.5), tp(0.75)}));
+    engine::GbmModel model = make_gbm_q(100.0, 0.05, 0.0, 0.2, spot.value);
+
+    GreekRequest request = payoff_price_q_request("spot");
+    request.order = GreekOrder{2, std::nullopt};
+
+    engine::greeks::GreekResult via_auto = engine::greeks::compute_greek(
+        registries, request, model, product, flat_market(), pricing_context(20'000, 7), cpu_execution()
+    );
+    EXPECT_EQ(via_auto.method_used, engine::greeks::GreekMethod::BumpAndReval);
+
+    request.method = GreekMethod::Pathwise;
+    try {
+        engine::greeks::compute_greek(
+            registries, request, model, product, flat_market(), pricing_context(20'000, 7), cpu_execution()
+        );
+        FAIL() << "se esperaba std::invalid_argument";
+    } catch (const std::invalid_argument& e) {
+        EXPECT_NE(std::string(e.what()).find("path-dependiente"), std::string::npos) << e.what();
+    }
+}
+
+TEST(GreeksHyperdualTest, ExplicitPathwiseRejectsAVannaPairOtherThanSpotAndVolatility) {
+    Registries registries;
+    register_builtins(registries);
+    const pf::ObservableId spot{"EQ.SPOT.XYZ"};
+    pf::PayoffProduct product("CALL", european_call(spot, 100.0, 1.0));
+    engine::GbmModel model = make_gbm_q(100.0, 0.05, 0.0, 0.2, spot.value);
+
+    GreekRequest request = payoff_price_q_request("spot");
+    request.order = GreekOrder{1, RiskFactor{RiskFactorKind::ModelParameter, "model", "rate", std::nullopt}};
+    request.method = GreekMethod::Pathwise;
+
+    try {
+        engine::greeks::compute_greek(
+            registries, request, model, product, flat_market(), pricing_context(1'000, 7), cpu_execution()
+        );
+        FAIL() << "se esperaba std::invalid_argument";
+    } catch (const std::invalid_argument& e) {
+        EXPECT_NE(std::string(e.what()).find("volatility"), std::string::npos) << e.what();
+    }
 }

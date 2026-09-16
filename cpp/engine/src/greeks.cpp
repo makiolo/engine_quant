@@ -283,6 +283,32 @@ const std::vector<SpecializedCapability>& pathwise_capabilities() {
     return table;
 }
 
+// Gamma (segunda derivada PURA respecto de "spot") via likelihood ratio (PLAN_HYPERDUAL.md §5,
+// revisado): la generalizacion original con `Dual2` resulto matematicamente incorrecta para
+// payoffs con kink -- ver el doc-comment de `engine_core::payoff::lrm`. Mismas dos entradas que
+// `pathwise_capabilities()`, pero ademas requiere dinamicamente `payoff_supports_second_order_lrm`
+// (una unica fecha terminal, ver `try_pathwise2`) y `risk_factor.name == "spot"`. Verificado contra
+// Black-Scholes cerrado en `GreeksHyperdualTest.AutoResolvesGammaOfACallToLikelihoodRatioPathwise`
+// (test_greeks.cpp).
+const std::vector<SpecializedCapability>& pathwise2_capabilities() {
+    static const std::vector<SpecializedCapability> table = {
+        {"GBM", "PayoffPriceQ"},
+        {"GBM_P", "PayoffForecastP"},
+    };
+    return table;
+}
+
+// Vanna (derivada cruzada) via likelihood ratio -- mismo criterio que `pathwise2_capabilities()`,
+// solo el par ("spot","volatility"). Verificado en
+// `GreeksHyperdualTest.AutoResolvesVannaOfACallToLikelihoodRatioPathwise`.
+const std::vector<SpecializedCapability>& pathwise_cross_capabilities() {
+    static const std::vector<SpecializedCapability> table = {
+        {"GBM", "PayoffPriceQ"},
+        {"GBM_P", "PayoffForecastP"},
+    };
+    return table;
+}
+
 // AAD reverse-mode (`Autodiff<CpuBackend>` de Burn): generaliza `irs_hull_white_npv_delta_r0` a
 // las cuatro/cinco Greeks de una sola pasada `backward()` (PLAN_GREEKS.md §5.2), sobre la métrica
 // nueva `"HullWhiteModelNpv"` (measure.hpp) -- NO sobre `"PV"`, que desde PLAN_REAPI.md §6 Fase 4
@@ -344,6 +370,96 @@ std::optional<GreekResult> try_pathwise(
         );
     } else {
         return std::nullopt; // inalcanzable dada pathwise_capabilities(), defensivo
+    }
+
+    GreekResult result;
+    result.has_scalar = true;
+    result.value = sensitivity.value;
+    result.std_error = sensitivity.std_error;
+    result.order = request.order;
+    result.risk_factor = request.risk_factor;
+    result.method_used = GreekMethod::Pathwise;
+    result.measure = sensitivity.measure;
+    return result;
+}
+
+// Intenta Gamma via likelihood ratio (PLAN_HYPERDUAL.md §5, revisado). Devuelve `std::nullopt` si
+// la combinacion (modelo, metrica) no esta en la tabla, si `risk_factor.name != "spot"`, si el
+// contrato no depende de una unica fecha terminal (`payoff_supports_second_order_lrm[_p]` -- esto
+// EXCLUYE estructuralmente cualquier contrato con `ContractOp::Exercise`, que por construccion
+// necesita mas de una fecha), o si el producto no es un `PayoffProduct`. Mismo criterio que
+// `try_pathwise`: nunca lanza, solo informa "no aplica".
+std::optional<GreekResult> try_pathwise2(
+    const GreekRequest& request, const IModel& model, const IProduct& product, const PricingContext& pricing
+) {
+    const std::string model_type = model.type_name();
+    if (!capability_listed(pathwise2_capabilities(), model_type, request.metric_name)) return std::nullopt;
+    if (request.risk_factor.name != "spot") return std::nullopt;
+
+    const auto* payoff_product = dynamic_cast<const payoff::PayoffProduct*>(&product);
+    if (!payoff_product) return std::nullopt;
+
+    payoff::SensitivityResult sensitivity;
+    if (model_type == "GBM") {
+        if (!payoff::payoff_supports_second_order_lrm(*payoff_product->payoff_program())) return std::nullopt;
+        sensitivity = payoff::payoff_sensitivity2_gbm(
+            *payoff_product->payoff_program(), dynamic_cast<const GbmModel&>(model), request.risk_factor.name,
+            pricing.n_paths(), pricing.seed()
+        );
+    } else if (model_type == "GBM_P") {
+        if (!payoff::payoff_supports_second_order_lrm_p(*payoff_product->payoff_program())) return std::nullopt;
+        sensitivity = payoff::payoff_sensitivity2_gbm_p(
+            *payoff_product->payoff_program(), dynamic_cast<const GbmPModel&>(model), request.risk_factor.name,
+            pricing.n_paths(), pricing.seed()
+        );
+    } else {
+        return std::nullopt; // inalcanzable dada pathwise2_capabilities(), defensivo
+    }
+
+    GreekResult result;
+    result.has_scalar = true;
+    result.value = sensitivity.value;
+    result.std_error = sensitivity.std_error;
+    result.order = request.order;
+    result.risk_factor = request.risk_factor;
+    result.method_used = GreekMethod::Pathwise;
+    result.measure = sensitivity.measure;
+    return result;
+}
+
+// Intenta Vanna via likelihood ratio -- mismo criterio que `try_pathwise2`, solo el par
+// ("spot","volatility") en cualquier orden.
+std::optional<GreekResult> try_pathwise_cross(
+    const GreekRequest& request, const IModel& model, const IProduct& product, const PricingContext& pricing
+) {
+    const std::string model_type = model.type_name();
+    if (!capability_listed(pathwise_cross_capabilities(), model_type, request.metric_name)) return std::nullopt;
+    if (request.risk_factor.kind != RiskFactorKind::ModelParameter) return std::nullopt;
+    if (!request.order.cross_factor.has_value()) return std::nullopt;
+    const RiskFactor& cross = *request.order.cross_factor;
+    if (cross.kind != RiskFactorKind::ModelParameter) return std::nullopt;
+    const bool is_vanna_pair = (request.risk_factor.name == "spot" && cross.name == "volatility") ||
+                               (request.risk_factor.name == "volatility" && cross.name == "spot");
+    if (!is_vanna_pair) return std::nullopt;
+
+    const auto* payoff_product = dynamic_cast<const payoff::PayoffProduct*>(&product);
+    if (!payoff_product) return std::nullopt;
+
+    payoff::SensitivityResult sensitivity;
+    if (model_type == "GBM") {
+        if (!payoff::payoff_supports_second_order_lrm(*payoff_product->payoff_program())) return std::nullopt;
+        sensitivity = payoff::payoff_sensitivity_cross_gbm(
+            *payoff_product->payoff_program(), dynamic_cast<const GbmModel&>(model), request.risk_factor.name,
+            cross.name, pricing.n_paths(), pricing.seed()
+        );
+    } else if (model_type == "GBM_P") {
+        if (!payoff::payoff_supports_second_order_lrm_p(*payoff_product->payoff_program())) return std::nullopt;
+        sensitivity = payoff::payoff_sensitivity_cross_gbm_p(
+            *payoff_product->payoff_program(), dynamic_cast<const GbmPModel&>(model), request.risk_factor.name,
+            cross.name, pricing.n_paths(), pricing.seed()
+        );
+    } else {
+        return std::nullopt; // inalcanzable dada pathwise_cross_capabilities(), defensivo
     }
 
     GreekResult result;
@@ -433,6 +549,57 @@ std::string pathwise_unsupported_reason(const GreekRequest& request, const IMode
     }
     return "compute_greek: metodo 'pathwise' no soportado para (modelo='" + model.type_name() + "', metrica='" +
            request.metric_name + "')";
+}
+
+// Equivalente de `pathwise_unsupported_reason` para Gamma via likelihood ratio (order=2 puro).
+std::string pathwise2_unsupported_reason(const GreekRequest& request, const IModel& model, const IProduct& product) {
+    if (request.risk_factor.name != "spot") {
+        return "compute_greek: metodo 'pathwise' de segundo orden solo soportado para 'model.spot' (Gamma) -- "
+               "recibido 'model." + request.risk_factor.name + "', PLAN_HYPERDUAL.md §5";
+    }
+    if (!capability_listed(pathwise2_capabilities(), model.type_name(), request.metric_name)) {
+        return "compute_greek: metodo 'pathwise' de segundo orden no soportado para (modelo='" + model.type_name() +
+               "', metrica='" + request.metric_name + "') -- combinacion no verificada todavia (PLAN_HYPERDUAL.md §6)";
+    }
+    const auto* payoff_product = dynamic_cast<const payoff::PayoffProduct*>(&product);
+    const bool supports_lrm = payoff_product != nullptr &&
+        (model.type_name() == "GBM" ? payoff::payoff_supports_second_order_lrm(*payoff_product->payoff_program())
+                                     : payoff::payoff_supports_second_order_lrm_p(*payoff_product->payoff_program()));
+    if (payoff_product != nullptr && !supports_lrm) {
+        return "compute_greek: metodo 'pathwise' de segundo orden no soportado para un contrato "
+               "path-dependiente (Gamma via likelihood ratio solo aplica a una unica fecha terminal, "
+               "PLAN_HYPERDUAL.md §5; usa method='auto' o 'bump_and_reval')";
+    }
+    return "compute_greek: metodo 'pathwise' de segundo orden no soportado para (modelo='" + model.type_name() +
+           "', metrica='" + request.metric_name + "')";
+}
+
+// Equivalente de `pathwise2_unsupported_reason` para Vanna (order=1 con cross_factor).
+std::string pathwise_cross_unsupported_reason(const GreekRequest& request, const IModel& model, const IProduct& product) {
+    const std::string cross_name = request.order.cross_factor.has_value() ? request.order.cross_factor->name : "";
+    const bool is_vanna_pair = (request.risk_factor.name == "spot" && cross_name == "volatility") ||
+                               (request.risk_factor.name == "volatility" && cross_name == "spot");
+    if (!is_vanna_pair) {
+        return "compute_greek: metodo 'pathwise' de derivada cruzada solo soportado para el par "
+               "('model.spot','model.volatility') (Vanna) -- recibido ('model." + request.risk_factor.name +
+               "','model." + cross_name + "'), PLAN_HYPERDUAL.md §5";
+    }
+    if (!capability_listed(pathwise_cross_capabilities(), model.type_name(), request.metric_name)) {
+        return "compute_greek: metodo 'pathwise' de derivada cruzada no soportado para (modelo='" +
+               model.type_name() + "', metrica='" + request.metric_name +
+               "') -- combinacion no verificada todavia (PLAN_HYPERDUAL.md §6)";
+    }
+    const auto* payoff_product = dynamic_cast<const payoff::PayoffProduct*>(&product);
+    const bool supports_lrm = payoff_product != nullptr &&
+        (model.type_name() == "GBM" ? payoff::payoff_supports_second_order_lrm(*payoff_product->payoff_program())
+                                     : payoff::payoff_supports_second_order_lrm_p(*payoff_product->payoff_program()));
+    if (payoff_product != nullptr && !supports_lrm) {
+        return "compute_greek: metodo 'pathwise' de derivada cruzada no soportado para un contrato "
+               "path-dependiente (Vanna via likelihood ratio solo aplica a una unica fecha terminal, "
+               "PLAN_HYPERDUAL.md §5; usa method='auto' o 'bump_and_reval')";
+    }
+    return "compute_greek: metodo 'pathwise' de derivada cruzada no soportado para (modelo='" + model.type_name() +
+           "', metrica='" + request.metric_name + "')";
 }
 
 // Equivalente de `pathwise_unsupported_reason` para `method='aad'`.
@@ -604,19 +771,26 @@ GreekResult compute_greek(
         }
     }
     if (request.method == GreekMethod::Pathwise || request.method == GreekMethod::AadReverse) {
-        // PLAN_GREEKS.md §5.4: las rutas especializadas SOLO cubren order=1 sin cross_factor
-        // sobre un ModelParameter -- pedirlas explicitamente fuera de ese alcance es un error
-        // inmediato (nunca se degrada en silencio a BumpAndReval).
+        // PLAN_GREEKS.md §5.4: las rutas especializadas SOLO cubren un ModelParameter -- pedirlas
+        // explicitamente fuera de ese alcance es un error inmediato (nunca se degrada en silencio
+        // a BumpAndReval).
         if (request.risk_factor.kind != RiskFactorKind::ModelParameter) {
             throw std::invalid_argument(
                 "compute_greek: metodo '" + to_string(request.method) + "' solo soporta "
                 "RiskFactorKind::ModelParameter (pedido: '" + to_string(request.risk_factor) + "')"
             );
         }
-        if (request.order.order != 1 || request.order.cross_factor.has_value()) {
+        // AAD reverse-mode (Hull-White) sigue restringido a order=1 sin cross_factor -- esta
+        // revision (PLAN_HYPERDUAL.md) no toca esa ruta (§5.4, ultimo punto). `Pathwise` en
+        // cambio ahora cubre tambien order=2 puro (Gamma, try_pathwise2) y order=1 con
+        // cross_factor (Vanna, try_pathwise_cross) -- la forma exacta la valida el propio
+        // try_pathwise2/try_pathwise_cross via su tabla de capacidades; order=2 CON cross_factor
+        // ya se rechazo mas arriba (tercera derivada, fuera de alcance) antes de llegar aqui.
+        if (request.method == GreekMethod::AadReverse &&
+            (request.order.order != 1 || request.order.cross_factor.has_value())) {
             throw std::invalid_argument(
-                "compute_greek: metodo '" + to_string(request.method) + "' solo soporta order=1 sin "
-                "cross_factor (Gamma/derivadas cruzadas se sirven por bump-and-reval, PLAN_GREEKS.md §5.2)"
+                "compute_greek: metodo 'aad' solo soporta order=1 sin cross_factor (Gamma/derivadas "
+                "cruzadas de Hull-White via AAD reverse-mode fuera de alcance, PLAN_GREEKS.md §5.2)"
             );
         }
     }
@@ -689,7 +863,39 @@ GreekResult compute_greek(
         }
     }
 
+    // Gamma via likelihood ratio (PLAN_HYPERDUAL.md §5, revisado): order=2 puro sobre un
+    // ModelParameter -- mismo patron que el bloque de arriba, restringido a "spot" y a contratos
+    // de una unica fecha terminal (`try_pathwise2` lo comprueba dinamicamente).
+    if (request.order.order == 2 && !request.order.cross_factor.has_value() &&
+        request.risk_factor.kind == RiskFactorKind::ModelParameter) {
+        if (request.method == GreekMethod::Pathwise) {
+            std::optional<GreekResult> specialized = try_pathwise2(request, model, product, pricing);
+            if (specialized.has_value()) return *specialized;
+            throw std::invalid_argument(pathwise2_unsupported_reason(request, model, product));
+        }
+        if (request.method == GreekMethod::Auto) {
+            std::optional<GreekResult> specialized = try_pathwise2(request, model, product, pricing);
+            if (specialized.has_value()) return *specialized;
+        }
+    }
+
     if (request.order.cross_factor.has_value()) {
+        // Vanna via likelihood ratio (PLAN_HYPERDUAL.md §5, revisado): se intenta ANTES del
+        // estencil generico de 4 puntos, mismo patron que try_pathwise/try_pathwise2. `method=
+        // Pathwise` explicito con cross_factor SIEMPRE se resuelve aqui (exito o error inmediato
+        // con la razon exacta, via `try_pathwise_cross`/`pathwise_cross_unsupported_reason`, que
+        // ya comprueban `kind`/nombres/capacidad/alcance) -- nunca cae en silencio al estencil
+        // generico de abajo, igual que el bloque de order=1 sin cross_factor de mas arriba.
+        if (request.method == GreekMethod::Pathwise) {
+            std::optional<GreekResult> specialized = try_pathwise_cross(request, model, product, pricing);
+            if (specialized.has_value()) return *specialized;
+            throw std::invalid_argument(pathwise_cross_unsupported_reason(request, model, product));
+        }
+        if (request.method == GreekMethod::Auto) {
+            std::optional<GreekResult> specialized = try_pathwise_cross(request, model, product, pricing);
+            if (specialized.has_value()) return *specialized;
+        }
+
         // Derivada cruzada de primer orden (Vanna, cross-gamma -- PLAN_GREEKS.md §3.2/§11 Fase 6):
         // estencil de 4 puntos, cada uno compone DOS bumps (el segundo aplicado ENCIMA del
         // primero via `bump_state`, ver su doc-comment) -- `(up_up - up_down - down_up +

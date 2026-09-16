@@ -426,6 +426,125 @@ bool payoff_contains_exercise(const PayoffProgram& program) {
     }
 }
 
+// --- PLAN_HYPERDUAL.md §5 (revisado): Gamma/Vanna via likelihood ratio -----------------------
+
+SensitivityResult payoff_sensitivity2_gbm(
+    const PayoffProgram& program, const GbmModel& model, const std::string& greek, std::uint64_t n_paths,
+    std::uint64_t seed
+) {
+    preflight_gbm_capabilities(program, model.capabilities(), ProbabilityMeasure::RiskNeutralQ);
+
+    std::string spec_json = CanonicalVisitor::to_json(program.id, program.contract);
+    try {
+        ffi::PayoffSensitivityResult result = ffi::payoff_sensitivity2_gbm_q(
+            spec_json, model.observable().value, greek, model.s0(), model.r(), model.q(), model.sigma(), n_paths,
+            seed
+        );
+        SensitivityResult out;
+        out.value = result.value;
+        out.std_error = result.std_error;
+        out.ci_low = result.ci_low;
+        out.ci_high = result.ci_high;
+        out.n_paths = result.n_paths;
+        out.measure = ProbabilityMeasure::RiskNeutralQ;
+        return out;
+    } catch (const std::exception& e) {
+        throw EvaluationError(e.what(), NodePath::root());
+    }
+}
+
+SensitivityResult payoff_sensitivity2_gbm_p(
+    const PayoffProgram& program, const GbmPModel& model, const std::string& greek, std::uint64_t n_paths,
+    std::uint64_t seed
+) {
+    preflight_gbm_capabilities(program, model.capabilities(), ProbabilityMeasure::PhysicalP);
+
+    std::string spec_json = CanonicalVisitor::to_json(program.id, program.contract);
+    try {
+        ffi::PayoffSensitivityResult result = ffi::payoff_sensitivity2_gbm_p(
+            spec_json, model.observable().value, greek, model.s0(), model.mu(), model.sigma(), n_paths, seed
+        );
+        SensitivityResult out;
+        out.value = result.value;
+        out.std_error = result.std_error;
+        out.ci_low = result.ci_low;
+        out.ci_high = result.ci_high;
+        out.n_paths = result.n_paths;
+        out.measure = ProbabilityMeasure::PhysicalP;
+        return out;
+    } catch (const std::exception& e) {
+        throw EvaluationError(e.what(), NodePath::root());
+    }
+}
+
+SensitivityResult payoff_sensitivity_cross_gbm(
+    const PayoffProgram& program, const GbmModel& model, const std::string& risk_factor,
+    const std::string& cross_factor, std::uint64_t n_paths, std::uint64_t seed
+) {
+    preflight_gbm_capabilities(program, model.capabilities(), ProbabilityMeasure::RiskNeutralQ);
+
+    std::string spec_json = CanonicalVisitor::to_json(program.id, program.contract);
+    try {
+        ffi::PayoffSensitivityResult result = ffi::payoff_sensitivity_cross_gbm_q(
+            spec_json, model.observable().value, risk_factor, cross_factor, model.s0(), model.r(), model.q(),
+            model.sigma(), n_paths, seed
+        );
+        SensitivityResult out;
+        out.value = result.value;
+        out.std_error = result.std_error;
+        out.ci_low = result.ci_low;
+        out.ci_high = result.ci_high;
+        out.n_paths = result.n_paths;
+        out.measure = ProbabilityMeasure::RiskNeutralQ;
+        return out;
+    } catch (const std::exception& e) {
+        throw EvaluationError(e.what(), NodePath::root());
+    }
+}
+
+SensitivityResult payoff_sensitivity_cross_gbm_p(
+    const PayoffProgram& program, const GbmPModel& model, const std::string& risk_factor,
+    const std::string& cross_factor, std::uint64_t n_paths, std::uint64_t seed
+) {
+    preflight_gbm_capabilities(program, model.capabilities(), ProbabilityMeasure::PhysicalP);
+
+    std::string spec_json = CanonicalVisitor::to_json(program.id, program.contract);
+    try {
+        ffi::PayoffSensitivityResult result = ffi::payoff_sensitivity_cross_gbm_p(
+            spec_json, model.observable().value, risk_factor, cross_factor, model.s0(), model.mu(), model.sigma(),
+            n_paths, seed
+        );
+        SensitivityResult out;
+        out.value = result.value;
+        out.std_error = result.std_error;
+        out.ci_low = result.ci_low;
+        out.ci_high = result.ci_high;
+        out.n_paths = result.n_paths;
+        out.measure = ProbabilityMeasure::PhysicalP;
+        return out;
+    } catch (const std::exception& e) {
+        throw EvaluationError(e.what(), NodePath::root());
+    }
+}
+
+bool payoff_supports_second_order_lrm(const PayoffProgram& program) {
+    std::string spec_json = CanonicalVisitor::to_json(program.id, program.contract);
+    try {
+        return ffi::payoff_supports_second_order_lrm(spec_json);
+    } catch (const std::exception& e) {
+        throw EvaluationError(e.what(), NodePath::root());
+    }
+}
+
+bool payoff_supports_second_order_lrm_p(const PayoffProgram& program) {
+    std::string spec_json = CanonicalVisitor::to_json(program.id, program.contract);
+    try {
+        return ffi::payoff_supports_second_order_lrm_p(spec_json);
+    } catch (const std::exception& e) {
+        throw EvaluationError(e.what(), NodePath::root());
+    }
+}
+
 HedgeResult synthesize_hedge_gbm(
     const PayoffProgram& target, const std::vector<const PayoffProgram*>& instruments, const GbmModel& model,
     const std::optional<std::vector<double>>& instrument_prices, double ridge, const HedgeConstraints& constraints,

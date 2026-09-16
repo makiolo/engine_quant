@@ -469,7 +469,7 @@ Reduce la duplicacion de Fase 2/3 al minimo: cada tipo nuevo solo aporta su prop
 no una copia de `value_at`. Instrumentacion añadida en Fase 1 para §8.4: `dual.rs::mul_f64` cuenta
 multiplicaciones reales en builds de test (cero coste en release, `#[inline(always)]` + `#[cfg(test)]`).
 
-### Fase 2 — Gamma pathwise — REESCRITA: likelihood ratio, no `Dual2` — DONE (lado Rust)
+### Fase 2 — Gamma pathwise — REESCRITA: likelihood ratio, no `Dual2` — DONE
 
 `Dual2` (§3.3 original) se abandonó por completo tras encontrar, con la propia disciplina de
 verificación de este documento, que da Gamma exactamente 0 para cualquier payoff con kink (§5.0) —
@@ -481,18 +481,24 @@ ver la nota de REVISIÓN al inicio del documento. Reemplazado por:
   "spot", ponderando el valor presente `f64` normal de cada ruta por `gamma_weight`, sin `Dual`/
   `Dual2` en absoluto);
 - `payoff::api::payoff_supports_second_order_lrm`/`api_p::..._p` (consulta de capacidad para C++);
-- **Pendiente** (lado C++, siguiente paso): puente cxx + `pathwise2_capabilities()`/`try_pathwise2`
-  en `greeks.cpp`, reapuntar `GreeksFase6Test.GammaOfACallMatchesClosedFormSecondDerivative` a
-  `method=BumpAndReval` explícito, test nuevo confirmando `method=Auto` resuelve a Pathwise.
+- puente cxx (`engine-ffi`) + `payoff::payoff_sensitivity2_gbm[_p]`/`payoff_supports_second_order_lrm[_p]`
+  (`measures.hpp`/`.cpp`) + `pathwise2_capabilities()`/`try_pathwise2`/`pathwise2_unsupported_reason`
+  en `greeks.cpp`, cableado en `compute_greek` con el mismo patrón que `try_pathwise` (§5.3);
+- `GreeksFase6Test.GammaOfACallMatchesClosedFormSecondDerivative` reapuntado a `method=BumpAndReval`
+  explícito (sigue verificando el estencil genérico); tests nuevos en `GreeksHyperdualTest`
+  confirmando que `method=Auto`/`Pathwise` resuelven a likelihood-ratio para `(GBM,PayoffPriceQ)` y
+  `(GBM_P,PayoffForecastP)`, y que un contrato path-dependiente sigue cayendo a bump-and-reval.
 
-**Aceptación (lado Rust, cumplida)**: `gamma_weight` verificado por cuadratura determinista contra
-la segunda diferencia finita de `E[h(S_T)]` para `h` suave Y con kink (`lrm.rs::tests`, sin ruido de
-Monte Carlo); Gamma de una call europea bajo GBM/Q y GBM/P vía Monte Carlo end-to-end coincide con
-Black-Scholes cerrado / diferencias finitas de `forecast_gbm_p` dentro de tolerancia
-(`api.rs`/`api_p.rs::tests`); un contrato path-dependiente se rechaza explícito, sin aproximar en
-silencio.
+**Aceptación (cumplida)**: `gamma_weight` verificado por cuadratura determinista contra la segunda
+diferencia finita de `E[h(S_T)]` para `h` suave Y con kink (`lrm.rs::tests`, sin ruido de Monte
+Carlo); Gamma de una call europea bajo GBM/Q y GBM/P vía Monte Carlo end-to-end coincide con
+Black-Scholes cerrado / diferencias finitas de `forecast_gbm_p` dentro de tolerancia (Rust y C++);
+un contrato path-dependiente se rechaza explícito, sin aproximar en silencio; `method=auto` la
+prefiere sobre bump-and-reval para `(GBM, PayoffPriceQ)`/`(GBM_P, PayoffForecastP)` de una fecha
+terminal. `cargo test -p engine-core` (114/114 en `payoff::*`, single-threaded) y `engine_tests.exe`
+(372/372) en verde.
 
-### Fase 3 — Vanna pathwise — REESCRITA: likelihood ratio, no `HyperDual` — DONE (lado Rust)
+### Fase 3 — Vanna pathwise — REESCRITA: likelihood ratio, no `HyperDual` — DONE
 
 `HyperDual` (§3.4 original) tampoco se implementó — mismo argumento de §5.0 aplicado a la derivada
 cruzada. Reemplazado por:
@@ -500,14 +506,21 @@ cruzada. Reemplazado por:
 - `payoff::lrm::vanna_weight` (§5.1);
 - `payoff::api::payoff_sensitivity_cross_gbm_q`/`api_p::payoff_sensitivity_cross_gbm_p` (Vanna,
   únicamente el par `("spot","volatility")`, §5.2);
-- **Pendiente** (lado C++): puente cxx + `pathwise_cross_capabilities()`/`try_pathwise_cross` en
-  `greeks.cpp`, reapuntar `GreeksFase6Test.VannaOfACallHasExpectedSignAndMatchesClosedFormMixedFiniteDifference`
-  a `method=BumpAndReval` explícito, test nuevo confirmando `method=Auto` resuelve a Pathwise.
+- puente cxx + `payoff::payoff_sensitivity_cross_gbm[_p]` (`measures.hpp`/`.cpp`) +
+  `pathwise_cross_capabilities()`/`try_pathwise_cross`/`pathwise_cross_unsupported_reason` en
+  `greeks.cpp`, cableado en el bloque `cross_factor` de `compute_greek` (intentado ANTES del
+  estencil genérico de 4 puntos, §5.3);
+- `GreeksFase6Test.VannaOfACallHasExpectedSignAndMatchesClosedFormMixedFiniteDifference` reapuntado
+  a `method=BumpAndReval` explícito; tests nuevos en `GreeksHyperdualTest` (incluida la simetría del
+  par `(volatility,spot)` y el rechazo explícito de cualquier otro par).
 
-**Aceptación (lado Rust, cumplida)**: `vanna_weight` verificado por cuadratura determinista contra
-la diferencia mixta finita de `E[h(S_T)]` con kink real; Vanna de una call europea bajo GBM/Q y
-GBM/P vía Monte Carlo end-to-end coincide con Black-Scholes cerrado / diferencias finitas cruzadas
-de `forecast_gbm_p` dentro de tolerancia.
+**Aceptación (cumplida)**: `vanna_weight` verificado por cuadratura determinista contra la
+diferencia mixta finita de `E[h(S_T)]` con kink real; Vanna de una call europea bajo GBM/Q y GBM/P
+vía Monte Carlo end-to-end coincide con Black-Scholes cerrado / diferencias finitas cruzadas de
+`forecast_gbm_p` dentro de tolerancia (Rust y C++, con tolerancia anclada al propio `std_error` del
+estimador — el peso de Vanna involucra `Z³`, mayor varianza que Delta/Gamma); Vanna de una call
+vía `method=Auto` coincide con el estencil de 4 puntos ya verificado de `GreeksFase6Test` dentro de
+tolerancia, con una única pasada por ruta en vez de 4 evaluaciones bumpeadas.
 
 ### Fase 4 — orden 3 (`Dual3`/`HyperDual` de 3 direcciones) — condicional a demanda real
 
@@ -553,60 +566,80 @@ con un benchmark antes/después que demuestre cero regresión de rendimiento en 
 
 ### 8.3 Diferenciales (obligatorias antes de activar `method=Auto`, §6)
 
-- `Dual2`/`HyperDual` vs bump-and-reval (`GreeksFase6Test`) para cada entrada de
-  `pathwise2_capabilities()`/`pathwise_cross_capabilities()`.
-- Un contrato con `ContractOp::Exercise` sigue cayendo al fallback — test de no-regresión explícito
+- `gamma_weight`/`vanna_weight` (likelihood ratio) vs bump-and-reval (`GreeksFase6Test`, reapuntado
+  a `method=BumpAndReval` explícito) para cada entrada de `pathwise2_capabilities()`/
+  `pathwise_cross_capabilities()` (`GreeksHyperdualTest`).
+- Un contrato path-dependiente (más de una fecha requerida, o `ContractOp::Exercise`) sigue cayendo
+  al fallback — `GreeksHyperdualTest.AutoStillFallsBackToBumpAndRevalForAPathDependentContractsGamma`
   (mismo criterio que `GreeksFase7Test.AutoFallsBackToBumpAndRevalForAContractWithExercise`).
 
 ### 8.4 Robustez
 
-- coste medido (no solo estimado): un micro-benchmark en `dual.rs` que cuenta multiplicaciones
-  reales de `Dual`/`Dual2`/`HyperDual` sobre la misma expresión, confirmando la tabla de §0.1 no se
-  degrada silenciosamente si alguien "optimiza" la aritmética de forma incorrecta.
+- coste medido (no solo estimado): `dual.rs::mul_f64` cuenta multiplicaciones reales de `Dual` sobre
+  la misma expresión (§0.1) -- alcance final: solo `Dual` (orden 1) existe como número dual; Gamma/
+  Vanna no usan aritmética dual en absoluto (§5.1), así que no hay un "coste de Dual2/HyperDual" que
+  medir -- el coste de Gamma/Vanna es el de evaluar el payoff `f64` UNA vez por ruta y ponderar por
+  un escalar cerrado (`gamma_weight`/`vanna_weight`), estrictamente más barato que un bump-and-reval
+  de 3/4 evaluaciones completas.
+- `gamma_weight`/`vanna_weight` verificados por cuadratura DETERMINISTA (§6) además de Monte Carlo
+  -- el oráculo más fuerte disponible, sin depender de que una tolerancia estadística "por suerte"
+  esconda un error de signo o de factor.
 
 ## 9. Riesgos y mitigaciones
 
 | Riesgo | Mitigación |
 |---|---|
 | Generalizar el intérprete introduce una regresión sutil en la ruta `Dual` ya probada | Fase 1 es refactor puro (mismo comportamiento, mismos tests, cero tipo nuevo) antes de tocar nada de Gamma/Vanna |
-| Confundir la convención de Taylor (`f''` vs `f''/2`) en `Dual2`/`HyperDual` | ADR fijado en Fase 0 (§3.3) antes de escribir una sola línea de aritmética, con métodos `second_derivative()`/`cross_derivative()` explícitos que aplican la corrección una única vez, en el borde |
-| Combinatoria de tipos si se generaliza a N direcciones sin límite | familia CERRADA y con nombre (`Dual`, `Dual2`, `HyperDual`, `Dual3` documentado) — no un `Taylor<const N: usize>` genérico sin límite; orden 3+ es explícitamente "bajo demanda" (§7 Fase 4), no un default |
-| Tocar `eval::eval_scalar` (ruta caliente) sin necesidad real | Fase 5 (unificar con `f64`) es explícitamente opcional y requiere benchmark de no-regresión antes de aceptarse |
-| Activar `Dual2`/`HyperDual` bajo `method=Auto` sin verificación | misma disciplina de PLAN_GREEKS.md §5.3: test diferencial obligatorio por entrada de tabla de capacidades antes de mezclar (§6) |
+| **(Materializado)** La premisa central (`Dual2`/`HyperDual`, pathwise de segundo orden) es matemáticamente incorrecta para payoffs con kink | Detectado por la propia disciplina de verificación de §6/§8.3 ANTES de cablear nada a `method=Auto` (Gamma de una call vía `Dual2` daba exactamente 0) — pivote documentado en §5, sin tocar Fase 1 ni ningún resultado ya en producción. Lección: un test diferencial contra un oráculo cerrado ANTES de optimizar/cablear es lo que hizo posible detectar esto barato, en Rust puro, antes de tocar C++/FFI |
+| Derivar a mano las fórmulas de likelihood ratio (`gamma_weight`/`vanna_weight`) e introducir un error de signo/factor | Verificación por CUADRATURA DETERMINISTA (§6/§8.4, sin ruido de Monte Carlo) contra la segunda diferencia finita de la propia integral `E[h(S_T)]`, incluida una función con kink real — un error de derivación se habría detectado ahí, no solo en un test estadístico con margen de tolerancia |
+| Alcance de likelihood ratio limitado a una fecha terminal deja fuera payoffs path-dependientes | Documentado explícitamente como límite de esta revisión (§5.2), no oculto — `payoff_supports_second_order_lrm[_p]` rechaza esos casos explícito, `compute_greek` cae a su estencil genérico de bump-and-reval (que sí es correcto para cualquier payoff, solo más lento) |
+| Tocar `eval::eval_scalar` (ruta caliente) sin necesidad real | Fase 5 (unificar con `f64`) es explícitamente opcional y requiere benchmark de no-regresión antes de aceptarse — sigue sin tocarse |
+| Activar likelihood ratio bajo `method=Auto` sin verificación | misma disciplina de PLAN_GREEKS.md §5.3: test diferencial obligatorio por entrada de tabla de capacidades antes de mezclar (§6), cumplido en `GreeksHyperdualTest` |
 
-## 10. Fuera de alcance inicial
+## 10. Fuera de alcance
 
 - Hessiano completo de Hull-White vía AAD reverse-mode de Burn (forward-over-reverse) — sigue
   fuera de alcance por la misma razón que PLAN_GREEKS.md §5.2/§15 ya documentó; este plan es
   exclusivamente sobre el intérprete de payoff (`ScalarOp`), no sobre los tensores de Hull-White.
   Es un problema autoral distinto, con distinta solución.
-- Orden 3+ como default de producción (§7 Fase 4: documentado, no activado salvo demanda real).
-- Unificar el intérprete `f64` bajo el mismo trait (§7 Fase 5: stretch opcional).
-- Un `Taylor<const N: usize>` genérico sin límite de orden — se prefiere una familia cerrada y
-  nombrada (mismo argumento que PLAN_GREEKS.md §14 usa contra "explosión de combinaciones": tipos
-  con nombre y coste conocido, no una plantilla abierta que alguien podría instanciar con N=50 por
-  error).
+- `Dual2`/`HyperDual`/`Dual3` (orden ≥2 vía números duales, §3.3/§3.4/§3.5 originales) —
+  **abandonados por completo**, no "condicional a demanda": la premisa es matemáticamente
+  incorrecta para cualquier payoff con kink (§5.0), así que no hay una versión futura de esta idea
+  que valga la pena construir bajo demanda. El trait `DualNumber` y el intérprete genérico de
+  Fase 1 siguen vivos (correctos, único consumidor `Dual`, orden 1) por si algún día aparece un
+  SEGUNDO tipo de número dual de orden 1 con una necesidad real distinta — no para "orden 2".
+- Gamma/Vanna via likelihood ratio de payoffs path-dependientes (barreras, triggers, `Exercise`) —
+  exigiría la densidad conjunta de toda la trayectoria (Malliavin calculus general, Fournié et al.
+  1999), no solo la marginal terminal (§5.2). Esos casos siguen sirviéndose por bump-and-reval.
+- Gamma/Volga/Vanna de parámetros distintos de `spot`/`volatility` (p.ej. segunda derivada pura de
+  `rate`/`dividend_yield`, o un par cruzado que no sea `(spot,volatility)`) — no se derivaron esas
+  fórmulas en esta iteración; mecánico de añadir si aparece demanda real, mismo patrón exacto.
+- Unificar el intérprete `f64` bajo el mismo trait (§4, stretch opcional, sin tocar).
 
 ## 11. Definition of Done
 
-Esta generalización se considera implantada, no solo prototipada, cuando:
+Esta revisión se considera implantada, no solo prototipada, cuando:
 
 - `Dual` sigue funcionando sin cambio de comportamiento observable (Fase 1 es un refactor puro);
-- Gamma y Vanna/cross-gamma de `(GBM, PayoffPriceQ)`/`(GBM_P, PayoffForecastP)` sin `Exercise` se
-  sirven por pathwise (`Dual2`/`HyperDual`) bajo `method=Auto`, verificadas diferencialmente contra
-  bump-and-reval con tolerancia declarada (§6/§8.3);
-- el coste de cada tipo (§0.1) está confirmado por un micro-benchmark real, no solo calculado a
-  mano (§8.4);
-- pedir `Dual2`/`HyperDual` nunca afecta el coste ni el comportamiento de una petición de `Dual`
-  (orden 1) — cero acoplamiento en runtime entre tipos de la familia, solo comparten el trait;
-- un contrato con `ContractOp::Exercise` o una métrica indicador siguen cayendo a bump-and-reval en
-  CUALQUIER orden, sin excepción (§5.1);
-- suites Rust y C++ (`dual.rs`, `sensitivity.rs`, `test_greeks.cpp`) están en verde.
+- Gamma de `(GBM, PayoffPriceQ)`/`(GBM_P, PayoffForecastP)` respecto de `spot`, y Vanna del par
+  `(spot,volatility)`, para contratos de una única fecha terminal sin `Exercise`, se sirven por
+  likelihood ratio bajo `method=Auto`, verificadas diferencialmente contra bump-and-reval con
+  tolerancia declarada (§6/§8.3) — **cumplido**;
+- las fórmulas cerradas (`gamma_weight`/`vanna_weight`) están verificadas por cuadratura
+  determinista, no solo por Monte Carlo (§8.4) — **cumplido**;
+- un contrato path-dependiente (más de una fecha, o `ContractOp::Exercise`) o una métrica indicador
+  siguen cayendo a bump-and-reval en CUALQUIER orden, sin excepción (§5.4) — **cumplido**;
+- suites Rust y C++ (`dual.rs`, `sensitivity.rs`, `lrm.rs`, `api.rs`, `api_p.rs`, `test_greeks.cpp`)
+  están en verde — **cumplido** (114/114 Rust `payoff::*` single-threaded, 372/372 `engine_tests`).
 
 ---
 
-*Decisión central: un número dual truncado es, para el intérprete de payoff, "cuántas componentes
-de Taylor se propagan por operación" — más componentes es estrictamente más caro (producto de
-Cauchy, crece con el cuadrado del número de componentes), y el motor de Greeks solo instancia el
-tipo concreto que el `GreekRequest` pide. Generalizar `Dual` a una familia con un trait común no es
-gratis en líneas de código, pero sí lo es en runtime para quien no pide el orden extra.*
+*Decisión central (revisada): el trait `DualNumber` genérico de Fase 1 sigue siendo la
+generalización correcta para diferenciación de PRIMER orden del intérprete de payoff — un número
+dual truncado adicional (segundo orden) hubiera sido "más barato en runtime para quien no lo pide",
+pero la propiedad que de verdad importa (¿da la respuesta correcta para quien SÍ lo pide?) falla
+para cualquier payoff con kink. La lección que deja este documento: verificar contra un oráculo
+cerrado ANTES de optimizar el mecanismo es lo que permitió encontrar esto en un test Rust barato,
+no en producción. El reemplazo correcto (likelihood ratio, Broadie-Glasserman 1996) no necesita
+ninguna aritmética dual — pondera el payoff `f64` normal por un peso cerrado de la densidad, y por
+eso es, además, más barato que la idea original que pretendía sustituir.*

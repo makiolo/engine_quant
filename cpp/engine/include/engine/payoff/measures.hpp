@@ -334,6 +334,56 @@ SensitivityResult payoff_sensitivity_gbm_p(
 // "Pathwise" incluso cuando Rust decidio bump-and-reval por su cuenta.
 bool payoff_contains_exercise(const PayoffProgram& program);
 
+// --- PLAN_HYPERDUAL.md §5 (revisado): Gamma/Vanna via likelihood ratio -----------------------
+//
+// La generalizacion original de PLAN_HYPERDUAL.md (numeros duales de orden 2, `Dual2`/`HyperDual`)
+// resulto matematicamente incorrecta para payoffs con kink (Max/Min/Abs/If/Trigger que dependan
+// del parametro derivado -- practicamente cualquier call/put/barrera real, ver el doc-comment de
+// `engine_core::payoff::lrm` en Rust para la prueba). El mecanismo correcto diferencia la DENSIDAD
+// de `S_T` en vez del payoff (Broadie-Glasserman 1996), lo que exige que el contrato dependa del
+// subyacente en una UNICA fecha terminal (sin dependencia de trayectoria) -- `payoff_supports_
+// second_order_lrm[_p]` es el guard de esa restriccion, consultado por `engine::greeks::
+// compute_greek` antes de intentar Gamma/Vanna especializadas.
+
+// Gamma (segunda derivada PURA respecto de "spot") bajo Q via likelihood ratio -- ver
+// `engine_core::payoff::payoff_sensitivity2_gbm_q`. Mismo preflight que `payoff_sensitivity_gbm`;
+// `greek` distinto de "spot", o un contrato de mas de una fecha, es un error de evaluacion
+// (detectado en Rust).
+SensitivityResult payoff_sensitivity2_gbm(
+    const PayoffProgram& program, const GbmModel& model, const std::string& greek, std::uint64_t n_paths,
+    std::uint64_t seed
+);
+
+// Extension bajo P de `payoff_sensitivity2_gbm` -- ver `engine_core::payoff::payoff_sensitivity2_gbm_p`.
+SensitivityResult payoff_sensitivity2_gbm_p(
+    const PayoffProgram& program, const GbmPModel& model, const std::string& greek, std::uint64_t n_paths,
+    std::uint64_t seed
+);
+
+// Vanna (derivada cruzada) bajo Q via likelihood ratio -- ver
+// `engine_core::payoff::payoff_sensitivity_cross_gbm_q`. Solo soportado para el par
+// ("spot","volatility") en cualquier orden; cualquier otro par es un error de evaluacion.
+SensitivityResult payoff_sensitivity_cross_gbm(
+    const PayoffProgram& program, const GbmModel& model, const std::string& risk_factor,
+    const std::string& cross_factor, std::uint64_t n_paths, std::uint64_t seed
+);
+
+// Extension bajo P de `payoff_sensitivity_cross_gbm` -- ver
+// `engine_core::payoff::payoff_sensitivity_cross_gbm_p`.
+SensitivityResult payoff_sensitivity_cross_gbm_p(
+    const PayoffProgram& program, const GbmPModel& model, const std::string& risk_factor,
+    const std::string& cross_factor, std::uint64_t n_paths, std::uint64_t seed
+);
+
+// `true` si `program` depende del subyacente en una UNICA fecha terminal (sin dependencia de
+// trayectoria) -- consulta de capacidad usada por `engine::greeks::compute_greek` ANTES de
+// intentar `payoff_sensitivity2_gbm`/`payoff_sensitivity_cross_gbm`, mismo criterio que
+// `payoff_contains_exercise`.
+bool payoff_supports_second_order_lrm(const PayoffProgram& program);
+
+// Extension bajo P de `payoff_supports_second_order_lrm`.
+bool payoff_supports_second_order_lrm_p(const PayoffProgram& program);
+
 // Restricciones opcionales sobre los pesos de `synthesize_hedge_gbm` (PLAN_PRODUCTS.md §12
 // Fase 11, items pendientes "liquidez" y "restricciones de tipo LP/QP (posiciones
 // minimas/maximas)"). Espejo de `engine_core::payoff::HedgeConstraints` -- ver su doc-comment en
