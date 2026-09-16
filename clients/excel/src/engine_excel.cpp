@@ -215,6 +215,44 @@ extern "C" __declspec(dllexport) LPXLOPER12 WINAPI xlEngineAllGreeks(
     });
 }
 
+// Hessiano local de un trade (PLAN_BACKWARD.md §8.2/§9 Fase 1-3): mismos handles de entrada que
+// ENGINE.ALL_GREEKS, "mejor esfuerzo" igual que esa UDF (una combinacion (modelo, metrica) no
+// soportada cae en el "skipped" del resultado, nunca en un error de Excel). "factores_de_riesgo"
+// es un rango vertical opcional de strings namespaced ("model.spot", ...); en blanco/omitido =
+// enumeracion automatica de los factores soportados (mismo criterio que
+// incluir_pillars/incluir_orden2 de ENGINE.ALL_GREEKS para "opcional"). Resultado en formato
+// largo (xlbridge::new_hessian_report): [RiskFactorI, RiskFactorJ, Value, Method, Measure,
+// StdError], triangulo superior + diagonal, con los candidatos omitidos anadidos al final
+// (Method="skipped").
+extern "C" __declspec(dllexport) LPXLOPER12 WINAPI xlEngineHessian(
+    LPXLOPER12 trade, LPXLOPER12 metric_name, LPXLOPER12 metric_params, LPXLOPER12 model,
+    LPXLOPER12 market, LPXLOPER12 pricing, LPXLOPER12 execution, LPXLOPER12 risk_factors
+) {
+    return xlbridge::guarded([&] {
+        return xlbridge::new_hessian_report(xlbridge::shared().hessian(
+            xlbridge::read_string(*trade), xlbridge::read_string(*metric_name), *metric_params,
+            xlbridge::read_string(*model), xlbridge::read_string(*market), xlbridge::read_string(*pricing),
+            xlbridge::read_string(*execution), *risk_factors));
+    });
+}
+
+// Producto Hessiano-vector H*v (PLAN_BACKWARD.md §8.2/§9 Fase 3): mismos handles de entrada que
+// ENGINE.HESSIAN/ENGINE.ALL_GREEKS. "direccion" es un rango de 2 columnas [RiskFactor, Peso]
+// (obligatorio y no vacio, a diferencia de "factores_de_riesgo" en ENGINE.HESSIAN -- un HVP sin
+// direccion no significa nada). Resultado en formato largo (xlbridge::new_hvp_report):
+// [RiskFactor, Value, Method], con los candidatos omitidos anadidos al final (Method="skipped").
+extern "C" __declspec(dllexport) LPXLOPER12 WINAPI xlEngineHvp(
+    LPXLOPER12 trade, LPXLOPER12 metric_name, LPXLOPER12 metric_params, LPXLOPER12 model,
+    LPXLOPER12 market, LPXLOPER12 pricing, LPXLOPER12 execution, LPXLOPER12 direction
+) {
+    return xlbridge::guarded([&] {
+        return xlbridge::new_hvp_report(xlbridge::shared().hvp(
+            xlbridge::read_string(*trade), xlbridge::read_string(*metric_name), *metric_params,
+            xlbridge::read_string(*model), xlbridge::read_string(*market), xlbridge::read_string(*pricing),
+            xlbridge::read_string(*execution), *direction));
+    });
+}
+
 // Calibración (PLAN.md §7.14): mismo modelo mental que list_models/create_model. El mercado
 // se pasa como handle (ENGINE.CREATE_MARKET, PLAN.md §7.15) en vez de un rango inline; el
 // resultado es una tabla clave/valor pensada para poder pasarse tal cual a
@@ -309,6 +347,24 @@ constexpr FnSpec kFunctions[] = {
         L"'incluir_pillars'/'incluir_orden2' son booleanos opcionales (FALSO por defecto). "
         L"Resultado en formato largo: [RiskFactor, Time, Value, Method, Measure, BumpUsed, "
         L"StdError], con los factores omitidos al final (Method=\"skipped\")."
+    ),
+    ENGINE_XLL_ENTRY(
+        xlEngineHessian, L"UQQQQQQQQ", L"ENGINE.HESSIAN",
+        L"trade,metrica,parametros_metrica,modelo,mercado,contexto,ejecucion,factores_de_riesgo",
+        L"Hessiano local (segundo orden, pares i<=j) de 'metrica' sobre el trade/modelo/mercado "
+        L"dados -- mejor esfuerzo, una combinacion (modelo, metrica) no soportada cae en el "
+        L"'skipped' del resultado. 'factores_de_riesgo' es un rango vertical opcional de "
+        L"strings namespaced (\"model.spot\", ...); en blanco = enumeracion automatica de los "
+        L"factores soportados. Resultado en formato largo: [RiskFactorI, RiskFactorJ, Value, "
+        L"Method, Measure, StdError], con los candidatos omitidos al final (Method=\"skipped\")."
+    ),
+    ENGINE_XLL_ENTRY(
+        xlEngineHvp, L"UQQQQQQQQ", L"ENGINE.HVP",
+        L"trade,metrica,parametros_metrica,modelo,mercado,contexto,ejecucion,direccion",
+        L"Producto Hessiano-vector H*v de 'metrica' sobre el trade/modelo/mercado dados. "
+        L"'direccion' es un rango obligatorio de 2 columnas [RiskFactor, Peso] (factores "
+        L"ausentes = peso 0). Resultado en formato largo: [RiskFactor, Value, Method], con los "
+        L"candidatos omitidos al final (Method=\"skipped\")."
     ),
     ENGINE_XLL_ENTRY(xlEngineListCalibrators, L"U", L"ENGINE.LIST_CALIBRATORS", L"",
                       L"Lista los calibradores registrados en el motor."),

@@ -225,6 +225,52 @@ std::vector<std::string> to_string_vector(const char* const* names, std::size_t 
     return out;
 }
 
+// const char** -> vector<RiskFactor> (PLAN_BACKWARD.md §8.3): compartida por
+// engine_abi_hessian/engine_abi_hvp para no duplicar el bucle de parseo -- mismo criterio que el
+// helper analogo en clients/python/src/engine_py_ext.cpp (parse_risk_factor_list). Se apoya en
+// to_string_vector de arriba en vez de reimplementar la copia char* -> std::string.
+std::vector<engine::greeks::RiskFactor> to_risk_factor_vector(const char* const* names, std::size_t count) {
+    std::vector<engine::greeks::RiskFactor> out;
+    out.reserve(count);
+    for (const std::string& name : to_string_vector(names, count)) {
+        out.push_back(engine::greeks::parse_risk_factor(name));
+    }
+    return out;
+}
+
+// Convierte un engine::greeks::HessianReport a los dos arrays owned que expone
+// engine_abi_hessian (PLAN_BACKWARD.md §8.3): mismo patron que export_greeks_report de arriba.
+EngineHessianEntry* export_hessian_report(const std::vector<engine::greeks::HessianEntry>& entries) {
+    if (entries.empty()) return nullptr;
+    auto* out = new EngineHessianEntry[entries.size()]{};
+    for (std::size_t i = 0; i < entries.size(); ++i) {
+        const engine::greeks::HessianEntry& src = entries[i];
+        EngineHessianEntry& dst = out[i];
+        dst.risk_factor_i = dup_cstr(engine::greeks::to_string(src.factor_i));
+        dst.risk_factor_j = dup_cstr(engine::greeks::to_string(src.factor_j));
+        dst.value = src.value;
+        dst.has_std_error = src.std_error.has_value() ? 1 : 0;
+        dst.std_error = src.std_error.value_or(0.0);
+        dst.method_used = dup_cstr(engine::greeks::to_string(src.method_used));
+        dst.measure = dup_cstr(engine::greeks::to_string(src.measure));
+    }
+    return out;
+}
+
+// Analogo a export_hessian_report, para engine_abi_hvp.
+EngineHvpComponent* export_hvp_report(const std::vector<engine::greeks::HvpComponent>& components) {
+    if (components.empty()) return nullptr;
+    auto* out = new EngineHvpComponent[components.size()]{};
+    for (std::size_t i = 0; i < components.size(); ++i) {
+        const engine::greeks::HvpComponent& src = components[i];
+        EngineHvpComponent& dst = out[i];
+        dst.risk_factor = dup_cstr(engine::greeks::to_string(src.factor));
+        dst.value = src.value;
+        dst.method_used = dup_cstr(engine::greeks::to_string(src.method_used));
+    }
+    return out;
+}
+
 engine::MarketSnapshot to_market(const EngineMarketSnapshot& m) {
     return engine::MarketSnapshot(
         std::vector<double>(m.pillars, m.pillars + m.count),
@@ -566,6 +612,142 @@ void engine_abi_free_greeks_report(
             delete[] greeks[i].result.secondary;
         }
         delete[] greeks;
+    }
+    if (skipped) {
+        for (std::size_t i = 0; i < n_skipped; ++i) delete[] skipped[i];
+        delete[] skipped;
+    }
+}
+
+int engine_abi_hessian(
+    const EngineProduct* product,
+    const char* metric_name,
+    const EngineParam* metric_params,
+    std::size_t n_metric_params,
+    const EngineModel* model,
+    const EngineMarketSnapshot* market,
+    const EnginePricingContext* pricing,
+    const EngineExecutionContext* execution,
+    const char** risk_factors,
+    std::size_t n_risk_factors,
+    EngineHessianEntry** out_entries,
+    std::size_t* out_n_entries,
+    char*** out_skipped,
+    std::size_t* out_n_skipped
+) {
+    *out_entries = nullptr;
+    *out_n_entries = 0;
+    *out_skipped = nullptr;
+    *out_n_skipped = 0;
+    try {
+        if (!product || !model || !market || !pricing || !execution) {
+            throw std::invalid_argument("engine_abi_hessian: product/model/market/pricing/execution no pueden ser NULL");
+        }
+        if (!metric_name) {
+            throw std::invalid_argument("engine_abi_hessian: metric_name no puede ser NULL");
+        }
+        std::vector<engine::greeks::RiskFactor> factors = to_risk_factor_vector(risk_factors, n_risk_factors);
+
+        engine::greeks::HessianReport report = engine::greeks::compute_hessian(
+            registries(), metric_name, to_params(metric_params, n_metric_params), *model->ptr, *product->ptr,
+            to_market(*market), to_pricing_context(*pricing), to_execution_context(*execution), factors
+        );
+
+        *out_entries = export_hessian_report(report.entries);
+        *out_n_entries = report.entries.size();
+        *out_skipped = export_skipped(report.skipped, out_n_skipped);
+        clear_last_error();
+        return 0;
+    } catch (const std::exception& e) {
+        set_last_error(e);
+        *out_entries = nullptr;
+        *out_n_entries = 0;
+        *out_skipped = nullptr;
+        *out_n_skipped = 0;
+        return 1;
+    }
+}
+
+void engine_abi_free_hessian(EngineHessianEntry* entries, std::size_t n_entries, char** skipped, std::size_t n_skipped) {
+    if (entries) {
+        for (std::size_t i = 0; i < n_entries; ++i) {
+            delete[] entries[i].risk_factor_i;
+            delete[] entries[i].risk_factor_j;
+            delete[] entries[i].method_used;
+            delete[] entries[i].measure;
+        }
+        delete[] entries;
+    }
+    if (skipped) {
+        for (std::size_t i = 0; i < n_skipped; ++i) delete[] skipped[i];
+        delete[] skipped;
+    }
+}
+
+int engine_abi_hvp(
+    const EngineProduct* product,
+    const char* metric_name,
+    const EngineParam* metric_params,
+    std::size_t n_metric_params,
+    const EngineModel* model,
+    const EngineMarketSnapshot* market,
+    const EnginePricingContext* pricing,
+    const EngineExecutionContext* execution,
+    const char** direction_factors,
+    const double* direction_weights,
+    std::size_t n_direction,
+    EngineHvpComponent** out_components,
+    std::size_t* out_n_components,
+    char*** out_skipped,
+    std::size_t* out_n_skipped
+) {
+    *out_components = nullptr;
+    *out_n_components = 0;
+    *out_skipped = nullptr;
+    *out_n_skipped = 0;
+    try {
+        if (!product || !model || !market || !pricing || !execution) {
+            throw std::invalid_argument("engine_abi_hvp: product/model/market/pricing/execution no pueden ser NULL");
+        }
+        if (!metric_name) {
+            throw std::invalid_argument("engine_abi_hvp: metric_name no puede ser NULL");
+        }
+        if (!direction_factors || !direction_weights || n_direction == 0) {
+            throw std::invalid_argument(
+                "engine_abi_hvp: direction_factors/direction_weights no pueden ser NULL/vacios (a diferencia de "
+                "risk_factors en engine_abi_hessian, aqui son siempre obligatorios)"
+            );
+        }
+        std::vector<engine::greeks::RiskFactor> factors = to_risk_factor_vector(direction_factors, n_direction);
+        std::vector<double> direction(direction_weights, direction_weights + n_direction);
+
+        engine::greeks::HvpReport report = engine::greeks::compute_hvp(
+            registries(), metric_name, to_params(metric_params, n_metric_params), *model->ptr, *product->ptr,
+            to_market(*market), to_pricing_context(*pricing), to_execution_context(*execution), factors, direction
+        );
+
+        *out_components = export_hvp_report(report.components);
+        *out_n_components = report.components.size();
+        *out_skipped = export_skipped(report.skipped, out_n_skipped);
+        clear_last_error();
+        return 0;
+    } catch (const std::exception& e) {
+        set_last_error(e);
+        *out_components = nullptr;
+        *out_n_components = 0;
+        *out_skipped = nullptr;
+        *out_n_skipped = 0;
+        return 1;
+    }
+}
+
+void engine_abi_free_hvp(EngineHvpComponent* components, std::size_t n_components, char** skipped, std::size_t n_skipped) {
+    if (components) {
+        for (std::size_t i = 0; i < n_components; ++i) {
+            delete[] components[i].risk_factor;
+            delete[] components[i].method_used;
+        }
+        delete[] components;
     }
     if (skipped) {
         for (std::size_t i = 0; i < n_skipped; ++i) delete[] skipped[i];

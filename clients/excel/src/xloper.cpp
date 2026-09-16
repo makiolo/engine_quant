@@ -215,6 +215,23 @@ ParsedParams table_to_params(const XLOPER12& params_arg) {
     return out;
 }
 
+std::vector<std::pair<std::string, double>> read_string_double_pairs(const XLOPER12& x) {
+    std::vector<std::pair<std::string, double>> out;
+    if (is_blank(x)) return out;
+
+    Table tbl = as_table(x);
+    for (RW r = 0; r < tbl.rows; ++r) {
+        const XLOPER12& key_cell = tbl.cell(r, 0);
+        if (is_blank(key_cell)) continue; // fila vacia: se ignora (igual criterio que table_to_params)
+        std::string key = read_string(key_cell);
+        if (tbl.cols < 2 || is_blank(tbl.cell(r, 1))) {
+            throw std::invalid_argument("xlbridge: fila sin valor para la clave '" + key + "'");
+        }
+        out.emplace_back(std::move(key), read_double(tbl.cell(r, 1)));
+    }
+    return out;
+}
+
 XLOPER12* new_error(int xlerr_code) {
     XLOPER12* out = new XLOPER12{};
     out->xltype = xltypeErr | xlbitDLLFree;
@@ -515,6 +532,68 @@ XLOPER12* new_greeks_report(const engine::greeks::GreeksReport& report) {
         cells[row * kColumns + 4] = blank_cell();
         cells[row * kColumns + 5] = blank_cell();
         cells[row * kColumns + 6] = blank_cell();
+        ++row;
+    }
+
+    XLOPER12* out = new XLOPER12{};
+    out->xltype = xltypeMulti | xlbitDLLFree;
+    out->val.array.rows = total_rows;
+    out->val.array.columns = kColumns;
+    out->val.array.lparray = cells;
+    return out;
+}
+
+XLOPER12* new_hessian_report(const engine::greeks::HessianReport& report) {
+    RW total_rows = static_cast<RW>(report.entries.size() + report.skipped.size());
+    if (total_rows == 0) return new_error(xlerrNA);
+
+    constexpr COL kColumns = 6; // RiskFactorI, RiskFactorJ, Value, Method, Measure, StdError
+    XLOPER12* cells = new XLOPER12[static_cast<std::size_t>(total_rows) * kColumns]{};
+    RW row = 0;
+    for (const auto& e : report.entries) {
+        cells[row * kColumns + 0] = owned_str_cell(engine::greeks::to_string(e.factor_i));
+        cells[row * kColumns + 1] = owned_str_cell(engine::greeks::to_string(e.factor_j));
+        cells[row * kColumns + 2] = num_cell(e.value);
+        cells[row * kColumns + 3] = owned_str_cell(engine::greeks::to_string(e.method_used));
+        cells[row * kColumns + 4] = owned_str_cell(engine::greeks::to_string(e.measure));
+        cells[row * kColumns + 5] = e.std_error.has_value() ? num_cell(*e.std_error) : blank_cell();
+        ++row;
+    }
+    for (const std::string& reason : report.skipped) {
+        cells[row * kColumns + 0] = owned_str_cell(reason);
+        cells[row * kColumns + 1] = blank_cell();
+        cells[row * kColumns + 2] = blank_cell();
+        cells[row * kColumns + 3] = owned_str_cell("skipped");
+        cells[row * kColumns + 4] = blank_cell();
+        cells[row * kColumns + 5] = blank_cell();
+        ++row;
+    }
+
+    XLOPER12* out = new XLOPER12{};
+    out->xltype = xltypeMulti | xlbitDLLFree;
+    out->val.array.rows = total_rows;
+    out->val.array.columns = kColumns;
+    out->val.array.lparray = cells;
+    return out;
+}
+
+XLOPER12* new_hvp_report(const engine::greeks::HvpReport& report) {
+    RW total_rows = static_cast<RW>(report.components.size() + report.skipped.size());
+    if (total_rows == 0) return new_error(xlerrNA);
+
+    constexpr COL kColumns = 3; // RiskFactor, Value, Method
+    XLOPER12* cells = new XLOPER12[static_cast<std::size_t>(total_rows) * kColumns]{};
+    RW row = 0;
+    for (const auto& c : report.components) {
+        cells[row * kColumns + 0] = owned_str_cell(engine::greeks::to_string(c.factor));
+        cells[row * kColumns + 1] = num_cell(c.value);
+        cells[row * kColumns + 2] = owned_str_cell(engine::greeks::to_string(c.method_used));
+        ++row;
+    }
+    for (const std::string& reason : report.skipped) {
+        cells[row * kColumns + 0] = owned_str_cell(reason);
+        cells[row * kColumns + 1] = blank_cell();
+        cells[row * kColumns + 2] = owned_str_cell("skipped");
         ++row;
     }
 

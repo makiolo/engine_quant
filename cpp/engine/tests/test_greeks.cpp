@@ -1953,6 +1953,266 @@ TEST(GreeksFase9Test, CoreAndAbiAgreeOnAllGreeksForTheCallFixture) {
     engine_abi_free_model(abi_model);
 }
 
+// PLAN_BACKWARD.md §9 (verificacion final, C ABI): mismo criterio cruzado que
+// GreeksFase9Test.CoreAndAbiAgreeOnAllGreeksForTheCallFixture de arriba, pero para
+// engine_abi_hessian -- mismo fixture GBM/call que
+// GreeksHessianTest.ComputeHessianWithEmptyFactorsReturnsGammaVolgaVannaAllViaLikelihoodRatio
+// (Gamma/Volga/Vanna via likelihood ratio, factors={} = enumeracion automatica).
+TEST(GreeksBackwardAbiTest, CoreAndAbiAgreeOnHessianForTheGbmCallFixture) {
+    std::string spec = read_fixture_file("call.json");
+
+    Registries registries;
+    register_builtins(registries);
+    auto product = registries.products.create("Payoff", Params{{"spec", spec}});
+    engine::GbmModel model = make_gbm_q(100.0, 0.05, 0.0, 0.2, "EQ.SPOT.AAPL");
+    MarketSnapshot market({1.0}, {0.05});
+
+    engine::greeks::HessianReport core_report = engine::greeks::compute_hessian(
+        registries, "PayoffPriceQ", Params{}, model, *product, market, pricing_context(500'000, 7), cpu_execution()
+    );
+    ASSERT_TRUE(core_report.skipped.empty());
+    ASSERT_EQ(core_report.entries.size(), 3u);
+
+    EngineParam spec_param{"spec", ENGINE_PARAM_STRING, 0.0, nullptr, 0, spec.c_str()};
+    EngineProduct* abi_product = engine_abi_create_product("Payoff", &spec_param, 1);
+    ASSERT_NE(abi_product, nullptr);
+    EngineParam model_params[] = {
+        EngineParam{"s0", ENGINE_PARAM_DOUBLE, 100.0, nullptr, 0, nullptr},
+        EngineParam{"r", ENGINE_PARAM_DOUBLE, 0.05, nullptr, 0, nullptr},
+        EngineParam{"q", ENGINE_PARAM_DOUBLE, 0.0, nullptr, 0, nullptr},
+        EngineParam{"sigma", ENGINE_PARAM_DOUBLE, 0.2, nullptr, 0, nullptr},
+        EngineParam{"observable", ENGINE_PARAM_STRING, 0.0, nullptr, 0, "EQ.SPOT.AAPL"},
+    };
+    EngineModel* abi_model = engine_abi_create_model("GBM", model_params, 5);
+    ASSERT_NE(abi_model, nullptr);
+
+    double pillars[] = {1.0};
+    double zero_rates[] = {0.05};
+    EngineMarketSnapshot abi_market{pillars, zero_rates, 1, 0.0, 0.0};
+    EnginePricingContext abi_pricing{0.0, 500'000, 1, 7};
+    EngineExecutionContext abi_execution{"cpu", "fp64"};
+
+    EngineHessianEntry* entries = nullptr;
+    std::size_t n_entries = 0;
+    char** skipped = nullptr;
+    std::size_t n_skipped = 0;
+    int rc = engine_abi_hessian(
+        abi_product, "PayoffPriceQ", nullptr, 0, abi_model, &abi_market, &abi_pricing, &abi_execution, nullptr, 0,
+        &entries, &n_entries, &skipped, &n_skipped
+    );
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(n_skipped, 0u);
+    ASSERT_EQ(core_report.entries.size(), n_entries);
+
+    for (const auto& core_entry : core_report.entries) {
+        const std::string i = engine::greeks::to_string(core_entry.factor_i);
+        const std::string j = engine::greeks::to_string(core_entry.factor_j);
+        bool matched = false;
+        for (std::size_t k = 0; k < n_entries; ++k) {
+            if (entries[k].risk_factor_i != i || entries[k].risk_factor_j != j) continue;
+            matched = true;
+            EXPECT_DOUBLE_EQ(core_entry.value, entries[k].value) << i << "/" << j;
+            EXPECT_EQ(engine::greeks::to_string(core_entry.method_used), std::string(entries[k].method_used));
+            EXPECT_EQ(core_entry.std_error.has_value(), entries[k].has_std_error != 0);
+            break;
+        }
+        EXPECT_TRUE(matched) << "entrada de compute_hessian ausente en engine_abi_hessian: " << i << "/" << j;
+    }
+
+    engine_abi_free_hessian(entries, n_entries, skipped, n_skipped);
+    engine_abi_free_product(abi_product);
+    engine_abi_free_model(abi_model);
+}
+
+// Mismo criterio cruzado, para engine_abi_hvp -- direccion = vector base e_spot (peso 1 en
+// "model.spot", 0 en "model.volatility") sobre el mismo fixture GBM/call de arriba.
+TEST(GreeksBackwardAbiTest, CoreAndAbiAgreeOnHvpForTheGbmCallFixture) {
+    std::string spec = read_fixture_file("call.json");
+
+    Registries registries;
+    register_builtins(registries);
+    auto product = registries.products.create("Payoff", Params{{"spec", spec}});
+    engine::GbmModel model = make_gbm_q(100.0, 0.05, 0.0, 0.2, "EQ.SPOT.AAPL");
+    MarketSnapshot market({1.0}, {0.05});
+
+    std::vector<RiskFactor> factors = {
+        RiskFactor{RiskFactorKind::ModelParameter, "model", "spot", std::nullopt},
+        RiskFactor{RiskFactorKind::ModelParameter, "model", "volatility", std::nullopt},
+    };
+    std::vector<double> direction = {1.0, 0.0};
+
+    engine::greeks::HvpReport core_report = engine::greeks::compute_hvp(
+        registries, "PayoffPriceQ", Params{}, model, *product, market, pricing_context(500'000, 7), cpu_execution(),
+        factors, direction
+    );
+    ASSERT_TRUE(core_report.skipped.empty());
+    ASSERT_EQ(core_report.components.size(), 2u);
+
+    EngineParam spec_param{"spec", ENGINE_PARAM_STRING, 0.0, nullptr, 0, spec.c_str()};
+    EngineProduct* abi_product = engine_abi_create_product("Payoff", &spec_param, 1);
+    ASSERT_NE(abi_product, nullptr);
+    EngineParam model_params[] = {
+        EngineParam{"s0", ENGINE_PARAM_DOUBLE, 100.0, nullptr, 0, nullptr},
+        EngineParam{"r", ENGINE_PARAM_DOUBLE, 0.05, nullptr, 0, nullptr},
+        EngineParam{"q", ENGINE_PARAM_DOUBLE, 0.0, nullptr, 0, nullptr},
+        EngineParam{"sigma", ENGINE_PARAM_DOUBLE, 0.2, nullptr, 0, nullptr},
+        EngineParam{"observable", ENGINE_PARAM_STRING, 0.0, nullptr, 0, "EQ.SPOT.AAPL"},
+    };
+    EngineModel* abi_model = engine_abi_create_model("GBM", model_params, 5);
+    ASSERT_NE(abi_model, nullptr);
+
+    double pillars[] = {1.0};
+    double zero_rates[] = {0.05};
+    EngineMarketSnapshot abi_market{pillars, zero_rates, 1, 0.0, 0.0};
+    EnginePricingContext abi_pricing{0.0, 500'000, 1, 7};
+    EngineExecutionContext abi_execution{"cpu", "fp64"};
+
+    const char* direction_factors[] = {"model.spot", "model.volatility"};
+    double direction_weights[] = {1.0, 0.0};
+
+    EngineHvpComponent* components = nullptr;
+    std::size_t n_components = 0;
+    char** skipped = nullptr;
+    std::size_t n_skipped = 0;
+    int rc = engine_abi_hvp(
+        abi_product, "PayoffPriceQ", nullptr, 0, abi_model, &abi_market, &abi_pricing, &abi_execution,
+        direction_factors, direction_weights, 2, &components, &n_components, &skipped, &n_skipped
+    );
+    ASSERT_EQ(rc, 0);
+    EXPECT_EQ(n_skipped, 0u);
+    ASSERT_EQ(core_report.components.size(), n_components);
+
+    for (const auto& core_c : core_report.components) {
+        const std::string name = engine::greeks::to_string(core_c.factor);
+        bool matched = false;
+        for (std::size_t k = 0; k < n_components; ++k) {
+            if (components[k].risk_factor != name) continue;
+            matched = true;
+            EXPECT_DOUBLE_EQ(core_c.value, components[k].value) << name;
+            EXPECT_EQ(engine::greeks::to_string(core_c.method_used), std::string(components[k].method_used));
+            break;
+        }
+        EXPECT_TRUE(matched) << "componente de compute_hvp ausente en engine_abi_hvp: " << name;
+    }
+
+    engine_abi_free_hvp(components, n_components, skipped, n_skipped);
+    engine_abi_free_product(abi_product);
+    engine_abi_free_model(abi_model);
+}
+
+// PLAN_BACKWARD.md §9: engine_abi_hessian es "mejor esfuerzo" igual que compute_hessian --
+// Hull-White1F + "PV" no esta en hessian_capabilities() (ver
+// GreeksHessianTest.ComputeHessianOnAnUnsupportedModelMetricCombinationGoesToSkippedWithoutThrowing
+// arriba), asi que cae en *out_skipped con return == 0, nunca return != 0.
+TEST(GreeksBackwardAbiTest, HessianOnAnUnsupportedCombinationReturnsZeroWithEmptyEntriesAndNonEmptySkipped) {
+    EngineParam model_params[] = {
+        EngineParam{"a", ENGINE_PARAM_DOUBLE, 0.1, nullptr, 0, nullptr},
+        EngineParam{"b", ENGINE_PARAM_DOUBLE, 0.03, nullptr, 0, nullptr},
+        EngineParam{"sigma", ENGINE_PARAM_DOUBLE, 0.01, nullptr, 0, nullptr},
+        EngineParam{"r0", ENGINE_PARAM_DOUBLE, 0.02, nullptr, 0, nullptr},
+    };
+    EngineModel* abi_model = engine_abi_create_model("HullWhite1F", model_params, 4);
+    ASSERT_NE(abi_model, nullptr);
+
+    double payment_times[] = {1.0, 2.0, 3.0, 4.0, 5.0};
+    double accruals[] = {1.0, 1.0, 1.0, 1.0, 1.0};
+    EngineParam product_params[] = {
+        EngineParam{"notional", ENGINE_PARAM_DOUBLE, 1'000'000.0, nullptr, 0, nullptr},
+        EngineParam{"fixed_rate", ENGINE_PARAM_DOUBLE, 0.02, nullptr, 0, nullptr},
+        EngineParam{"payment_times", ENGINE_PARAM_VECTOR, 0.0, payment_times, 5, nullptr},
+        EngineParam{"accruals", ENGINE_PARAM_VECTOR, 0.0, accruals, 5, nullptr},
+    };
+    EngineProduct* abi_product = engine_abi_create_product("IRSwap", product_params, 4);
+    ASSERT_NE(abi_product, nullptr);
+
+    double pillars[] = {1.0, 2.0};
+    double zero_rates[] = {0.02, 0.02};
+    EngineMarketSnapshot abi_market{pillars, zero_rates, 2, 0.0, 0.0};
+    EnginePricingContext abi_pricing{0.0, 1'000, 1, 7};
+    EngineExecutionContext abi_execution{"cpu", "fp64"};
+
+    EngineHessianEntry* entries = nullptr;
+    std::size_t n_entries = 0;
+    char** skipped = nullptr;
+    std::size_t n_skipped = 0;
+    int rc = engine_abi_hessian(
+        abi_product, "PV", nullptr, 0, abi_model, &abi_market, &abi_pricing, &abi_execution, nullptr, 0, &entries,
+        &n_entries, &skipped, &n_skipped
+    );
+
+    EXPECT_EQ(rc, 0);
+    EXPECT_EQ(n_entries, 0u);
+    EXPECT_GT(n_skipped, 0u);
+
+    engine_abi_free_hessian(entries, n_entries, skipped, n_skipped);
+    engine_abi_free_product(abi_product);
+    engine_abi_free_model(abi_model);
+}
+
+// PLAN_BACKWARD.md §9: NULLs -> return != 0 + engine_abi_last_error no vacio, mismo criterio que
+// el resto de la C ABI (engine_abi_all_greeks incluido).
+TEST(GreeksBackwardAbiTest, HessianWithNullProductReturnsNonZeroAndSetsLastError) {
+    EngineHessianEntry* entries = nullptr;
+    std::size_t n_entries = 0;
+    char** skipped = nullptr;
+    std::size_t n_skipped = 0;
+    int rc = engine_abi_hessian(
+        nullptr, "PayoffPriceQ", nullptr, 0, nullptr, nullptr, nullptr, nullptr, nullptr, 0, &entries, &n_entries,
+        &skipped, &n_skipped
+    );
+
+    EXPECT_NE(rc, 0);
+    EXPECT_EQ(entries, nullptr);
+    EXPECT_EQ(n_entries, 0u);
+    EXPECT_EQ(skipped, nullptr);
+    EXPECT_EQ(n_skipped, 0u);
+
+    std::size_t len = engine_abi_last_error(nullptr, 0);
+    EXPECT_GT(len, 0u);
+}
+
+TEST(GreeksBackwardAbiTest, HvpWithNullDirectionReturnsNonZeroAndSetsLastError) {
+    std::string spec = read_fixture_file("call.json");
+
+    EngineParam model_params[] = {
+        EngineParam{"s0", ENGINE_PARAM_DOUBLE, 100.0, nullptr, 0, nullptr},
+        EngineParam{"r", ENGINE_PARAM_DOUBLE, 0.05, nullptr, 0, nullptr},
+        EngineParam{"q", ENGINE_PARAM_DOUBLE, 0.0, nullptr, 0, nullptr},
+        EngineParam{"sigma", ENGINE_PARAM_DOUBLE, 0.2, nullptr, 0, nullptr},
+        EngineParam{"observable", ENGINE_PARAM_STRING, 0.0, nullptr, 0, "EQ.SPOT.AAPL"},
+    };
+    EngineModel* abi_model = engine_abi_create_model("GBM", model_params, 5);
+    ASSERT_NE(abi_model, nullptr);
+
+    EngineParam spec_param{"spec", ENGINE_PARAM_STRING, 0.0, nullptr, 0, spec.c_str()};
+    EngineProduct* abi_product = engine_abi_create_product("Payoff", &spec_param, 1);
+    ASSERT_NE(abi_product, nullptr);
+
+    double pillars[] = {1.0};
+    double zero_rates[] = {0.05};
+    EngineMarketSnapshot abi_market{pillars, zero_rates, 1, 0.0, 0.0};
+    EnginePricingContext abi_pricing{0.0, 500'000, 1, 7};
+    EngineExecutionContext abi_execution{"cpu", "fp64"};
+
+    EngineHvpComponent* components = nullptr;
+    std::size_t n_components = 0;
+    char** skipped = nullptr;
+    std::size_t n_skipped = 0;
+    int rc = engine_abi_hvp(
+        abi_product, "PayoffPriceQ", nullptr, 0, abi_model, &abi_market, &abi_pricing, &abi_execution, nullptr, nullptr,
+        0, &components, &n_components, &skipped, &n_skipped
+    );
+
+    EXPECT_NE(rc, 0);
+    EXPECT_EQ(components, nullptr);
+    EXPECT_EQ(n_components, 0u);
+    std::size_t len = engine_abi_last_error(nullptr, 0);
+    EXPECT_GT(len, 0u);
+
+    engine_abi_free_product(abi_product);
+    engine_abi_free_model(abi_model);
+}
+
 // --- PLAN_HYPERDUAL.md §5 (revisado): Gamma/Vanna via likelihood ratio -------------------------
 //
 // La generalizacion original del documento (`Dual2`/`HyperDual`) resulto matematicamente

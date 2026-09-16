@@ -308,6 +308,104 @@ engine::greeks::GreeksReport HandleRegistry::all_greeks(
     );
 }
 
+engine::greeks::HessianReport HandleRegistry::hessian(
+    const std::string& product_handle,
+    const std::string& metric_name,
+    const XLOPER12& metric_params_arg,
+    const std::string& model_handle,
+    const std::string& market_handle,
+    const std::string& pricing_handle,
+    const std::string& execution_handle,
+    const XLOPER12& factors_arg
+) const {
+    auto product_it = products_.find(product_handle);
+    if (product_it == products_.end()) {
+        throw std::out_of_range("xlbridge: handle de producto desconocido: " + product_handle);
+    }
+    auto model_it = models_.find(model_handle);
+    if (model_it == models_.end()) {
+        throw std::out_of_range("xlbridge: handle de modelo desconocido: " + model_handle);
+    }
+    auto market_it = markets_.find(market_handle);
+    if (market_it == markets_.end()) {
+        throw std::out_of_range("xlbridge: handle de mercado desconocido: " + market_handle);
+    }
+    auto pricing_it = pricing_contexts_.find(pricing_handle);
+    if (pricing_it == pricing_contexts_.end()) {
+        throw std::out_of_range("xlbridge: handle de contexto de valoracion desconocido: " + pricing_handle);
+    }
+    auto execution_it = execution_contexts_.find(execution_handle);
+    if (execution_it == execution_contexts_.end()) {
+        throw std::out_of_range("xlbridge: handle de contexto de ejecucion desconocido: " + execution_handle);
+    }
+
+    ParsedParams metric_params = table_to_params(metric_params_arg);
+
+    std::vector<engine::greeks::RiskFactor> factors;
+    if (!is_blank(factors_arg)) {
+        for (const std::string& name : read_string_list(factors_arg)) {
+            factors.push_back(engine::greeks::parse_risk_factor(name));
+        }
+    }
+
+    return engine::greeks::compute_hessian(
+        registries_, metric_name, metric_params.params, *model_it->second, *product_it->second,
+        market_it->second, pricing_it->second, execution_it->second, factors
+    );
+}
+
+engine::greeks::HvpReport HandleRegistry::hvp(
+    const std::string& product_handle,
+    const std::string& metric_name,
+    const XLOPER12& metric_params_arg,
+    const std::string& model_handle,
+    const std::string& market_handle,
+    const std::string& pricing_handle,
+    const std::string& execution_handle,
+    const XLOPER12& direction_arg
+) const {
+    auto product_it = products_.find(product_handle);
+    if (product_it == products_.end()) {
+        throw std::out_of_range("xlbridge: handle de producto desconocido: " + product_handle);
+    }
+    auto model_it = models_.find(model_handle);
+    if (model_it == models_.end()) {
+        throw std::out_of_range("xlbridge: handle de modelo desconocido: " + model_handle);
+    }
+    auto market_it = markets_.find(market_handle);
+    if (market_it == markets_.end()) {
+        throw std::out_of_range("xlbridge: handle de mercado desconocido: " + market_handle);
+    }
+    auto pricing_it = pricing_contexts_.find(pricing_handle);
+    if (pricing_it == pricing_contexts_.end()) {
+        throw std::out_of_range("xlbridge: handle de contexto de valoracion desconocido: " + pricing_handle);
+    }
+    auto execution_it = execution_contexts_.find(execution_handle);
+    if (execution_it == execution_contexts_.end()) {
+        throw std::out_of_range("xlbridge: handle de contexto de ejecucion desconocido: " + execution_handle);
+    }
+
+    ParsedParams metric_params = table_to_params(metric_params_arg);
+
+    std::vector<std::pair<std::string, double>> raw_direction = read_string_double_pairs(direction_arg);
+    if (raw_direction.empty()) {
+        throw std::invalid_argument("xlbridge: ENGINE.HVP requiere una direccion no vacia [RiskFactor, Peso]");
+    }
+    std::vector<engine::greeks::RiskFactor> factors;
+    std::vector<double> direction;
+    factors.reserve(raw_direction.size());
+    direction.reserve(raw_direction.size());
+    for (auto& [name, weight] : raw_direction) {
+        factors.push_back(engine::greeks::parse_risk_factor(name));
+        direction.push_back(weight);
+    }
+
+    return engine::greeks::compute_hvp(
+        registries_, metric_name, metric_params.params, *model_it->second, *product_it->second,
+        market_it->second, pricing_it->second, execution_it->second, factors, direction
+    );
+}
+
 void HandleRegistry::clear() {
     models_.clear();
     products_.clear();

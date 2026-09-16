@@ -67,6 +67,13 @@ struct ParsedParams {
 };
 ParsedParams table_to_params(const XLOPER12& params_arg);
 
+// Rango de 2 columnas clave/valor numerico (col 0 = texto, col 1 = numero) -- mismo criterio de
+// "fila en blanco se ignora" que table_to_params, pero sin su logica de tipos mixtos porque el
+// valor es siempre un double. Usado por ENGINE.HVP (PLAN_BACKWARD.md §8.2) para leer el argumento
+// `direction` ([RiskFactor, Peso]) antes de parsear la clave con engine::greeks::parse_risk_factor
+// en handles.cpp -- ningun RiskFactor se resuelve aqui, xloper.cpp no depende de engine::greeks.
+std::vector<std::pair<std::string, double>> read_string_double_pairs(const XLOPER12& x);
+
 // --- Construcción de valores de retorno: todo lo que devuelve una UDF de engine_excel.cpp
 // se reserva en el heap y se marca xlbitDLLFree (PLAN.md Fase 4, §7.8: "todo lo que
 // devolvemos es propiedad de la DLL"), para que Excel llame de vuelta a xlAutoFree12
@@ -99,6 +106,17 @@ XLOPER12* new_price_grid_result(const engine::PriceGridResult& result);
 // StdError en blanco: un unico rango dinamico para toda la respuesta, sin un segundo canal de
 // retorno que Excel no tiene forma de dar de una UDF.
 XLOPER12* new_greeks_report(const engine::greeks::GreeksReport& report);
+
+// Resultado de ENGINE.HESSIAN en formato largo (PLAN_BACKWARD.md §8.2): una fila por
+// HessianEntry -- [RiskFactorI, RiskFactorJ, Value, Method, Measure, StdError]. Mismo criterio
+// "best effort" que new_greeks_report: `HessianReport::skipped` se anade al final con
+// Method="skipped" y el motivo completo en la columna RiskFactorI, el resto en blanco.
+XLOPER12* new_hessian_report(const engine::greeks::HessianReport& report);
+
+// Resultado de ENGINE.HVP en formato largo (PLAN_BACKWARD.md §8.2): una fila por HvpComponent --
+// [RiskFactor, Value, Method]. Mismo criterio "best effort": `HvpReport::skipped` se anade al
+// final con Method="skipped" y el motivo en la columna RiskFactor, Value en blanco.
+XLOPER12* new_hvp_report(const engine::greeks::HvpReport& report);
 
 // Tabla clave/valor (col 0 = clave, col 1.. = valor -- mismo formato que espera
 // table_to_params, para poder pasar directamente el resultado a ENGINE.CREATE_MODEL): los

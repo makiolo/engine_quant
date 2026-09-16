@@ -385,6 +385,87 @@ ENGINE_ABI_API void engine_abi_free_greeks_report(
     EngineGreekResultEntry* greeks, size_t n_greeks, char** skipped, size_t n_skipped
 );
 
+/* --- ENGINE.HESSIAN / ENGINE.HVP (PLAN_BACKWARD.md §8.3/§9 Fase 1-3) ---------------------
+ * Mismo molde exacto que EngineGreekResultEntry/engine_abi_all_greeks de arriba: struct
+ * owned-copy + funcion que rellena out_entries/out_count + free. Hessiano local de un trade
+ * (engine::greeks::compute_hessian) y producto Hessiano-vector H*v (engine::greeks::
+ * compute_hvp) -- ver el doc-comment de esas dos funciones en engine/greeks.hpp para la tabla
+ * de capacidades (GBM/GBM_P via likelihood ratio, HullWhite1F/2F via forward-over-forward) y el
+ * criterio "mejor esfuerzo" (una combinacion no soportada nunca hace fallar la llamada entera:
+ * cae en *out_skipped, igual que engine_abi_all_greeks). */
+
+typedef struct EngineHessianEntry {
+    char* risk_factor_i;   /* copia owned, ver engine::greeks::to_string(RiskFactor) */
+    char* risk_factor_j;   /* factor_i == factor_j -> entrada diagonal (Gamma/Volga) */
+    double value;
+    int has_std_error;     /* 0 o 1 -- valido solo si method_used == "likelihood_ratio_hessian" */
+    double std_error;      /* valido solo si has_std_error == 1 */
+    char* method_used;     /* copia owned, ver engine::greeks::to_string(GreekMethod) */
+    char* measure;         /* copia owned, ver engine::greeks::to_string(ProbabilityMeasure) */
+} EngineHessianEntry;
+
+/* Devuelve 0 en exito (*out_entries/*out_n_entries/*out_skipped/*out_n_skipped quedan rellenos,
+ * liberar con engine_abi_free_hessian) o != 0 en error (product/model/market/pricing/execution/
+ * metric_name NULL -- ver engine_abi_last_error; en ese caso *out_entries/*out_skipped quedan
+ * NULL y los counts a 0). risk_factors/n_risk_factors: NULL/0 = enumeracion automatica de los
+ * factores soportados por (modelo, metrica) (mismo criterio que factors={} en
+ * engine::greeks::compute_hessian); no vacio = solo los pares formables con esos factores. Una
+ * combinacion (modelo, metrica) o un factor no soportado NUNCA hace fallar la llamada entera:
+ * cae en *out_skipped con el motivo, igual que engine_abi_all_greeks. */
+ENGINE_ABI_API int engine_abi_hessian(
+    const EngineProduct* product,
+    const char* metric_name,
+    const EngineParam* metric_params,
+    size_t n_metric_params,
+    const EngineModel* model,
+    const EngineMarketSnapshot* market,
+    const EnginePricingContext* pricing,
+    const EngineExecutionContext* execution,
+    const char** risk_factors,
+    size_t n_risk_factors,
+    EngineHessianEntry** out_entries,
+    size_t* out_n_entries,
+    char*** out_skipped,
+    size_t* out_n_skipped
+);
+ENGINE_ABI_API void engine_abi_free_hessian(
+    EngineHessianEntry* entries, size_t n_entries, char** skipped, size_t n_skipped
+);
+
+typedef struct EngineHvpComponent {
+    char* risk_factor;   /* copia owned, ver engine::greeks::to_string(RiskFactor) */
+    double value;        /* componente de H*v en la posicion de `risk_factor` */
+    char* method_used;   /* copia owned, ver engine::greeks::to_string(GreekMethod) */
+} EngineHvpComponent;
+
+/* Devuelve 0 en exito (*out_components/*out_n_components/*out_skipped/*out_n_skipped quedan
+ * rellenos, liberar con engine_abi_free_hvp) o != 0 en error (product/model/market/pricing/
+ * execution/metric_name NULL, o direction_factors/direction_weights NULL/0 -- a diferencia de
+ * risk_factors en engine_abi_hessian, aqui SIEMPRE son obligatorios, sin el caso "0 =
+ * automatico": un HVP sin direccion no significa nada). direction_factors[i] se empareja con
+ * direction_weights[i], mismo orden -- ver engine::greeks::compute_hvp. Un factor cuya fila del
+ * Hessiano quedo incompleta cae en *out_skipped, nunca se inventa un 0.0 silencioso. */
+ENGINE_ABI_API int engine_abi_hvp(
+    const EngineProduct* product,
+    const char* metric_name,
+    const EngineParam* metric_params,
+    size_t n_metric_params,
+    const EngineModel* model,
+    const EngineMarketSnapshot* market,
+    const EnginePricingContext* pricing,
+    const EngineExecutionContext* execution,
+    const char** direction_factors,
+    const double* direction_weights,
+    size_t n_direction,
+    EngineHvpComponent** out_components,
+    size_t* out_n_components,
+    char*** out_skipped,
+    size_t* out_n_skipped
+);
+ENGINE_ABI_API void engine_abi_free_hvp(
+    EngineHvpComponent* components, size_t n_components, char** skipped, size_t n_skipped
+);
+
 ENGINE_ABI_API int engine_abi_is_gpu_backend_available(void);
 
 /* --- Errores --------------------------------------------------------------------------

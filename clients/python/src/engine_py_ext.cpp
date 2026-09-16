@@ -45,6 +45,20 @@ engine::Params dict_to_params(const nb::dict& params) {
     return result;
 }
 
+// Traduce list[str] (nombres namespaced "model.spot" etc, PLAN_GREEKS.md §3.1) a
+// vector<RiskFactor> vía engine::greeks::parse_risk_factor -- helper compartido por
+// Engine.hessian/Engine.hvp (PLAN_BACKWARD.md §8.1) para no duplicar el bucle de parseo; no hacia
+// falta uno análogo para all_greeks porque ese método no toma factores explícitos, solo el flag
+// de enumeración automática.
+std::vector<engine::greeks::RiskFactor> parse_risk_factor_list(const std::vector<std::string>& names) {
+    std::vector<engine::greeks::RiskFactor> result;
+    result.reserve(names.size());
+    for (const auto& name : names) {
+        result.push_back(engine::greeks::parse_risk_factor(name));
+    }
+    return result;
+}
+
 // Traduce un elemento de la lista `measures` de Engine.price/price_batch/price_many/price_grid a
 // un engine::MeasureSpec (PLAN_REAPI.md §6 Fase 3): un string "pelado" (measure_names de
 // siempre, PLAN.md §7.15/§7.19) es MeasureSpec{name, {}}; una tupla (nombre, dict) es
@@ -198,6 +212,66 @@ public:
         return engine::greeks::compute_all_greeks(
             registries_, metric_name, dict_to_params(metric_params), model, product, market, pricing, execution,
             include_curve_buckets, include_second_order
+        );
+    }
+
+    // Hessiano local de un trade (PLAN_BACKWARD.md §7-8/§9 Fase 1-3): expone
+    // engine::greeks::compute_hessian tal cual, sin dataclasses intermedias -- mismo criterio que
+    // all_greeks de arriba. risk_factors=None (Python) se traduce al vector vacio de
+    // compute_hessian (enumeracion automatica); una lista de strings se parsea con
+    // parse_risk_factor_list (mismo helper que usa hvp() debajo).
+    engine::greeks::HessianReport hessian(
+        const engine::IProduct& product,
+        const std::string& metric_name,
+        const engine::IModel& model,
+        const engine::MarketSnapshot& market,
+        const engine::PricingContext& pricing,
+        const engine::ExecutionContext& execution,
+        const nb::dict& metric_params,
+        const std::optional<std::vector<std::string>>& risk_factors
+    ) const {
+        std::vector<engine::greeks::RiskFactor> factors;
+        if (risk_factors.has_value()) {
+            factors = parse_risk_factor_list(*risk_factors);
+        }
+        return engine::greeks::compute_hessian(
+            registries_, metric_name, dict_to_params(metric_params), model, product, market, pricing, execution,
+            factors
+        );
+    }
+
+    // Producto Hessiano-vector "H*v" (PLAN_BACKWARD.md §7-8/§9 Fase 3): `direction` es un dict
+    // disperso {risk_factor_str: peso} (PLAN_BACKWARD.md §8.1) -- se traduce a los dos vectores
+    // paralelos (`factors`, `direction`) que exige engine::greeks::compute_hvp, en el orden de
+    // iteracion del dict (Python 3.7+ preserva insercion).
+    engine::greeks::HvpReport hvp(
+        const engine::IProduct& product,
+        const std::string& metric_name,
+        const engine::IModel& model,
+        const engine::MarketSnapshot& market,
+        const engine::PricingContext& pricing,
+        const engine::ExecutionContext& execution,
+        const nb::dict& direction,
+        const nb::dict& metric_params
+    ) const {
+        if (direction.size() == 0) {
+            // A diferencia de risk_factors=None en hessian() (que SI acepta "vacio = enumeracion
+            // automatica"), un HVP sin direccion no significa nada -- mismo criterio que
+            // xlbridge::HandleRegistry::hvp (Excel) y engine_abi_hvp (C ABI), que tambien
+            // rechazan esto explicito en vez de devolver un HvpReport vacio silencioso.
+            throw std::invalid_argument("Engine.hvp: direction no puede estar vacio (siempre obligatorio, sin auto-enumeracion)");
+        }
+        std::vector<engine::greeks::RiskFactor> factors;
+        std::vector<double> weights;
+        factors.reserve(direction.size());
+        weights.reserve(direction.size());
+        for (auto item : direction) {
+            factors.push_back(engine::greeks::parse_risk_factor(nb::cast<std::string>(item.first)));
+            weights.push_back(nb::cast<double>(item.second));
+        }
+        return engine::greeks::compute_hvp(
+            registries_, metric_name, dict_to_params(metric_params), model, product, market, pricing, execution,
+            factors, weights
         );
     }
 
@@ -355,6 +429,61 @@ NB_MODULE(engine, m) {
         .def_ro("skipped", &engine::greeks::GreeksReport::skipped)
         .def("__repr__", [](const engine::greeks::GreeksReport& self) {
             return "<GreeksReport greeks=" + std::to_string(self.greeks.size()) +
+                   " skipped=" + std::to_string(self.skipped.size()) + ">";
+        });
+
+    // --- Hessiano/HVP (PLAN_BACKWARD.md §7-8/§9 Fase 1-3): mismo criterio de serializacion que
+    // GreekResult/GreeksReport de arriba -- risk_factor/method_used/measure como texto via
+    // engine::greeks::to_string, ningun enum C++ expuesto directamente.
+    nb::class_<engine::greeks::HessianEntry>(m, "HessianEntry")
+        .def_prop_ro(
+            "factor_i", [](const engine::greeks::HessianEntry& self) { return engine::greeks::to_string(self.factor_i); }
+        )
+        .def_prop_ro(
+            "factor_j", [](const engine::greeks::HessianEntry& self) { return engine::greeks::to_string(self.factor_j); }
+        )
+        .def_ro("value", &engine::greeks::HessianEntry::value)
+        .def_ro("std_error", &engine::greeks::HessianEntry::std_error)
+        .def_prop_ro(
+            "method_used",
+            [](const engine::greeks::HessianEntry& self) { return engine::greeks::to_string(self.method_used); }
+        )
+        .def_prop_ro(
+            "measure", [](const engine::greeks::HessianEntry& self) { return engine::greeks::to_string(self.measure); }
+        )
+        .def("__repr__", [](const engine::greeks::HessianEntry& self) {
+            return "<HessianEntry factor_i='" + engine::greeks::to_string(self.factor_i) +
+                   "' factor_j='" + engine::greeks::to_string(self.factor_j) +
+                   "' value=" + std::to_string(self.value) + ">";
+        });
+
+    nb::class_<engine::greeks::HessianReport>(m, "HessianReport")
+        .def_ro("entries", &engine::greeks::HessianReport::entries)
+        .def_ro("skipped", &engine::greeks::HessianReport::skipped)
+        .def("__repr__", [](const engine::greeks::HessianReport& self) {
+            return "<HessianReport entries=" + std::to_string(self.entries.size()) +
+                   " skipped=" + std::to_string(self.skipped.size()) + ">";
+        });
+
+    nb::class_<engine::greeks::HvpComponent>(m, "HvpComponent")
+        .def_prop_ro(
+            "factor", [](const engine::greeks::HvpComponent& self) { return engine::greeks::to_string(self.factor); }
+        )
+        .def_ro("value", &engine::greeks::HvpComponent::value)
+        .def_prop_ro(
+            "method_used",
+            [](const engine::greeks::HvpComponent& self) { return engine::greeks::to_string(self.method_used); }
+        )
+        .def("__repr__", [](const engine::greeks::HvpComponent& self) {
+            return "<HvpComponent factor='" + engine::greeks::to_string(self.factor) +
+                   "' value=" + std::to_string(self.value) + ">";
+        });
+
+    nb::class_<engine::greeks::HvpReport>(m, "HvpReport")
+        .def_ro("components", &engine::greeks::HvpReport::components)
+        .def_ro("skipped", &engine::greeks::HvpReport::skipped)
+        .def("__repr__", [](const engine::greeks::HvpReport& self) {
+            return "<HvpReport components=" + std::to_string(self.components.size()) +
                    " skipped=" + std::to_string(self.skipped.size()) + ">";
         });
 
@@ -588,5 +717,47 @@ NB_MODULE(engine, m) {
             ".skipped: list[str] con el motivo de cada candidato que no aplico).\n\n"
             ">>> report = eng.all_greeks(trade, 'PayoffPriceQ', model, market, pricing, execution)\n"
             ">>> for g in report.greeks: print(g.risk_factor, g.value, g.method_used, g.measure)"
+        )
+        .def(
+            "hessian",
+            &Engine::hessian,
+            nb::arg("product"),
+            nb::arg("metric_name"),
+            nb::arg("model"),
+            nb::arg("market"),
+            nb::arg("pricing"),
+            nb::arg("execution"),
+            nb::arg("metric_params") = nb::dict(),
+            nb::arg("risk_factors") = nb::none(),
+            "Hessiano local de un trade (PLAN_BACKWARD.md §7-9 Fase 1-3): mejor esfuerzo, nunca "
+            "lanza sobre una combinacion (modelo, metrica) no soportada -- cae en "
+            "HessianReport.skipped con el motivo. risk_factors=None enumera automaticamente los "
+            "candidatos soportados (mismo criterio que all_greeks); una list[str] pide solo esos "
+            "factores namespaced (\"model.spot\", \"model.volatility\", ...). Devuelve un "
+            "HessianReport (.entries: list[HessianEntry], triangulo superior + diagonal; "
+            ".skipped: list[str]).\n\n"
+            ">>> report = eng.hessian(trade, 'PayoffPriceQ', model, market, pricing, execution)\n"
+            ">>> for e in report.entries: print(e.factor_i, e.factor_j, e.value, e.method_used)"
+        )
+        .def(
+            "hvp",
+            &Engine::hvp,
+            nb::arg("product"),
+            nb::arg("metric_name"),
+            nb::arg("model"),
+            nb::arg("market"),
+            nb::arg("pricing"),
+            nb::arg("execution"),
+            nb::arg("direction"),
+            nb::arg("metric_params") = nb::dict(),
+            "Producto Hessiano-vector H*v (PLAN_BACKWARD.md §7-9 Fase 3): `direction` es un dict "
+            "disperso {\"model.spot\": 1.0, \"model.volatility\": 0.0, ...} (factores ausentes = "
+            "peso 0) -- se apoya en el Hessiano de hessian() sobre esos mismos factores, mismo "
+            "criterio 'mejor esfuerzo' (un factor con fila incompleta va a HvpReport.skipped, "
+            "nunca 0.0 silencioso). Devuelve un HvpReport (.components: list[HvpComponent], "
+            ".skipped: list[str]).\n\n"
+            ">>> report = eng.hvp(trade, 'HullWhiteModelNpv', model, market, pricing, execution, "
+            "{'model.a': 1.0, 'model.sigma': 0.5})\n"
+            ">>> for c in report.components: print(c.factor, c.value, c.method_used)"
         );
 }

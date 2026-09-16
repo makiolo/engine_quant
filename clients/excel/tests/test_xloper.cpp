@@ -439,6 +439,131 @@ TEST(HandleRegistry, AllGreeksWithAnUnknownMetricNameSkipsEveryCandidateInsteadO
     EXPECT_FALSE(report.skipped.empty());
 }
 
+// PLAN_BACKWARD.md §8.2/§9 Fase 2: HandleRegistry::hessian delega en compute_hessian sin
+// reimplementar nada -- mismo fixture (HullWhite1F + IRSwap par a 5y) que
+// GreeksHessianHullWhiteTest.ComputeHessianWithEmptyFactorsReturnsAllTenEntriesViaForwardOverForward
+// (cpp/engine/tests/test_greeks.cpp): 4 parametros (a,b,sigma,r0) -> 10 entradas (triangulo
+// superior + diagonal), todas via AadForwardOverForward, sin candidatos omitidos.
+TEST(HandleRegistry, HessianOnHullWhite1FSwapReturnsTenEntriesWithEmptyFactors) {
+    xlbridge::HandleRegistry registry = make_registry();
+    std::vector<std::vector<XCHAR>> model_bufs, product_bufs, market_bufs, pricing_bufs, execution_bufs;
+    std::vector<XLOPER12> model_cells, product_cells, market_cells, pricing_cells, execution_cells;
+
+    std::string model = registry.create_model("HullWhite1F", hull_white_params_table(model_bufs, model_cells));
+    std::string product = registry.create_product("IRSwap", par_irs_5y_params_table(product_bufs, product_cells));
+    std::string market = registry.create_market(market_params_table(market_bufs, market_cells));
+    std::string pricing = registry.create_context(pricing_context_table(pricing_bufs, pricing_cells, 1000.0, 7.0));
+    std::string execution = registry.create_execution(cpu_execution_table(execution_bufs, execution_cells));
+
+    XLOPER12 no_metric_params = missing_arg();
+    XLOPER12 no_factors = missing_arg();
+    engine::greeks::HessianReport report = registry.hessian(
+        product, "HullWhiteModelNpv", no_metric_params, model, market, pricing, execution, no_factors
+    );
+
+    EXPECT_TRUE(report.skipped.empty());
+    ASSERT_EQ(report.entries.size(), 10u);
+    for (const auto& entry : report.entries) {
+        EXPECT_EQ(entry.method_used, engine::greeks::GreekMethod::AadForwardOverForward);
+    }
+}
+
+// factors_arg no vacio (una columna de strings namespaced): pide solo el sub-Hessiano formable
+// con esos factores -- aqui solo "model.a", asi que la unica entrada posible es la diagonal
+// model.a x model.a (PLAN_BACKWARD.md §7: "no vacio = solo los pares formables con esos
+// factores").
+TEST(HandleRegistry, HessianWithExplicitFactorsRestrictsToTheRequestedSubHessian) {
+    xlbridge::HandleRegistry registry = make_registry();
+    std::vector<std::vector<XCHAR>> model_bufs, product_bufs, market_bufs, pricing_bufs, execution_bufs, factor_bufs;
+    std::vector<XLOPER12> model_cells, product_cells, market_cells, pricing_cells, execution_cells, factor_cells;
+
+    std::string model = registry.create_model("HullWhite1F", hull_white_params_table(model_bufs, model_cells));
+    std::string product = registry.create_product("IRSwap", par_irs_5y_params_table(product_bufs, product_cells));
+    std::string market = registry.create_market(market_params_table(market_bufs, market_cells));
+    std::string pricing = registry.create_context(pricing_context_table(pricing_bufs, pricing_cells, 1000.0, 7.0));
+    std::string execution = registry.create_execution(cpu_execution_table(execution_bufs, execution_cells));
+
+    factor_cells = {str_cell(factor_bufs, "model.a")};
+    XLOPER12 factors_table = make_table(factor_cells, 1, 1);
+    XLOPER12 no_metric_params = missing_arg();
+
+    engine::greeks::HessianReport report =
+        registry.hessian(product, "HullWhiteModelNpv", no_metric_params, model, market, pricing, execution, factors_table);
+
+    ASSERT_EQ(report.entries.size(), 1u);
+    EXPECT_EQ(report.entries.front().factor_i.name, "a");
+    EXPECT_EQ(report.entries.front().factor_j.name, "a");
+}
+
+// PLAN_BACKWARD.md §8.2/§9 Fase 3: HandleRegistry::hvp delega en compute_hvp, que a su vez se
+// apoya en compute_hessian -- mismo fixture que arriba, direccion = vector base e_a (peso 1 en
+// "model.a", el resto implicitamente 0 al no listarlos) reproduce la fila `a` del Hessiano de
+// arriba (mismo oraculo que GreeksHvpTest en cpp/engine/tests/test_greeks.cpp).
+TEST(HandleRegistry, HvpWithUnitDirectionOnModelAMatchesTheHessianRow) {
+    xlbridge::HandleRegistry registry = make_registry();
+    std::vector<std::vector<XCHAR>> model_bufs, product_bufs, market_bufs, pricing_bufs, execution_bufs, direction_bufs;
+    std::vector<XLOPER12> model_cells, product_cells, market_cells, pricing_cells, execution_cells, direction_cells;
+
+    std::string model = registry.create_model("HullWhite1F", hull_white_params_table(model_bufs, model_cells));
+    std::string product = registry.create_product("IRSwap", par_irs_5y_params_table(product_bufs, product_cells));
+    std::string market = registry.create_market(market_params_table(market_bufs, market_cells));
+    std::string pricing = registry.create_context(pricing_context_table(pricing_bufs, pricing_cells, 1000.0, 7.0));
+    std::string execution = registry.create_execution(cpu_execution_table(execution_bufs, execution_cells));
+
+    direction_cells = {
+        str_cell(direction_bufs, "model.a"), num_cell(1.0),
+        str_cell(direction_bufs, "model.b"), num_cell(0.0),
+        str_cell(direction_bufs, "model.sigma"), num_cell(0.0),
+        str_cell(direction_bufs, "model.r0"), num_cell(0.0),
+    };
+    XLOPER12 direction_table = make_table(direction_cells, 4, 2);
+    XLOPER12 no_metric_params = missing_arg();
+
+    engine::greeks::HvpReport hvp_report =
+        registry.hvp(product, "HullWhiteModelNpv", no_metric_params, model, market, pricing, execution, direction_table);
+
+    XLOPER12 no_factors = missing_arg();
+    engine::greeks::HessianReport hessian_report = registry.hessian(
+        product, "HullWhiteModelNpv", no_metric_params, model, market, pricing, execution, no_factors
+    );
+    std::unordered_map<std::string, double> hessian_row_a;
+    for (const auto& entry : hessian_report.entries) {
+        if (entry.factor_i.name == "a") hessian_row_a[entry.factor_j.name] = entry.value;
+        else if (entry.factor_j.name == "a") hessian_row_a[entry.factor_i.name] = entry.value;
+    }
+
+    EXPECT_TRUE(hvp_report.skipped.empty());
+    ASSERT_EQ(hvp_report.components.size(), 4u);
+    for (const auto& c : hvp_report.components) {
+        ASSERT_TRUE(hessian_row_a.count(c.factor.name)) << c.factor.name;
+        EXPECT_NEAR(c.value, hessian_row_a.at(c.factor.name), 1e-8) << c.factor.name;
+    }
+}
+
+// direction_arg vacio (rango omitido/en blanco): ENGINE.HVP no significa nada sin una direccion,
+// asi que HandleRegistry::hvp lanza -- a diferencia de factors_arg en hessian(), que si acepta
+// "vacio = enumeracion automatica" (PLAN_BACKWARD.md: "ambos SIEMPRE requeridos" para hvp, sin
+// el caso "0 = automatico" que si tiene hessian).
+TEST(HandleRegistry, HvpWithEmptyDirectionThrows) {
+    xlbridge::HandleRegistry registry = make_registry();
+    std::vector<std::vector<XCHAR>> model_bufs, product_bufs, market_bufs, pricing_bufs, execution_bufs;
+    std::vector<XLOPER12> model_cells, product_cells, market_cells, pricing_cells, execution_cells;
+
+    std::string model = registry.create_model("HullWhite1F", hull_white_params_table(model_bufs, model_cells));
+    std::string product = registry.create_product("IRSwap", par_irs_5y_params_table(product_bufs, product_cells));
+    std::string market = registry.create_market(market_params_table(market_bufs, market_cells));
+    std::string pricing = registry.create_context(pricing_context_table(pricing_bufs, pricing_cells, 1000.0, 7.0));
+    std::string execution = registry.create_execution(cpu_execution_table(execution_bufs, execution_cells));
+
+    XLOPER12 no_metric_params = missing_arg();
+    XLOPER12 empty_direction = missing_arg();
+
+    EXPECT_THROW(
+        registry.hvp(product, "HullWhiteModelNpv", no_metric_params, model, market, pricing, execution, empty_direction),
+        std::invalid_argument
+    );
+}
+
 // PLAN.md §7.19: HandleRegistry::price_batch (lote homogéneo) debe coincidir, trade a trade,
 // con llamar a price() una vez por trade -- mismo espíritu que Price.MatchesALoopOfScalarCalls
 // en cpp/engine/tests/test_registry.cpp.
@@ -925,6 +1050,103 @@ TEST(NewGreeksReport, MixesScalarRowsBumpUsedAndSkippedInLongFormat) {
 TEST(NewGreeksReport, EmptyResultBecomesNaError) {
     engine::greeks::GreeksReport report;
     XLOPER12* out = xlbridge::new_greeks_report(report);
+    EXPECT_EQ(xl_base_type(*out), static_cast<DWORD>(xltypeErr));
+    xlbridge::free_xloper(out);
+}
+
+// PLAN_BACKWARD.md §8.2: formato largo de ENGINE.HESSIAN -- [RiskFactorI, RiskFactorJ, Value,
+// Method, Measure, StdError], con HessianReport::skipped anadido al final (mismo criterio que
+// NewGreeksReport.MixesScalarRowsBumpUsedAndSkippedInLongFormat de arriba).
+TEST(NewHessianReport, MixesEntriesAndSkippedInLongFormat) {
+    engine::greeks::HessianReport report;
+
+    engine::greeks::HessianEntry gamma;
+    gamma.factor_i = engine::greeks::RiskFactor{engine::greeks::RiskFactorKind::ModelParameter, "model", "spot", std::nullopt};
+    gamma.factor_j = gamma.factor_i;
+    gamma.value = 0.042;
+    gamma.std_error = 0.001;
+    gamma.method_used = engine::greeks::GreekMethod::LikelihoodRatioHessian;
+    gamma.measure = engine::payoff::ProbabilityMeasure::RiskNeutralQ;
+    report.entries.push_back(gamma);
+
+    engine::greeks::HessianEntry vanna;
+    vanna.factor_i = engine::greeks::RiskFactor{engine::greeks::RiskFactorKind::ModelParameter, "model", "spot", std::nullopt};
+    vanna.factor_j =
+        engine::greeks::RiskFactor{engine::greeks::RiskFactorKind::ModelParameter, "model", "volatility", std::nullopt};
+    vanna.value = -0.7;
+    vanna.method_used = engine::greeks::GreekMethod::AadForwardOverForward;
+    vanna.measure = engine::payoff::ProbabilityMeasure::DeterministicScenario;
+    report.entries.push_back(vanna);
+
+    report.skipped.push_back("model.rho x model.rho: no diferenciable");
+
+    XLOPER12* out = xlbridge::new_hessian_report(report);
+    ASSERT_EQ(xl_base_type(*out), static_cast<DWORD>(xltypeMulti));
+    EXPECT_EQ(out->val.array.columns, 6);
+    ASSERT_EQ(out->val.array.rows, 3);
+
+    const XLOPER12* rows = out->val.array.lparray;
+    EXPECT_EQ(xlbridge::from_xl_string(rows[0 * 6 + 0].val.str + 1, rows[0 * 6 + 0].val.str[0]), "model.spot");
+    EXPECT_EQ(xlbridge::from_xl_string(rows[0 * 6 + 1].val.str + 1, rows[0 * 6 + 1].val.str[0]), "model.spot");
+    EXPECT_DOUBLE_EQ(rows[0 * 6 + 2].val.num, 0.042);
+    EXPECT_EQ(xlbridge::from_xl_string(rows[0 * 6 + 3].val.str + 1, rows[0 * 6 + 3].val.str[0]), "likelihood_ratio_hessian");
+    EXPECT_DOUBLE_EQ(rows[0 * 6 + 5].val.num, 0.001);
+
+    EXPECT_EQ(xl_base_type(rows[1 * 6 + 5]), static_cast<DWORD>(xltypeNil)); // StdError ausente (Vanna AAD)
+
+    EXPECT_EQ(
+        xlbridge::from_xl_string(rows[2 * 6 + 0].val.str + 1, rows[2 * 6 + 0].val.str[0]),
+        "model.rho x model.rho: no diferenciable"
+    );
+    EXPECT_EQ(xlbridge::from_xl_string(rows[2 * 6 + 3].val.str + 1, rows[2 * 6 + 3].val.str[0]), "skipped");
+    EXPECT_EQ(xl_base_type(rows[2 * 6 + 2]), static_cast<DWORD>(xltypeNil));
+
+    xlbridge::free_xloper(out);
+}
+
+TEST(NewHessianReport, EmptyResultBecomesNaError) {
+    engine::greeks::HessianReport report;
+    XLOPER12* out = xlbridge::new_hessian_report(report);
+    EXPECT_EQ(xl_base_type(*out), static_cast<DWORD>(xltypeErr));
+    xlbridge::free_xloper(out);
+}
+
+// PLAN_BACKWARD.md §8.2: formato largo de ENGINE.HVP -- [RiskFactor, Value, Method], con
+// HvpReport::skipped anadido al final.
+TEST(NewHvpReport, MixesComponentsAndSkippedInLongFormat) {
+    engine::greeks::HvpReport report;
+
+    engine::greeks::HvpComponent c1;
+    c1.factor = engine::greeks::RiskFactor{engine::greeks::RiskFactorKind::ModelParameter, "model", "a", std::nullopt};
+    c1.value = 12.5;
+    c1.method_used = engine::greeks::GreekMethod::AadForwardOverForward;
+    report.components.push_back(c1);
+
+    report.skipped.push_back("model.rho: fila incompleta del Hessiano");
+
+    XLOPER12* out = xlbridge::new_hvp_report(report);
+    ASSERT_EQ(xl_base_type(*out), static_cast<DWORD>(xltypeMulti));
+    EXPECT_EQ(out->val.array.columns, 3);
+    ASSERT_EQ(out->val.array.rows, 2);
+
+    const XLOPER12* rows = out->val.array.lparray;
+    EXPECT_EQ(xlbridge::from_xl_string(rows[0 * 3 + 0].val.str + 1, rows[0 * 3 + 0].val.str[0]), "model.a");
+    EXPECT_DOUBLE_EQ(rows[0 * 3 + 1].val.num, 12.5);
+    EXPECT_EQ(xlbridge::from_xl_string(rows[0 * 3 + 2].val.str + 1, rows[0 * 3 + 2].val.str[0]), "aad_forward_over_forward");
+
+    EXPECT_EQ(
+        xlbridge::from_xl_string(rows[1 * 3 + 0].val.str + 1, rows[1 * 3 + 0].val.str[0]),
+        "model.rho: fila incompleta del Hessiano"
+    );
+    EXPECT_EQ(xl_base_type(rows[1 * 3 + 1]), static_cast<DWORD>(xltypeNil));
+    EXPECT_EQ(xlbridge::from_xl_string(rows[1 * 3 + 2].val.str + 1, rows[1 * 3 + 2].val.str[0]), "skipped");
+
+    xlbridge::free_xloper(out);
+}
+
+TEST(NewHvpReport, EmptyResultBecomesNaError) {
+    engine::greeks::HvpReport report;
+    XLOPER12* out = xlbridge::new_hvp_report(report);
     EXPECT_EQ(xl_base_type(*out), static_cast<DWORD>(xltypeErr));
     xlbridge::free_xloper(out);
 }

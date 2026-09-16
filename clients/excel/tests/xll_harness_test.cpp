@@ -124,13 +124,22 @@ int main() {
     // PLAN_PRODUCTS.md Fase 10: +2 (ENGINE.VALIDATE_PAYOFF_SPEC/ENGINE.EXPLAIN_PRODUCT) sobre
     // las 15 anteriores (PLAN.md §7.19: +3 ENGINE.PRICE_BATCH/CALC_MANY/CALC_GRID sobre las 12
     // previas). PLAN_GREEKS.md §9.2 Fase 9: +1 (ENGINE.ALL_GREEKS) sobre las 17 previas.
-    ok &= check(g_register_calls == 18, "xlAutoOpen registra exactamente 18 UDFs via xlfRegister");
+    // PLAN_BACKWARD.md §8.2/§9: +2 (ENGINE.HESSIAN/ENGINE.HVP) sobre las 18 previas.
+    ok &= check(g_register_calls == 20, "xlAutoOpen registra exactamente 20 UDFs via xlfRegister");
     for (const auto& name : g_registered_names) {
         ok &= check(name.rfind("ENGINE.", 0) == 0, "cada UDF registrada se llama ENGINE.*");
     }
     ok &= check(
         std::find(g_registered_names.begin(), g_registered_names.end(), "ENGINE.ALL_GREEKS") != g_registered_names.end(),
         "\"ENGINE.ALL_GREEKS\" aparece entre las UDFs registradas"
+    );
+    ok &= check(
+        std::find(g_registered_names.begin(), g_registered_names.end(), "ENGINE.HESSIAN") != g_registered_names.end(),
+        "\"ENGINE.HESSIAN\" aparece entre las UDFs registradas"
+    );
+    ok &= check(
+        std::find(g_registered_names.begin(), g_registered_names.end(), "ENGINE.HVP") != g_registered_names.end(),
+        "\"ENGINE.HVP\" aparece entre las UDFs registradas"
     );
 
     LPXLOPER12 models = list_models();

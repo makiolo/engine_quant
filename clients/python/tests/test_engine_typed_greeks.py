@@ -128,6 +128,120 @@ def test_all_greeks_include_second_order_adds_gamma_for_each_model_parameter():
     assert ("time.theta", 2) not in orders
 
 
+# --- Engine.hessian/Engine.hvp (PLAN_BACKWARD.md §8.1/§9 Fase 1-3): mismo criterio de arriba --
+# aqui solo se confirma que el binding nanobind expone la misma superficie/semantica que
+# engine::greeks::compute_hessian/compute_hvp (ya verificados exhaustivamente por
+# GreeksHessianTest/GreeksHvpTest en cpp/engine/tests/test_greeks.cpp), no se repite la
+# verificacion numerica fina.
+
+
+def _hull_white_params():
+    return {"a": 0.1, "b": 0.03, "sigma": 0.01, "r0": 0.02}
+
+
+def _par_irs_5y_params():
+    return {
+        "notional": 1_000_000.0,
+        "payment_times": [1.0, 2.0, 3.0, 4.0, 5.0],
+        "accruals": [1.0, 1.0, 1.0, 1.0, 1.0],
+    }
+
+
+def _hull_white_swap_fixture():
+    eng = engine.Engine()
+    model = eng.create_model("HullWhite1F", _hull_white_params())
+    product = eng.create_product("IRSwap", _par_irs_5y_params())
+    market = engine.MarketSnapshot(pillars=[1.0, 2.0], zero_rates=[0.02, 0.02])
+    pricing = engine.PricingContext({"pricing_date": 0.0, "n_paths": 1000.0, "n_steps": 1.0, "seed": 7.0})
+    execution = engine.ExecutionContext({"backend": "cpu"})
+    return eng, product, model, market, pricing, execution
+
+
+def test_hessian_on_gbm_call_returns_gamma_volga_vanna_via_likelihood_ratio():
+    eng, product, model, market, pricing, execution = _gbm_call_fixture()
+    report = eng.hessian(product, "PayoffPriceQ", model, market, pricing, execution)
+
+    assert report.skipped == []
+    pairs = {(e.factor_i, e.factor_j) for e in report.entries}
+    assert pairs == {
+        ("model.spot", "model.spot"),
+        ("model.volatility", "model.volatility"),
+        ("model.spot", "model.volatility"),
+    }
+    for e in report.entries:
+        assert e.method_used == "likelihood_ratio_hessian"
+        assert e.measure == "RiskNeutralQ"
+        assert e.std_error is not None
+
+
+def test_hvp_on_gbm_call_with_unit_direction_matches_the_hessian_row():
+    eng, product, model, market, pricing, execution = _gbm_call_fixture()
+    hessian_report = eng.hessian(product, "PayoffPriceQ", model, market, pricing, execution)
+    hvp_report = eng.hvp(
+        product, "PayoffPriceQ", model, market, pricing, execution,
+        direction={"model.spot": 1.0, "model.volatility": 0.0},
+    )
+
+    assert hvp_report.skipped == []
+    by_pair = {(e.factor_i, e.factor_j): e.value for e in hessian_report.entries}
+    hessian_row_spot = {
+        "model.spot": by_pair[("model.spot", "model.spot")],
+        "model.volatility": by_pair[("model.spot", "model.volatility")],
+    }
+    assert len(hvp_report.components) == 2
+    for c in hvp_report.components:
+        assert math.isclose(c.value, hessian_row_spot[c.factor], rel_tol=0.0, abs_tol=1e-9)
+
+
+def test_hessian_on_hull_white1f_swap_returns_ten_entries_via_forward_over_forward():
+    eng, product, model, market, pricing, execution = _hull_white_swap_fixture()
+    report = eng.hessian(product, "HullWhiteModelNpv", model, market, pricing, execution)
+
+    assert report.skipped == []
+    assert len(report.entries) == 10
+    for e in report.entries:
+        assert e.method_used == "aad_forward_over_forward"
+
+
+def test_hessian_with_explicit_factors_restricts_to_the_requested_sub_hessian():
+    eng, product, model, market, pricing, execution = _hull_white_swap_fixture()
+    report = eng.hessian(product, "HullWhiteModelNpv", model, market, pricing, execution, risk_factors=["model.a"])
+
+    assert len(report.entries) == 1
+    assert report.entries[0].factor_i == "model.a"
+    assert report.entries[0].factor_j == "model.a"
+
+
+def test_hvp_on_hull_white1f_swap_with_unit_direction_on_a_matches_the_hessian_row():
+    eng, product, model, market, pricing, execution = _hull_white_swap_fixture()
+    hessian_report = eng.hessian(product, "HullWhiteModelNpv", model, market, pricing, execution)
+    hvp_report = eng.hvp(
+        product, "HullWhiteModelNpv", model, market, pricing, execution,
+        direction={"model.a": 1.0, "model.b": 0.0, "model.sigma": 0.0, "model.r0": 0.0},
+    )
+
+    assert hvp_report.skipped == []
+    hessian_row_a = {}
+    for e in hessian_report.entries:
+        if e.factor_i == "model.a":
+            hessian_row_a[e.factor_j] = e.value
+        elif e.factor_j == "model.a":
+            hessian_row_a[e.factor_i] = e.value
+
+    assert len(hvp_report.components) == 4
+    for c in hvp_report.components:
+        assert math.isclose(c.value, hessian_row_a[c.factor], rel_tol=0.0, abs_tol=1e-8)
+
+
+def test_hvp_with_empty_direction_raises():
+    eng, product, model, market, pricing, execution = _hull_white_swap_fixture()
+    try:
+        eng.hvp(product, "HullWhiteModelNpv", model, market, pricing, execution, direction={})
+    except Exception:
+        return
+    raise AssertionError("se esperaba una excepcion con direction={} (HVP sin direccion no significa nada)")
+
+
 if __name__ == "__main__":
     test_delta_to_spec_uses_the_model_prefix()
     test_vega_and_rho_default_risk_factors()
@@ -141,4 +255,10 @@ if __name__ == "__main__":
     test_delta_of_a_call_through_price_matches_black_scholes()
     test_all_greeks_on_gbm_returns_the_four_model_parameters_plus_curve_credit_and_theta()
     test_all_greeks_include_second_order_adds_gamma_for_each_model_parameter()
-    print("OK: tests de engine_typed.greeks/Engine.all_greeks pasaron")
+    test_hessian_on_gbm_call_returns_gamma_volga_vanna_via_likelihood_ratio()
+    test_hvp_on_gbm_call_with_unit_direction_matches_the_hessian_row()
+    test_hessian_on_hull_white1f_swap_returns_ten_entries_via_forward_over_forward()
+    test_hessian_with_explicit_factors_restricts_to_the_requested_sub_hessian()
+    test_hvp_on_hull_white1f_swap_with_unit_direction_on_a_matches_the_hessian_row()
+    test_hvp_with_empty_direction_raises()
+    print("OK: tests de engine_typed.greeks/Engine.all_greeks/Engine.hessian/Engine.hvp pasaron")

@@ -134,6 +134,36 @@ public:
         bool include_second_order
     ) const;
 
+    // Hessiano local de un trade (PLAN_BACKWARD.md §8.2/§9 Fase 1-3), mismos handles de entrada
+    // que all_greeks -- ver engine::greeks::compute_hessian. factors_arg es un rango vertical de
+    // strings namespaced ("model.spot", ...) igual que read_string_list ya usa para
+    // measure_names; en blanco/omitido = enumeracion automatica (factors={}).
+    engine::greeks::HessianReport hessian(
+        const std::string& product_handle,
+        const std::string& metric_name,
+        const XLOPER12& metric_params_arg,
+        const std::string& model_handle,
+        const std::string& market_handle,
+        const std::string& pricing_handle,
+        const std::string& execution_handle,
+        const XLOPER12& factors_arg
+    ) const;
+
+    // Producto Hessiano-vector H*v (PLAN_BACKWARD.md §8.2/§9 Fase 3), mismos handles de entrada
+    // que all_greeks -- ver engine::greeks::compute_hvp. direction_arg es un rango de 2 columnas
+    // [RiskFactor, Peso] (col 0 = string namespaced, col 1 = numero), obligatorio y no vacio
+    // (a diferencia de factors_arg en hessian, que sí acepta la enumeracion automatica).
+    engine::greeks::HvpReport hvp(
+        const std::string& product_handle,
+        const std::string& metric_name,
+        const XLOPER12& metric_params_arg,
+        const std::string& model_handle,
+        const std::string& market_handle,
+        const std::string& pricing_handle,
+        const std::string& execution_handle,
+        const XLOPER12& direction_arg
+    ) const;
+
     // market_handle: handle devuelto por create_market (ya no un rango inline -- un
     // MarketSnapshot no polimórfico se memoiza igual que Model/Product, PLAN.md §7.15).
     // initial_guess_arg: mismo formato clave/valor que params_arg en el resto de create_*.
