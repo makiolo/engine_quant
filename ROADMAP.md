@@ -40,6 +40,7 @@ q.CrossCurrencyModel(
 
 # Separate PricingContext in two:
 
+```
 valuation = q.ValuationConfig(
     as_of="2026-09-11",
 )
@@ -49,3 +50,4 @@ simulation = q.SimulationConfig(
     grid=q.TimeGrid.monthly("10Y"),
     rng=q.Sobol(seed=7),
 )
+```
