@@ -1095,6 +1095,7 @@ mod tests {
         // documentado como "fisico"): dos llamadas con distinta seed sobre el MISMO `(r, q,
         // sigma)` deben seguir siendo estimaciones del mismo precio Q, dentro de sus propios
         // intervalos de confianza -- no hay margen para que un dato fisico externo se cuele.
+        let _guard = crate::rng_test_lock::LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let spec = CALL_JSON_TEMPLATE.replace("{maturity}", "1.0").replace("{strike}", "100.0");
         let (s0, r, q, sigma) = (100.0, 0.05, 0.0, 0.2);
         let first = price_payoff_gbm_q("cpu", &spec, "EQ.SPOT.XYZ", s0, r, q, sigma, 50_000, 7, 0.0).unwrap();

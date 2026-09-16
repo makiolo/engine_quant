@@ -548,6 +548,7 @@ mod tests {
         // bump-and-reval dentro de tolerancia -- aqui el "bump-and-reval" de referencia es una
         // diferencia central de `forecast_gbm_p` (no descontada), MISMO seed en ambas evaluaciones
         // (numeros aleatorios comunes, PLAN_GREEKS.md §4.4).
+        let _guard = crate::rng_test_lock::LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let (s0, mu, sigma) = (100.0, 0.05, 0.2);
         let (n_paths, seed) = (200_000, 7);
         let h = 0.5;
@@ -572,6 +573,7 @@ mod tests {
     // sensitivity_spot_delta_under_p_matches_finite_difference_of_forecast.
     #[test]
     fn sensitivity2_gamma_under_p_matches_second_finite_difference_of_forecast() {
+        let _guard = crate::rng_test_lock::LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let (s0, mu, sigma) = (100.0, 0.05, 0.2);
         let (n_paths, seed) = (500_000, 7);
         let h = 1.0;
@@ -594,6 +596,7 @@ mod tests {
 
     #[test]
     fn sensitivity_cross_vanna_under_p_matches_mixed_finite_difference_of_forecast() {
+        let _guard = crate::rng_test_lock::LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let (s0, mu, sigma) = (100.0, 0.05, 0.2);
         let (n_paths, seed) = (500_000, 11);
         let (h_spot, h_vol) = (1.0, 0.002);
@@ -623,6 +626,7 @@ mod tests {
     // `forecast_gbm_p` respecto de sigma.
     #[test]
     fn local_hessian_under_p_matches_separate_calls_bit_for_bit_and_volga_matches_finite_difference() {
+        let _guard = crate::rng_test_lock::LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let (s0, mu, sigma) = (100.0, 0.05, 0.2);
         let (n_paths, seed) = (500_000, 7);
 
