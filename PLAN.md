@@ -37,7 +37,14 @@
 > documentación (`README.md`/`PLAN.md` al día con §7.20-§7.22, notebook
 > `demo_registry.ipynb` reescrito -- usaba la API `calc` retirada) y los ejemplos Python
 > (`price_flow.py`/`price_flow_typed.py`/`price_batch_flow.py`) siempre sobre
-> `engine_typed`/`pydantic`, nunca dict crudo**
+> `engine_typed`/`pydantic`, nunca dict crudo + Fase 7.24: API pythónica unificada —
+> `engine_typed` renombrado a `quantdesk` (ruptura limpia, sin capa de compatibilidad) + clase
+> `quantdesk.Engine` nueva que resuelve `PricingContext`/`ExecutionContext` una vez en el
+> constructor y envuelve `price`/`price_batch`/`price_many`/`price_grid`/`all_greeks`/
+> `hessian`/`hvp`/`simulate_paths`/`calibrate`/`list_*`/`evaluate_scenario`, más `PriceResult`
+> con acceso por punto (`results.PV.scalar`) además de por string — sin ningún cambio de
+> comportamiento del motor (C++/Rust/ABI C/Excel intactos), solo de cómo un script Python llega
+> a esas capacidades**
 
 ## 1. Visión
 
@@ -317,6 +324,19 @@ añade en cuanto exista más de un cliente.
     y roadmap al día, notebook `demo_registry.ipynb` reescrito -- usaba la API `calc`
     retirada) y los tres ejemplos Python siempre sobre `engine_typed`/`pydantic`, nunca dict
     crudo (`price_flow_typed_trade.py` eliminado por redundante, ver §7.23).
+18. **Fase 7.24** ✅ — `PLAN_API_REFACTOR.md`: API pythónica unificada -- `engine_typed`
+    renombrado a `quantdesk` (ruptura limpia, sin capa de compatibilidad, sin usuarios externos
+    fuera de este repositorio) y una clase `quantdesk.Engine` nueva que resuelve
+    `PricingContext`/`ExecutionContext` una vez en el constructor y hace la traducción
+    típed→nativo por dentro (`price`/`price_batch`/`price_many`/`price_grid`/`all_greeks`/
+    `hessian`/`hvp`/`simulate_paths`/`calibrate`/`list_*`/`evaluate_scenario`), más
+    `PriceResult` con acceso por punto (`results.PV.scalar`) además de por string
+    (`results["PV"]`) -- desaparecen las ~10 líneas de traducción manual típed→nativo que
+    repetía cada script/notebook, sin ningún cambio de comportamiento del motor (C++/Rust/ABI
+    C/Excel intactos). Once fases (0-10), cada una con commit propio y verificación numérica
+    bit a bit contra el flujo nativo anterior; incluye publicar `quantdesk` como nombre de
+    distribución en PyPI (job `publish-pypi` en `release.yml`, desactivado por defecto, sin
+    publicación real ejecutada todavía) (ver §7.24).
 
 ## 7. Estructura de repos/carpetas (Fase 0)
 
@@ -2247,6 +2267,113 @@ ejecutados literalmente contra el `Engine` real. Suite Python completa
 `test_price_market_discounting`/`test_engine_typed_*`) en verde -- sin cambios de código C++/
 C ABI/Excel en esta fase, no hizo falta rebuild.
 
+## 7.24 API pythonica unificada: `engine_typed` -> `quantdesk` + clase `Engine`
+
+### Motivacion
+
+El README (seccion "Quick start with Python") era el primer contacto de cualquiera con el
+motor, y el ejemplo que ensenaba tenia fricciones reales, no cosmeticas: dos imports (`engine`,
+`engine_typed`) para una sola tarea; doble construccion (cada objeto de negocio se construia
+primero como objeto tipado y luego se reconstruia a mano como objeto nativo -- cinco lineas de
+traduccion mecanica repetidas en cada script); `PricingContext`/`ExecutionContext` viajando
+sueltos en cada llamada a `price(...)` cuando en la practica son configuracion de sesion, no del
+trade; y resultados indexados por string (`results["PV"].scalar`) en vez de acceso por punto. El
+mismo patron se repetia literal en los 4 scripts de `clients/python/examples/`, los 10 notebooks
+de `clients/python/notebooks/` y la documentacion asociada. Analizado y decidido en
+`PLAN_API_REFACTOR.md` (documento de trabajo, no integrado aqui hasta este cierre): once fases
+(0-10), cada una commiteada y verificada por separado antes de la siguiente, sin tocar el motor
+en si (C++/Rust), el ABI C ni el cliente Excel (XLL) -- fuera de alcance explicito, justificado
+en el propio documento.
+
+### Diseno
+
+**`quantdesk` sustituye a `engine_typed`, no convive con el** (Fase 0): `git mv` puro del
+directorio + imports internos actualizados, mismas clases pydantic (`IRSwap`,
+`HullWhite1F`/`HullWhite2F`/`GbmBasket`, `Market`, `Measure`/`PV`/`DV01`/`ExposureProfile`/
+`UnilateralCVA`, DSL de `payoff.py`) sin cambio de comportamiento -- ruptura limpia, sin capa de
+compatibilidad, justificada por ser un prototipo de investigacion pre-1.0 sin usuarios externos
+de `engine_typed` fuera de este repositorio.
+
+**`quantdesk.Engine` es una clase nueva** (Fases 1-2), no un alias de `engine.Engine` nativo
+(que sigue existiendo tal cual para quien use la fachada dinamica de bajo nivel -- la misma que
+usan Excel y el ABI C). Envuelve una instancia de `engine.Engine()` mas un
+`PricingContext`/`ExecutionContext` ya resueltos en el constructor
+(`Engine(backend=..., n_paths=..., n_steps=..., seed=...)`), con la opcion de sobreescribirlos
+puntualmente por llamada (`pricing=`/`execution=`) para los casos que si varian esa
+configuracion entre llamadas dentro del mismo script. `price(trade, model, market, metrics)`
+cambia el orden de argumentos respecto al nativo (`trade` primero, `metrics` al final) -- mismo
+patron en `price_batch`/`price_many`/`price_grid`/`all_greeks`/`hessian`/`hvp`/`simulate_paths`/
+`calibrate`/`list_*`, mas `BatchRow`/`GridRow` (dataclasses finas que envuelven
+`BatchResult`/`GridResult` nativos) y el reexport directo de `Portfolio` (ya "suficientemente
+pythonico" segun el propio binding, sin envoltorio). `PriceResult` envuelve el
+`dict[str, MeasureResult]` nativo como `Mapping` de solo lectura: `results.PV.scalar` y
+`results["PV"].scalar` son el mismo objeto, no solo valores iguales -- sigue soportando indexado
+por string donde el acceso por punto no aporta (bucles sobre nombres de medida dinamicos).
+
+**Dos piezas nuevas descubiertas durante la migracion, no contempladas en el diseno original**
+(Fase 5): `Gbm`/`GbmP` (`quantdesk.model`, `ModelSpec` para GBM univariante en medida
+riesgo-neutral Q y fisica P respectivamente) -- el diseno original solo tipaba
+`HullWhite1F`/`HullWhite2F`/`GbmBasket` (multi-activo), dejando un hueco real para el modelo GBM
+de un solo activo que si existe en el motor nativo; promovidas al paquete (en vez de duplicarse
+localmente en cada notebook) al encontrarse el mismo patron repetido en 8 de los 10 notebooks.
+Y `Engine.evaluate_scenario(trade, scenario)` (Fase 5), que envuelve
+`engine.Engine.evaluate_scenario` nativo (evaluacion determinista de un `PayoffProduct` sobre un
+escenario fijo, sin Monte Carlo) -- metodo incorporado al binding nativo por
+`PLAN_IMPROVE_NOTEBOOK2.md` Fase 1, *despues* de que la Fase 2 de este plan introspeccionara y
+envolviera el resto de `engine.Engine`: hueco real de cobertura, no una omision de diseno,
+cerrado al migrar `09_option_strategies_and_greeks.ipynb`.
+
+**Ejemplos, notebooks, tests y documentacion migrados sin excepcion** (Fases 4, 5, 6, 7): los 4
+scripts de `clients/python/examples/`, los 10 notebooks de `clients/python/notebooks/`
+(incluido `demo_registry.ipynb`, que ademas migro las secciones de exposicion/CVA/batch a
+`quantdesk.Engine` dejando deliberadamente sobre la fachada nativa cruda las secciones que
+literalmente demuestran esa fachada), los 6 ficheros `test_engine_typed_*.py` renombrados a
+`test_quantdesk_*.py` (mismos casos) mas cobertura nueva para `Engine`/`PriceResult`/
+`BatchRow`/`GridRow`/`Gbm`/`GbmP`/`evaluate_scenario`, y el README/README_PYPI/cookbook de
+payoff/nota de una linea en `clients/excel/README.md`. Ningun fichero fuera de ese inventario
+quedo con `engine_typed` vivo: los `PLAN_*.md` historicos (incluido este mismo documento, sus
+entradas §7.21-§7.23) y sus citas cruzadas en Rust/C++ se dejaron intactos a proposito --
+documentan el nombre que tenia el paquete en el momento en que se escribieron, reescribir
+historia no aporta nada, mismo criterio editorial que ya aplican entre si.
+
+**Excel, deliberadamente fuera de alcance** (Fase 8): la friccion que resuelve este plan es
+especifica de tener *dos* capas Python (`engine`+`engine_typed`) para una tarea. Excel no la
+tiene -- `ENGINE.CREATE_PRODUCT`/`CREATE_MODEL`/`CREATE_MARKET`/`PRICE` ya son la unica capa, y
+el encadenado de handles entre celdas no es una friccion de ergonomia sino una restriccion del
+modelo de calculo de una hoja (cada paso necesita su propia celda para el recalculo
+incremental) -- no hay una version "mas bonita" de eso que siga siendo una hoja de calculo.
+
+**Publicacion en PyPI** (Fase 10, la unica con salvaguardas explicitas de no ejecutar nada
+real): `[project].name` de `pyproject.toml` pasa de `"engine-quant"` a `"quantdesk"` (alineando
+el nombre de distribucion con el nombre de import, ya cambiado desde la Fase 0), mas los
+scripts de instalacion/desinstalacion y el patron de nombre de wheel del instalador `.iss`
+actualizados a juego (sin tocar el branding del instalador Windows todo-en-uno, decision de
+alcance explicita). Nuevo input `workflow_dispatch.inputs.publish_pypi` (`boolean`, `default:
+false`) y nuevo job `publish-pypi` en `release.yml`, con `if:` que exige AMBAS condiciones
+(`publish=='true' && publish_pypi=='true'`) -- con el default, ningun disparo existente hoy
+empieza a subir nada a PyPI por sorpresa. Camino inicial con token clasico
+(`PYPI_API_TOKEN`), migrar a Trusted Publishing es un cambio de configuracion posterior.
+
+### Verificacion
+
+Cada una de las once fases se commiteo y verifico por separado, con comparacion numerica bit a
+bit (no solo "no lanza excepcion") contra el comportamiento previo al refactor en cada capa que
+tocaba: PV/DV01/UnilateralCVA/ExpectedExposure/PFE95 identicos entre `quantdesk.Engine` y el
+flujo nativo manual equivalente (Fase 1-2); los 4 ejemplos y los 10 notebooks con diff vacio
+(stdout/imagenes por hash) contra su version pre-refactor tras re-ejecutarse de punta a punta
+(Fase 4-5); suite Python completa (`pytest clients/python/tests/`) en 212 tests verdes (2
+errores preexistentes ajenos a este plan, fixture huerfana de una sesion anterior); build
+completo de CMake (`cmake --build build --config Release`, 62/62 pasos, incluida recompilacion
+real de Rust/nanobind/C++) confirmado en verde en la fase de cierre, tras diagnosticar y
+resolver un `CMakeCache.txt` que apuntaba a un `cmake.exe` efimero de un entorno de build
+aislado anterior. `grep -rn "engine_typed"` sobre el arbol completo, al cierre, da unicamente
+citas historicas ya clasificadas explicitamente (los `PLAN_*.md` anteriores a este, sus citas
+cruzadas en Rust/C++, y comentarios que citan esos mismos documentos). Lo unico explicitamente
+**sin verificar por diseno**: que la publicacion real en PyPI funcione de extremo a extremo --
+el job `publish-pypi` se audito de forma estatica (sintaxis YAML, logica del `if:`) pero no se
+disparo ningun workflow real, no se hizo `git push` de los commits del plan, y no se contacto
+pypi.org ni se uso ningun token real durante esta implementacion.
+
 ---
 *Próxima iteración: confirmar en la práctica (no se pudo ejecutar GitHub Actions desde este
 entorno de desarrollo) que el job `build-installer` de `.github/workflows/release.yml` (§7.10)
@@ -2327,4 +2454,4 @@ plana en §7.21 Fase 4/5). `day_count`/calendarios reales (pendiente heredado de
 sigue bloqueando incluir ese campo en `IRSwap` de `engine_typed`. Propuesta 4 de
 `PLAN_REAPI.md` (netting sets/colateral/FVA/MVA/KVA/orquestación de cartera) sigue sin
 planificar -- se revisó como checklist al diseñar `TradeSpec`/`MeasureSpec` (§7.21), no como
-trabajo en sí.*
+trabajo en sí. Sobre la Fase 7.24 (`quantdesk`/`Engine`/`PriceResult`): sigue pendiente disparar de verdad el workflow `release.yml` con `publish_pypi=true` y `PYPI_API_TOKEN` configurado para confirmar que `pip install quantdesk` funciona desde el indice publico (unico punto del criterio de aceptacion global de `PLAN_API_REFACTOR.md` sin verificar, por diseno de seguridad de esa sesion); migrar `publish-pypi` de token clasico a Trusted Publishing (OIDC) una vez exista el trusted publisher registrado en pypi.org; y resolver el hueco que Fase 5 dejo documentado sin cerrar -- no existe un `Market` tipado en `quantdesk` que envuelva el `@staticmethod` nativo `MarketSnapshot.synthetic_from_hull_white[_2f]`, asi que `demo_registry.ipynb` sigue usando la fachada nativa cruda para esa parte de la demo.*
