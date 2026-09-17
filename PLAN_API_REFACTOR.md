@@ -375,6 +375,161 @@ en `quantdesk.Engine` cubierto por al menos un test (Fase 6) — ninguna capacid
 dinámica queda solo alcanzable importando `engine` a mano, salvo los casos ya documentados en
 §3.4/§2 como fuera de alcance (Portfolio, ver arriba).
 
+**Estado verificado / decisiones tomadas (sesión de implementación de esta fase).**
+
+- Implementado todo en `clients/python/src/quantdesk/engine.py` (mismo fichero de la Fase 1,
+  extiende `Engine`): `price_batch`, `price_many`, `price_grid`, `all_greeks`, `hessian`,
+  `hvp`, `simulate_paths`, `calibrate`, `list_models`, `list_products`, `list_measures`,
+  `list_calibrators`, más `BatchRow`/`GridRow` (dataclasses `frozen=True, slots=True` —
+  `requires-python = ">=3.10"` en `pyproject.toml` línea 12, `slots=True` en `dataclass`
+  disponible desde 3.10, verificado sin discrepancia). `Portfolio` reexportado en
+  `clients/python/src/quantdesk/__init__.py` como `Portfolio = _native.Portfolio` (import
+  `import engine as _native` añadido al principio del fichero), sin wrapper — igual criterio
+  que ya aplica el binding nativo hoy (comentario en `engine_py_ext.cpp`).
+- **Traducción típed → nativo factorizada** (pedido explícito de la tarea, "no dupliques la
+  traducción típed→nativo 8 veces"): siete helpers privados nuevos en `Engine`
+  (`_to_native_product`, `_to_native_model`, `_to_native_market`, `_resolve_pricing`,
+  `_resolve_execution`, `_to_native_pricing`, `_to_native_execution`, `_to_native_metrics`),
+  extraídos del cuerpo de `price` de la Fase 1 sin cambiar su comportamiento (`price` se
+  reescribió para usarlos, verificado numéricamente idéntico — ver más abajo). Todos los
+  métodos nuevos los reutilizan; ninguno repite `create_product`/`create_model`/
+  `MarketSnapshot(**...)`/`PricingContext(...)`/`ExecutionContext(...)` a mano.
+- **Introspección real del binding nativo ANTES de escribir código** (`.__doc__` de cada
+  método sobre `venv\Scripts\python.exe`, mismo patrón que la Fase 1) — resultados exactos:
+  - `price_batch(self, products: Sequence[engine.Product], measure_names: list, model, market, pricing, execution) -> list[engine.BatchResult]`.
+  - `price_many`: misma firma que `price_batch`, semántica heterogénea (agrupa internamente,
+    devuelve en orden de entrada).
+  - `price_grid(self, products, measure_names, models: Sequence[engine.Model], markets: Sequence[engine.MarketSnapshot], pricing, execution) -> list[engine.GridResult]`.
+  - `all_greeks(self, product, metric_name: str, model, market, pricing, execution, metric_params: dict = {}, include_curve_buckets: bool = False, include_second_order: bool = False) -> engine.GreeksReport`.
+  - `hessian(self, product, metric_name, model, market, pricing, execution, metric_params: dict = {}, risk_factors: Sequence[str] | None = None) -> engine.HessianReport`.
+  - `hvp(self, product, metric_name, model, market, pricing, execution, direction: dict, metric_params: dict = {}) -> engine.HvpReport` — nótese `direction` posicional ANTES de
+    `metric_params`, y ambos DESPUÉS de `pricing`/`execution` (a diferencia de la firma típed
+    de §3.2, que pone `direction` justo después de `market` y `metric_params` como kwarg —
+    mismo reordenamiento de argumentos ya aceptado por el plan en `price`, §2).
+  - `simulate_paths(self, model, market, pricing: engine.PricingContext) -> tuple` — **no
+    recibe `execution`** (a diferencia de todos los demás métodos de cómputo).
+  - No existe `Engine.calibrate` nativo: el patrón real es `Engine.create_calibrator(name: str) -> engine.Calibrator` + `Calibrator.calibrate(self, market: engine.MarketSnapshot, initial_guess: dict) -> engine.CalibrationResult` — coincide exactamente con el comentario del plan
+    (`# create_calibrator + .calibrate en un paso`), sin discrepancia.
+  - `list_models`/`list_products`/`list_measures`/`list_calibrators`: `(self) -> list[str]`,
+    sin parámetros, tal cual el plan.
+  - `engine.BatchResult`: campos `trade_index`, `measures` (confirmado por
+    `dir(engine.BatchResult)`, sin más). `engine.GridResult`: `trade_index`, `model_index`,
+    `market_index`, `measures` — **nombres de campo idénticos, uno a uno, a los que ya
+    proponía el plan en §3.2** ("`trade_index`, `[model_index, market_index]`,
+    `measures: PriceResult`"), ninguna discrepancia que resolver con criterio propio.
+    `measures` en ambos es un `dict[str, engine.MeasureResult]` igual que el que devuelve
+    `Engine.price` — se envuelve con `PriceResult(row.measures)` exactamente igual que en la
+    Fase 1, así que `BatchRow.measures.PV.scalar` y `BatchRow.measures["PV"].scalar`
+    funcionan igual.
+  - `engine.Portfolio`: cuatro métodos (`add`, `size`, `trades`, `price`, `hessian`, `hvp` —
+    seis en realidad, el plan decía "cuatro" citando el comentario de
+    `engine_py_ext.cpp`, que probablemente contaba solo los cuatro "core"; no se investigó
+    más a fondo por estar fuera de alcance de esta fase — Portfolio se reexporta tal cual, sin
+    envoltorio, así que el conteo exacto de métodos no cambia nada de la implementación).
+    `Portfolio.price(measures, model, market, pricing, execution) -> list[engine.BatchResult]`
+    (mismo tipo de retorno que `Engine.price_many`, verificado).
+- **Discrepancias resueltas con criterio técnico frente a la firma literal de §3.2** (ninguna
+  se inventó en silencio, todas están documentadas aquí y en los docstrings de cada método en
+  `quantdesk/engine.py`):
+  - `all_greeks`/`hessian`/`hvp` en §3.2 NO listan `pricing=`/`execution=` en su firma, pero
+    el binding nativo los exige como argumentos posicionales sin default, y
+    `clients/python/notebooks/04_greeks_and_risk_surfaces.ipynb` ya varía `PricingContext`
+    entre llamadas dentro del MISMO script sobre el MISMO `engine.Engine()` nativo (`pricing`
+    de 200k paths para la call GBM vs `hw_pricing` de 1k paths para el IRS Hull-White,
+    celda de `hw_hessian`). Sin un override puntual, `quantdesk.Engine` habría obligado a
+    instanciar un segundo `Engine` solo para reproducir ese notebook — contradice el espíritu
+    del propio plan (§2: "los casos ya existentes en el repo que sí varían n_paths/bump/
+    backend entre llamadas dentro del mismo script"). Se añadió `*, pricing=None,
+    execution=None` a los tres métodos, mismo patrón exacto que `price`/`price_batch`/
+    `price_many`/`price_grid` (override no muta `self._pricing`/`self._execution`).
+  - `simulate_paths` en §3.2 tiene firma literal `(self, model, market)`, sin `pricing`. El
+    binding nativo exige `pricing` como tercer argumento posicional (no tiene `execution` en
+    absoluto, a diferencia del resto). `clients/python/notebooks/07_montecarlo_paths_q_vs_p.ipynb`
+    llama a `simulate_paths` dos veces sobre el MISMO `engine.Engine()` nativo con
+    `PricingContext` distintos (`pricing_q`/`pricing_p`, mismo `n_paths`/`n_steps`, semillas
+    distintas) para comparar medida Q vs P. Se añadió `*, pricing=None` (default:
+    `self._pricing` del constructor) — mismo razonamiento que el punto anterior. Sin este
+    parámetro, el criterio de aceptación de la fase ("cubierto por al menos un test... sin
+    tener que importar `engine` a mano") no se podría cumplir para este caso de uso real ya
+    existente en el repo.
+  - Ambas decisiones están documentadas también inline en el docstring de cada método
+    afectado en `quantdesk/engine.py`, citando esta misma sección, para que Fase 4/5/6 no
+    tengan que redescubrir el razonamiento.
+- **Resultado exacto de la verificación funcional** (venv `S:\Projects\engine_quant\venv`,
+  `.pyd` nativo ya compilado, sin recompilar C++/Rust — no hizo falta, esta fase es
+  puramente Python; script ad-hoc en el scratchpad de la sesión, datos de prueba tomados
+  literalmente de `clients/python/examples/price_batch_flow.py`, `greeks_flow.py`,
+  `clients/python/notebooks/04_greeks_and_risk_surfaces.ipynb`,
+  `07_montecarlo_paths_q_vs_p.ipynb` y `clients/python/tests/test_calibration.py`, 49
+  aserciones en total, **todas en verde**):
+  - `price_batch` (3 `IRSwap` 5y, `["PV", "UnilateralCVA"]`, `HullWhite1F`): `trade_index`,
+    `PV` y `UnilateralCVA` de cada `BatchRow` idénticos bit a bit (`==`) a
+    `engine.Engine.price_batch(...)` nativo manual (`PV`: `948.4537547220389`,
+    `61254.96451762912`, `-11302.539148803793`); además cada fila coincide con la llamada
+    individual `qeng.price(trade, ...)` equivalente.
+  - `price_many` (5y, 3y, 5y intercalados, `["PV"]`): 3 filas, `trade_index`/`PV` idénticos
+    al nativo manual y a `price()` individual del trade a 3y (`PV = 12691.837573942801`).
+  - `price_grid` (2 trades × `[HullWhite1F, HullWhite2F]` × `[market, market_stressed]`,
+    `["PV", "UnilateralCVA"]`): **8** celdas (no 4 — el plan no fija el número, es
+    `len(trades) × len(models) × len(markets)`; primer intento del script de verificación
+    tenía una aserción de conteo equivocada, `4` en vez de `8`, corregida — no era un bug de
+    la implementación, era un error del script de prueba), `trade_index`/`model_index`/
+    `market_index`/`PV`/`UnilateralCVA` idénticos al nativo manual celda a celda.
+  - `all_greeks` (call GBM ATM sobre `AAPL_CALL_100`, `PayoffPriceQ`, `n_paths=200_000`,
+    `seed=7`, `backend="cpu"`, override puntual de `pricing=`/`execution=`): 8 greeks de
+    primer orden, valores idénticos bit a bit al nativo manual (`model.spot =
+    637.5071993587057`, `model.volatility = 37563.46781002449`, etc.), `skipped` idéntico
+    (vacío). `include_second_order=True`: 4 gammas puras idénticas bit a bit
+    (`model.spot = 18.485654371037285`, ...).
+  - `hessian` (mismo caso GBM): 3 entradas (`spot-spot`, `volatility-volatility`,
+    `spot-volatility`) idénticas bit a bit al nativo manual. `hessian` sobre
+    `HullWhiteModelNpv` (IRS 5y, `HullWhite1F`, `n_paths=1000`, caso de la celda `hw_hessian`
+    del notebook 04): **10** entradas (4 diagonales + 6 cruzadas, mismo número que documenta
+    el propio notebook), idénticas bit a bit.
+  - `hvp` (misma call GBM, `direction={"model.spot": 1.0, "model.volatility": 0.0}`):
+    componentes idénticos bit a bit al nativo manual, y además coincide con la fila
+    `spot`/`spot` de la Hessiana de arriba (`18.485654371037285 == 18.485654371037285`,
+    tolerancia `1e-9` solo por robustez del test, en la práctica exactos) — mismo criterio
+    de verificación cruzada que usa el propio notebook 04.
+  - `simulate_paths` (GBM, `s0=100, sigma=0.22`, `n_paths=1000, n_steps=52, seed=1234`, caso
+    del notebook 07): `times`/`paths` idénticos elemento a elemento (`np.array_equal`) al
+    nativo manual, tanto con `pricing=` explícito como usando el `PricingContext` del
+    constructor por defecto (sin pasar `pricing=`).
+  - `calibrate("HullWhite1F", market, initial_guess)` (caso exacto de
+    `test_calibration.py::test_calibrator_recovers_known_parameters_and_feeds_create_model`,
+    `true_a=0.15, true_b=0.025`, estimación inicial deliberadamente lejos): `converged=True`
+    en ambos caminos, `optimal_params` idénticos bit a bit al nativo manual
+    (`create_calibrator("HullWhite1F").calibrate(...)`), recupera `a`/`b` con error
+    `< 1e-4` frente a los valores verdaderos.
+  - `list_models`/`list_products`/`list_measures`/`list_calibrators`: las cuatro devuelven
+    listas no vacías e idénticas elemento a elemento (`==`, mismo orden) a las del
+    `engine.Engine()` nativo.
+  - `Portfolio`: `quantdesk.Portfolio is engine.Portfolio` → `True` (reexport directo, no una
+    copia). `Portfolio().add(...)` × 2 + `.size()` → `2`; `Portfolio.price(["PV"], ...)`
+    devuelve `list[BatchResult]` con `PV` idéntico al de `price_batch`/`price()` individual
+    del mismo trade.
+- **Nota para Fase 4/5/6:** firmas finales exactas de `quantdesk.Engine` (todas en
+  `clients/python/src/quantdesk/engine.py`, con docstring propio cada una):
+  `price_batch(trades, model, market, metrics, *, pricing=None, execution=None) -> list[BatchRow]`;
+  `price_many(trades, model, market, metrics, *, pricing=None, execution=None) -> list[BatchRow]`;
+  `price_grid(trades, models, markets, metrics, *, pricing=None, execution=None) -> list[GridRow]`;
+  `all_greeks(trade, metric_name, model, market, *, metric_params=None, include_curve_buckets=False, include_second_order=False, pricing=None, execution=None) -> engine.GreeksReport`;
+  `hessian(trade, metric_name, model, market, *, metric_params=None, risk_factors=None, pricing=None, execution=None) -> engine.HessianReport`;
+  `hvp(trade, metric_name, model, market, direction, *, metric_params=None, pricing=None, execution=None) -> engine.HvpReport`;
+  `simulate_paths(model, market, *, pricing=None) -> tuple[np.ndarray, np.ndarray]`;
+  `calibrate(model_type, market, initial_guess) -> engine.CalibrationResult`;
+  `list_models()/list_products()/list_measures()/list_calibrators() -> list[str]`.
+  `all_greeks`/`hessian`/`hvp`/`simulate_paths` tienen `pricing=`/`execution=` que §3.2 no
+  lista literalmente — ver "Discrepancias resueltas" arriba antes de escribir tests/ejemplos/
+  notebooks que asuman la firma literal del documento de diseño. `BatchRow`/`GridRow` son
+  `@dataclass(frozen=True, slots=True)` con exactamente los campos que expone el nativo
+  (`trade_index`/`measures`; `GridRow` añade `model_index`/`market_index`), `measures` ya
+  envuelto en `PriceResult`. `Portfolio` es literalmente `engine.Portfolio` (mismo objeto,
+  `is`, no una subclase ni wrapper) — usarlo con objetos nativos (`engine.Product` de
+  `create_product`, no `TradeSpec` tipado directamente: `Portfolio.add` espera
+  `engine.Product`, sin traducción típed→nativo automática, fuera de alcance de esta fase
+  según el plan).
+
 ### Fase 3 — Empaquetado y CI
 
 - `pyproject.toml`: `wheel.packages = ["clients/python/src/quantdesk"]` (y el comentario que lo

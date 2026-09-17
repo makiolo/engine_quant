@@ -25,9 +25,11 @@ fachada dinámica (dict/Excel/C ABI), es una fachada más sobre el mismo registr
     eng_execution = engine.ExecutionContext(execution.to_params())
 """
 
+import engine as _native
+
 from quantdesk import greeks
 from quantdesk.context import ExecutionContext, PricingContext
-from quantdesk.engine import Engine, PriceResult
+from quantdesk.engine import BatchRow, Engine, GridRow, PriceResult
 from quantdesk.greeks import Greek
 from quantdesk.market import Market
 from quantdesk.measure import PV, DV01, ExposureProfile, Measure, UnilateralCVA
@@ -91,9 +93,20 @@ from quantdesk.payoff import (
 )
 from quantdesk.trade import PAR, IRSwap, TradeSpec
 
+# `Portfolio` (PLAN_API_REFACTOR.md §3.2): ya "suficientemente pythónico" según su propio
+# comentario en `engine_py_ext.cpp` (cuatro métodos, sin dict de por medio) -- reexport directo
+# desde `engine.Portfolio`, sin envoltorio adicional (mismo criterio que ya aplica el binding
+# nativo hoy). No requiere que el módulo nativo esté importable a nivel de PAQUETE quantdesk
+# (import engine as _native, como ya hace quantdesk.engine) -- se resuelve al mismo módulo
+# nanobind compilado, nunca a quantdesk.engine.
+Portfolio = _native.Portfolio
+
 __all__ = [
     "Engine",
     "PriceResult",
+    "BatchRow",
+    "GridRow",
+    "Portfolio",
     "PAR",
     "TradeSpec",
     "IRSwap",
