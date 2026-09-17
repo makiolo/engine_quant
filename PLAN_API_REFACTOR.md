@@ -1641,6 +1641,115 @@ de GitHub) queda intacto. Un `workflow_dispatch` con `publish=true`, `version=X.
 paquete `quantdesk` publicado en PyPI con esa versión; `pip install quantdesk==X.Y.Z` en un
 entorno limpio (Windows, `cp310`-`cp314`) instala y `import quantdesk` funciona.
 
+**Estado verificado / decisiones tomadas (sesión de implementación de esta fase).**
+
+- `pyproject.toml`: `[project].name` cambiado de `"engine-quant"` a `"quantdesk"`. El comentario
+  de la línea 13 (que Fase 3 dejó explícitamente intacto y citando `[project].name` como
+  "Fase 10 según el propio plan") se reescribió para documentar el cambio de nombre de
+  distribución en sí, en vez de solo anunciarlo como pendiente.
+- Ficheros de nombre de distribución (no de import, ya resueltos en Fases 0-9) actualizados de
+  `engine-quant`/`engine_quant` a `quantdesk`:
+  - `clients/python/install/Install-EngineWheels.ps1`: `importlib.metadata.version('engine-quant')`
+    → `'quantdesk'`, más 5 comentarios/docstrings que citaban `engine-quant` como el nombre del
+    paquete instalado/consultado (líneas 4, 32, 36, 113, 119). La línea 220
+    (`python -c "import engine; ..."`) se dejó intacta a propósito: es el módulo nativo `engine`
+    (nanobind), no la distribución PyPI.
+  - `clients/python/install/Uninstall-EngineWheels.ps1`: `pip uninstall -y engine-quant` →
+    `quantdesk`, más los 2 comentarios del docstring que lo citaban.
+  - `installer/EngineQuantSetup.iss`: 3 referencias de nombre de distribución actualizadas a
+    `quantdesk` — el comentario del patrón de fichero `.whl` en `[InstallDelete]`
+    (`"engine_quant-1.2.3-cp312-...whl"` → `"quantdesk-1.2.3-cp312-...whl"`), el comentario de
+    `DiscoverPythons` ("si ya tiene engine-quant instalado" → "quantdesk"), y el texto de la
+    página del asistente en `InitializeWizard` ("Elige en cuales instalar engine-quant..." →
+    "quantdesk..."). **No tocado**, confirmado por relectura completa del fichero tras el
+    cambio: las 5 líneas de branding del instalador (`AppName=Motor XVA (engine-quant)`,
+    `AppPublisher=engine_quant`, `DefaultDirName={autopf}\engine_quant`,
+    `UninstallDisplayName=Motor XVA (engine-quant)`, `OutputBaseFilename=engine_quant_setup`) —
+    decisión de alcance explícita del plan, es branding del instalador Windows todo-en-uno, no
+    el paquete PyPI.
+- `.github/workflows/release.yml`:
+  - Comentario de cabecera (líneas 3-12) ampliado con un párrafo nuevo que menciona el job
+    `publish-pypi` y el input `publish_pypi` (desactivado por defecto), sin reescribir el texto
+    existente sobre `publish-release`/tags/`workflow_dispatch`.
+  - Nuevo input `workflow_dispatch.inputs.publish_pypi` (`type: boolean`, `default: false`),
+    añadido junto a `version`, independiente de `publish`.
+  - Nuevo job `publish-pypi`, insertado inmediatamente después de `build-wheels` (antes de
+    `build-xll`): `needs: [determine-version, build-wheels]`,
+    `if: needs.determine-version.outputs.publish == 'true' && inputs.publish_pypi == 'true'`
+    (AND, no OR), `runs-on: ubuntu-latest`, `environment: pypi`, `permissions: {id-token:
+    write}`. Descarga los artefactos con `actions/download-artifact@v4`,
+    `pattern: wheel-cp*`, `merge-multiple: true` — mismo patrón exacto que usa `build-installer`
+    (localizado por grep antes de copiarlo, sin asumir el número de línea literal del plan).
+    Publica con `pypa/gh-action-pypi-publish@release/v1` y `password: ${{
+    secrets.PYPI_API_TOKEN }}` (camino de token clásico, no OIDC/Trusted Publishing — tal como
+    el plan ordena explícitamente para esta fase; migrar a Trusted Publishing queda documentado
+    en un comentario del job como cambio de configuración posterior, sin tocar el resto).
+- **Verificación LOCAL (build/wheel/tests) — ejecutada de verdad, no simulada.** Mismo patrón de
+  build incremental que dejó documentado Fase 3: `source build/vcenv.sh` +
+  `CMAKE_GENERATOR=Ninja` + `PATH` con `/d/CMake/bin` antepuesto, reutilizando el `build/` raíz
+  ya existente (`engine.cp312-win_amd64.pyd` ya compilado, sin recompilar C++/Rust) vía
+  `pip wheel . --no-deps -w <scratchpad> -C build-dir=build`. Wheel resultante:
+  `quantdesk-0.0.0-cp312-cp312-win_amd64.whl` (1 543 792 bytes) — nombre de fichero cambiado
+  como se esperaba (antes `engine_quant-0.0.0-cp312-cp312-win_amd64.whl`, la wheel anterior de
+  Fase 3 se dejó en el scratchpad para comparar, no se borró). `python -m zipfile -l` confirma
+  el mismo contenido que verificó Fase 3, solo con el `dist-info` renombrado:
+  `engine.cp312-win_amd64.pyd` + `quantdesk/{__init__,context,engine,greeks,market,measure,
+  model,payoff,trade}.py` + `quantdesk-0.0.0.dist-info/*` (antes `engine_quant-0.0.0.dist-info`).
+  Instalada en `S:\Projects\engine_quant\venv` con `pip install --force-reinstall --no-deps`:
+  `import quantdesk` y `from quantdesk.engine import Engine, PriceResult` funcionan,
+  `import engine` (extensión nativa) funciona, `importlib.metadata.version('quantdesk') ==
+  '0.0.0'`.
+  - **Hallazgo de higiene del venv, investigado y corregido en esta sesión (no es un defecto de
+    código, es un residuo de sesiones anteriores).** El venv local aún tenía instalada la
+    distribución `engine-quant 0.0.0` de antes de esta fase (con su propio directorio
+    `engine_quant-0.0.0.dist-info`), cuyo `RECORD` ya apuntaba a los mismos ficheros
+    (`quantdesk/*.py`, `engine.*.pyd`) que ahora instala `quantdesk` — porque Fase 0-3 ya habían
+    renombrado el contenido del paquete Python antes de esta fase, solo el nombre de
+    distribución seguía siendo `engine-quant`. Al ejecutar `pip uninstall -y engine-quant` para
+    limpiar ese residuo (paso de higiene, no pedido explícitamente por el plan pero razonable
+    antes de dar la verificación por buena), pip borró esos ficheros compartidos por ruta
+    (comportamiento correcto de pip: no sabe que otra distribución los reclama también), dejando
+    momentáneamente `import quantdesk` roto. Diagnosticado inmediatamente (`ls
+    site-packages` mostraba solo el `dist-info`, sin `quantdesk/` ni `engine.*.pyd`) y corregido
+    reinstalando la wheel `quantdesk-0.0.0-...whl` con `--force-reinstall --no-deps` de nuevo —
+    resultado final limpio y verificado: `site-packages` solo contiene
+    `quantdesk-0.0.0.dist-info` + `quantdesk/` + `engine.cp312-win_amd64.pyd`, ninguna traza de
+    `engine_quant-0.0.0.dist-info`, `importlib.metadata.version('engine-quant')` lanza
+    `PackageNotFoundError` como se espera, `import quantdesk`/`import engine` siguen
+    funcionando. Documentado explícitamente porque un entorno limpio de verdad (sin la
+    instalación previa `engine-quant` de sesiones anteriores a este plan) nunca habría
+    encontrado este problema — es puramente un artefacto de haber iterado el nombre de
+    distribución dos veces sobre el mismo venv de desarrollo.
+  - `venv\Scripts\python.exe -m pytest clients/python/tests/` (tras limpiar `__pycache__`):
+    **`212 passed, 2 errors in 15.83s`** — resultado idéntico a Fase 6/9, mismos 2 errores
+    preexistentes (`fixture 'abi_dll_path' not found` en los tests cruzados con el ABI C), sin
+    ningún fallo nuevo ni ninguna dependencia oculta del nombre de distribución `engine-quant`
+    en tiempo de ejecución de los tests.
+- **Auditoría ESTÁTICA del YAML (no una ejecución real de CI).**
+  `python -c "import yaml; yaml.safe_load(open('.github/workflows/release.yml', encoding='utf-8'))"`
+  parsea sin excepción. Inspección programática del árbol YAML resultante (no solo lectura
+  visual) confirma: (a) `workflow_dispatch.inputs.publish_pypi.default` es literalmente
+  `False`; (b) el `if:` del job `publish-pypi` es exactamente el string
+  `"needs.determine-version.outputs.publish == 'true' && inputs.publish_pypi == 'true'"` — las
+  dos condiciones unidas con `&&` (AND), no `||`; (c) `grep -n "publish_pypi\|publish-pypi"`
+  sobre el fichero completo devuelve únicamente: la definición del input, el comentario de
+  cabecera, la definición del job y su `if:`, y comentarios internos del propio job — **ningún**
+  otro job (`determine-version`, `build-wheels`, `build-xll`, `build-installer`,
+  `publish-release`) ni el disparador `push: tags: v*` referencia `publish_pypi` de ninguna
+  forma que pudiera activarlo implícitamente. Conclusión de la auditoría: con el default
+  `false`, ningún `workflow_dispatch` sin marcar explícitamente `publish_pypi` ni ningún push de
+  tag `v*` puede hacer que el job `publish-pypi` se ejecute — coincide con el criterio de
+  aceptación del plan.
+- **Explícitamente NO verificado en esta sesión, por diseño (límite de seguridad de la fase, no
+  un hueco accidental):** que el paso `pypa/gh-action-pypi-publish@release/v1` funcione de
+  extremo a extremo contra PyPI real (ni siquiera TestPyPI) — no se disparó ningún
+  `workflow_dispatch` real (`gh workflow run`/`gh workflow dispatch` ni ninguna variante), no se
+  hizo `git push` de ningún commit ni tag, no se registró ni se usó ningún token real de PyPI, y
+  no se contactó `pypi.org` de ninguna forma. **`quantdesk` NO está publicado en PyPI tras esta
+  sesión** — `pip install quantdesk` seguirá fallando hasta que alguien dispare el workflow real
+  con `publish_pypi=true` y `PYPI_API_TOKEN` configurado, un paso manual fuera del alcance de
+  esta sesión.
+
 ## 5. Inventario de ficheros afectados
 
 | Grupo | Ficheros | Fase |

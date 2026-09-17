@@ -45,7 +45,7 @@ Name: "spanish"; MessagesFile: "compiler:Languages\Spanish.isl"
 Name: "excel"; Description: "Complemento de Excel (XLL)"
 Name: "python"; Description: "Paquete de Python (en los interpretes de Python 3.10+ detectados)"
 
-; El nombre del .whl incluye la version ("engine_quant-1.2.3-cp312-...whl"): sin este borrado
+; El nombre del .whl incluye la version ("quantdesk-1.2.3-cp312-...whl"): sin este borrado
 ; previo, una actualizacion ANADE el .whl nuevo junto al antiguo en vez de sustituirlo (Inno
 ; Setup no borra ficheros que ya no forman parte de [Files] solo porque cambien de nombre), y
 ; Install-EngineWheels.ps1 podria acabar reinstalando el mas antiguo de los dos (probado: asi
@@ -151,7 +151,7 @@ end;
 //   instalo la ultima vez -- si mas tarde se instala en otro distinto, ese pasa a ser "el
 //   ultimo instalado" y sera el premarcado la proxima vez (el manifiesto se reescribe en cada
 //   instalacion con lo que quedo efectivamente instalado).
-// Tambien muestra, por interprete, si ya tiene engine-quant instalado y que version (para saber
+// Tambien muestra, por interprete, si ya tiene quantdesk instalado y que version (para saber
 // cuales hace falta actualizar) vs. la version que se va a instalar ({#MyAppVersion}).
 procedure DiscoverPythons;
 var
@@ -214,7 +214,7 @@ end;
 procedure InitializeWizard;
 begin
   PythonPage := CreateCustomPage(wpSelectComponents, 'Interpretes de Python',
-    'Elige en cuales instalar engine-quant, o anade uno que no se haya detectado automaticamente.');
+    'Elige en cuales instalar quantdesk, o anade uno que no se haya detectado automaticamente.');
 
   PythonList := TNewCheckListBox.Create(PythonPage);
   PythonList.Parent := PythonPage.Surface;

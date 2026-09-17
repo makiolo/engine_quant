@@ -1,11 +1,11 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    Desinstala `engine-quant` de los interpretes de Python donde Install-EngineWheels.ps1 lo
+    Desinstala `quantdesk` de los interpretes de Python donde Install-EngineWheels.ps1 lo
     instalo.
 .DESCRIPTION
     Simetrico de Install-EngineWheels.ps1: lee el manifiesto que escribio (un python.exe por
-    linea) y ejecuta `pip uninstall -y engine-quant` en cada uno. Un interprete que ya no
+    linea) y ejecuta `pip uninstall -y quantdesk` en cada uno. Un interprete que ya no
     exista (desinstalado, entorno borrado) se omite sin error.
 .PARAMETER ManifestPath
     Fichero escrito por Install-EngineWheels.ps1. Por defecto, installed_pythons.txt junto a
@@ -35,7 +35,7 @@ foreach ($exe in $pythons) {
         continue
     }
     Write-Host "  Desinstalando de $exe ..."
-    & $exe -m pip uninstall -y engine-quant
+    & $exe -m pip uninstall -y quantdesk
 }
 
 Remove-Item -Path $ManifestPath -Force -ErrorAction SilentlyContinue

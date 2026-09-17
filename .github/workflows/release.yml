@@ -10,6 +10,12 @@ name: Release
 # Un `workflow_dispatch` sin "publish" marcado compila wheels + .xll y los deja como
 # artefactos del workflow (pestaña Summary del run), sin crear ninguna release ni tag: sirve
 # para probar el pipeline de build antes de publicar de verdad.
+# Publicar en PyPI (job publish-pypi, PLAN_API_REFACTOR.md Fase 10) es un paso aparte,
+# desactivado por defecto: requiere ademas marcar a mano el input `publish_pypi` (booleano,
+# default false, independiente de "publish") en un `workflow_dispatch` -- un tag "vX.Y.Z" o un
+# `workflow_dispatch` con "publish_pypi" sin marcar siguen produciendo solo la Release de
+# GitHub, exactamente como hoy. Con "publish_pypi" marcado (y el secret PYPI_API_TOKEN ya
+# configurado) se publica ademas el paquete `quantdesk` en PyPI con esa misma version.
 on:
   push:
     tags:
@@ -24,6 +30,10 @@ on:
         description: "Version a publicar, p.ej. 0.1.0 (obligatorio si 'publish' esta marcado; se ignora en un disparo por tag)"
         type: string
         default: ""
+      publish_pypi:
+        description: "Ademas de la Release de GitHub, publicar el paquete quantdesk en PyPI (requiere el secret PYPI_API_TOKEN ya configurado; independiente de 'publish', propio de un workflow_dispatch -- un disparo por tag nunca lo activa)"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -127,6 +137,42 @@ jobs:
         with:
           name: wheel-cp${{ matrix.python-version }}
           path: dist/*.whl
+
+  publish-pypi:
+    name: Publicar quantdesk en PyPI
+    needs: [determine-version, build-wheels]
+    if: needs.determine-version.outputs.publish == 'true' && inputs.publish_pypi == 'true'
+    runs-on: ubuntu-latest
+    # environment "pypi": permite exigir aprobacion manual en GitHub antes de este job, dado
+    # que PyPI no deja volver a subir la misma version si algo sale mal (a diferencia de la
+    # Release de GitHub, que se puede editar/borrar -- ver PLAN_API_REFACTOR.md §6).
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      # merge-multiple junta las N wheels (una por version de CPython, artefactos
+      # wheel-cp3.10/wheel-cp3.11/...) en un unico directorio -- mismo patron que usa
+      # build-installer mas abajo para el mismo conjunto de artefactos.
+      - name: Descargar las wheels
+        uses: actions/download-artifact@v4
+        with:
+          pattern: wheel-cp*
+          path: dist
+          merge-multiple: true
+
+      # Camino inicial (PLAN_API_REFACTOR.md Fase 10): token clasico en el secret
+      # PYPI_API_TOKEN, creado a mano la primera vez que se registra el proyecto `quantdesk`
+      # en pypi.org. Migrar a Trusted Publishing (OIDC, sin secret almacenado) es un cambio de
+      # configuracion posterior sobre este mismo job (basta con quitar `password` y registrar
+      # el trusted publisher en pypi.org apuntando a este repositorio/workflow/environment), no
+      # implementado todavia. Si PYPI_API_TOKEN no esta configurado, este paso falla con el
+      # mensaje de error propio de la action -- aceptable porque `publish_pypi` nace en false
+      # por defecto, este job solo corre cuando alguien lo pide explicitamente.
+      - name: Publicar en PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          password: ${{ secrets.PYPI_API_TOKEN }}
+          packages-dir: dist/
 
   build-xll:
     name: Complemento de Excel (.xll + instalador)

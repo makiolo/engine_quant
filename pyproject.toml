@@ -3,7 +3,11 @@ requires = ["scikit-build-core>=0.10"]
 build-backend = "scikit_build_core.build"
 
 [project]
-name = "engine-quant"
+name = "quantdesk"
+# Nombre de distribucion PyPI alineado con el nombre del paquete Python recomendado
+# (PLAN_API_REFACTOR.md Fase 10; antes "engine-quant", desalineado con `import quantdesk`
+# desde la Fase 0). Cambia el nombre de fichero de las wheels que produce
+# .github/workflows/release.yml: quantdesk-X.Y.Z-cpNN-cpNN-win_amd64.whl.
 # Sobrescrita por el workflow de release (.github/workflows/release.yml) a partir del tag
 # de la release; "0.0.0" es solo el valor para builds locales/de desarrollo.
 version = "0.0.0"
