@@ -12,7 +12,8 @@ métricas y visualizaciones financieras — cada uno explota una parte distinta 
 2. `02_exotic_and_path_dependent_options.ipynb` — barreras (knock-in/out, corredor double
    knock-out), digital, asiático aritmético nativo (`q.average`, réplica manual como celda de
    verificación cruzada), lookback real (`q.running_max`/`q.running_min`), take-profit/stop-loss,
-   straddle/strangle.
+   straddle/strangle vía `q.call_leg`/`q.put_leg`/`q.custom_strategy`
+   (PLAN_IMPROVE_NOTEBOOK2.md Fase 6, réplica manual como celda de verificación cruzada).
 3. `03_bermudan_exercise.ipynb` — ejercicio bermuda vía Longstaff-Schwartz (`PayoffExerciseQ`),
    diagnósticos de ejercicio por fecha, convergencia hacia el límite americano.
 4. `04_greeks_and_risk_surfaces.ipynb` — barrido automático (`Engine.all_greeks`), Hessiana
@@ -34,7 +35,9 @@ métricas y visualizaciones financieras — cada uno explota una parte distinta 
    option ("quanto-style" — un quanto de tipo fijo real necesitaría un ajuste de drift que
    `GbmBasket` no implementa, ver la nota del notebook), comparando tres niveles de correlación
    y razonando el signo del efecto producto a producto (no es el mismo para los cinco).
-9. `09_option_strategies_and_greeks.ipynb` — 14 estrategias custom construidas via `q.both`
+9. `09_option_strategies_and_greeks.ipynb` — 14 estrategias custom construidas via
+   `q.call_leg`/`q.put_leg`/`q.custom_strategy` (PLAN_IMPROVE_NOTEBOOK2.md Fase 6, misma fuente
+   que `02`; réplica manual con `q.both` a mano como celda de verificación cruzada)
    (buy/sell call/put, straddle, butterfly, condor, calendar spread, ratio spread, cada una
    larga y corta) bajo 6 escenarios de volatilidad: valor hoy vs payoff intrínseco, y las
    griegas delta/gamma/theta/vega más vanna/volga/charm (`Engine.all_greeks`/`Engine.hessian`,

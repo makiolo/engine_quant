@@ -574,6 +574,74 @@ cambia frente al comportamiento actual.
 viven en `engine_typed.payoff`, con test Python de paridad, y los notebooks `02`/`09` los consumen
 en vez de reimplementarlos.
 
+**Estado verificado / decisiones tomadas (sesion de implementacion de esta fase).**
+- `clients/python/src/engine_typed/payoff.py`: anadidos `call_leg(observable, strike, qty,
+  maturity)`, `put_leg(observable, strike, qty, maturity)` (devuelven un `Contract` crudo, no un
+  `PayoffProduct`) y `custom_strategy(id, legs)` (envuelve `both(legs)` en un `PayoffProduct`),
+  junto a los builders `european_call`/`european_put`/`irs`/`fx_forward` ya existentes -- misma
+  moneda fija `"USD"` que esos, mismo patron `qty * maximum(...)`/`qty * maximum(..., ...)`
+  siempre multiplicando (nunca omitido, ni siquiera con `qty=1.0`), replicando exactamente el
+  `call_leg`/`put_leg` que ya usaba `09_option_strategies_and_greeks.ipynb` con `qty` explicito.
+  Convencion de signo (ADR-P0-02) documentada en el docstring de ambas: `qty` positivo =
+  comprado/largo, negativo = vendido/corto, nunca hace falta `give()` porque el signo ya vive en
+  el propio cashflow (misma logica que `irs` usa para su pata fija, que si necesita `give()`
+  porque ahi el signo lo pone la posicion completa, no un factor negativo por pata). Exportados
+  en `clients/python/src/engine_typed/__init__.py` (`__all__` y el bloque de imports).
+- Diferencia de AST documentada, NO un bug (instruccion 6 de la tarea): la
+  `vanilla_call_contract`/`vanilla_put_contract` que usaba `02_exotic_and_path_dependent_options.ipynb`
+  ANTES de esta fase no tenian parametro `qty` y por tanto nunca generaban el nodo `Mul` (solo
+  `q.maximum(...)` pelado). `call_leg`/`put_leg` con `qty=1.0` SI generan `Mul(Constant(1.0),
+  Max(...))` porque siguen el patron ya establecido por `european_call`/`european_put` (que
+  siempre multiplican por `notional`, aunque valga 1.0) y por el `call_leg`/`put_leg` que YA
+  usaba `09` con `qty` explicito -- se decidio ese comportamiento como el correcto (precedente ya
+  existente en `engine_typed.payoff`, `09` lo necesita para `qty != 1.0`, y `1.0 * x == x` exacto
+  en IEEE754, sin perdida de precision ni cambio de precio). El test de paridad y las celdas de
+  verificacion cruzada de los notebooks comprueban la parte de AST no ambigua (el `Max` interior)
+  y la equivalencia de PRECIO via motor real, no la igualdad byte a byte del arbol completo contra
+  la version pre-Fase-6 de `02`.
+- Test nuevo en `clients/python/tests/test_engine_typed_payoff.py` (7 tests): paridad
+  estructural de `call_leg`/`put_leg` contra los patrones exactos de `02` (sin `qty`) y de `09`
+  (con `qty` negativo), `custom_strategy` reproduciendo el `both([...])` de straddle de `02` y el
+  `build_contract` de butterfly de `09`, y una parida de PRECIO contra el motor real
+  (`Engine.price`, `PayoffPriceQ`) entre `call_leg` y el AST manual equivalente.
+- `02_exotic_and_path_dependent_options.ipynb`: `vanilla_call_contract`/`vanilla_put_contract`
+  ahora delegan en `q.call_leg`/`q.put_leg`; las versiones previas se conservan como
+  `vanilla_call_contract_manual`/`vanilla_put_contract_manual` (celda de verificacion cruzada,
+  mismo patron editorial que las Fases 0-5 de `PLAN_IMPROVE_NOTEBOOK.md` para `average`/
+  `running_max`), con `assert` de igualdad EXACTA de precio contra el motor real. El straddle
+  (`STRADDLE`) se reconstruye con `q.custom_strategy` y se verifica, tambien con `assert` de
+  igualdad exacta, contra el `q.both([...])` manual previo.
+- `09_option_strategies_and_greeks.ipynb`: los `call_leg`/`put_leg` locales ahora delegan en los
+  de `engine_typed.payoff` (mismo `qty`/`maturity`, `OBS` fijado via closure igual que antes);
+  `build_contract` (que envolvia `q.both` a mano) se sustituye por `q.custom_strategy` en el
+  bucle que construye `PRODUCTS`. Las versiones previas (`call_leg_manual`/`put_leg_manual`/
+  `build_contract_manual`) se conservan como celda de verificacion cruzada, con un bucle que
+  compara el precio de las 14 estrategias (`STRATEGY_LEGS`) construidas con el camino nuevo
+  contra el camino manual -- las 14 coinciden EXACTAMENTE (mismo modelo/mercado/pricing context).
+- Verificacion en capas: `pytest clients/python/tests` -> 163 passed (156 base + 7 nuevos), 2
+  errores preexistentes de `abi_dll_path` sin tocar (identicos a la linea base). Notebooks `02` y
+  `09` regenerados con `jupyter nbconvert --to notebook --execute --inplace`, 0 errores en ambos.
+  Comparados los outputs de texto/markdown de ambos notebooks contra `HEAD` (`git show
+  HEAD:...ipynb`): en `02`, `vanilla=23.501`, `UI+UO=23.616`, `average`/`running_max`/
+  `lookback put` identicos byte a byte; en `09`, las 14 celdas de resumen markdown
+  (`delta`/`gamma`/`theta_anual`/`vega`/`vanna`/`volga`/`charm_anual`, incluidos los `NaN` de
+  `long_calendar_spread`/`short_calendar_spread`, sin relacion con esta fase) coinciden
+  EXACTAMENTE con la version pre-Fase-6 -- confirmando que el cambio de builder no altero ningun
+  precio/Greek.
+- Ninguna tarea de C++/Rust hizo falta (confirmado, no solo asumido): `call_leg`/`put_leg`/
+  `custom_strategy` son puro Python sobre nodos AST (`When`/`Cashflow`/`Both`) ya existentes y ya
+  soportados por el compilador Monte Carlo.
+- Nota para Fase 1 (tambien toca `02`/`09`): el `intrinsic_value` en NumPy de `09` (y el payoff
+  intrinseco pintado en `02`) NO se tocaron en esta fase -- siguen siendo calculo manual en NumPy,
+  fuera del alcance de Fase 6 (que es solo sobre el `Contract`/AST del motor, no sobre las curvas
+  de referencia dibujadas localmente). Si Fase 1 unifica ese patron, debe hacerlo sin romper las
+  nuevas celdas de verificacion cruzada de esta fase (`vanilla_call_contract_manual`,
+  `build_contract_manual`, etc.), que dependen de las funciones `_manual` quedandose como estan.
+- Nota para Fase 7 (auditoria final): revisar si algun otro notebook (`01`, `03`-`08`) tiene su
+  propio patron `when(T, cashflow(qty*max(...)))`/combinador de estrategia ad-hoc que tambien
+  deberia migrar a `call_leg`/`put_leg`/`custom_strategy` (esta fase solo audito los dos
+  notebooks que el plan senalaba explicitamente, `02`/`09`).
+
 ### Fase 7 — Auditoria y actualizacion de TODA la bateria de notebooks (`01`-`09`)
 
 **Problema.** Las fases 0-6 de arriba, en su seccion "Tareas de notebook", solo tocan el notebook

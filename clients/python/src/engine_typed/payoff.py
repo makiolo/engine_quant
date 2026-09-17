@@ -623,6 +623,35 @@ def european_put(id: str, observable: str, strike: float, notional: float, matur
     return PayoffProduct(id=id, contract=contract)
 
 
+def call_leg(observable: str, strike: float, qty: float, maturity: float) -> "Contract":
+    """Pata call cruda (`When`+`Cashflow`), sin envolver en `PayoffProduct`, pensada para
+    combinarse con otras patas via `both(...)`/`custom_strategy(...)` (p.ej. straddle/strangle/
+    butterfly/condor/calendar spread) -- mismo patron de AST que `european_call`, pero con `qty`
+    en vez de `notional` fijo en +1 y sin el `PayoffProduct` de alrededor.
+
+    Convencion de signo (ADR-P0-02, igual que `irs`/`european_call`): `qty` positivo = pata
+    comprada/larga, `qty` negativo = pata vendida/corta -- una cantidad negativa multiplicando el
+    payoff basta para representar "corto", nunca hace falta envolver con `give()` (que invierte
+    el signo de un `Contract` ya construido; aqui el signo ya esta en el propio cashflow).
+    """
+    return when(maturity, cashflow("USD", qty * maximum(fixing(observable, maturity) - strike, 0)))
+
+
+def put_leg(observable: str, strike: float, qty: float, maturity: float) -> "Contract":
+    """Pata put cruda -- ver `call_leg` para la convencion de signo (identica: `qty` positivo =
+    comprado/largo, `qty` negativo = vendido/corto, sin `give()`)."""
+    return when(maturity, cashflow("USD", qty * maximum(strike - fixing(observable, maturity), 0)))
+
+
+def custom_strategy(id: str, legs: List["Contract"]) -> "PayoffProduct":
+    """Combina patas crudas (`call_leg`/`put_leg`/cualquier otro `Contract`) en un unico
+    `PayoffProduct` via `both(...)` -- el mismo combinador que ya usa `irs` internamente para sus
+    dos patas, expuesto aqui para que straddles/strangles/butterflies/condors/calendar spreads
+    (antes reimplementados de forma local e identica en `02_exotic_and_path_dependent_options` y
+    `09_option_strategies_and_greeks`) tengan una unica fuente de verdad."""
+    return PayoffProduct(id=id, contract=both(legs))
+
+
 def irs(
     id: str,
     notional: float,
