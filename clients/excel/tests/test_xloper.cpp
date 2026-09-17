@@ -1152,7 +1152,7 @@ TEST(NewHvpReport, EmptyResultBecomesNaError) {
 }
 
 // PLAN_PRODUCTS.md Fase 10 (§7.1): superficie de autoría sin registry, mismos casos que
-// clients/python/tests/test_engine_typed_payoff.py y cpp/engine/tests/payoff/
+// clients/python/tests/test_quantdesk_payoff.py y cpp/engine/tests/payoff/
 // test_payoff_product.cpp -- confirma que HandleRegistry delega en el mismo
 // engine::payoff::validate_payoff_spec / IProduct::explain(), sin reimplementar nada.
 

@@ -53,7 +53,7 @@ engine::Params dict_to_params(const nb::dict& params) {
             // ver el doc-comment de engine::GbmBasketModel en model.hpp). list[str]/tuple[str]
             // (p.ej. {"observables": ["EQ.SPOT.A", "EQ.SPOT.B"]} de GbmBasket en Python) se
             // traduce aqui a "EQ.SPOT.A,EQ.SPOT.B" -- el unico punto del binding que sabe de esta
-            // convencion, para que engine_typed no tenga que reimplementar el join. Solo el
+            // convencion, para que quantdesk no tenga que reimplementar el join. Solo el
             // PRIMER elemento decide la rama (mismo criterio que bool antes que double: una lista
             // mixta str/numero no es un caso valido de ningun Params existente).
             nb::sequence seq = nb::borrow<nb::sequence>(value);
@@ -97,7 +97,7 @@ std::vector<engine::greeks::RiskFactor> parse_risk_factor_list(const std::vector
 // Traduce un elemento de la lista `measures` de Engine.price/price_batch/price_many/price_grid a
 // un engine::MeasureSpec (PLAN_REAPI.md §6 Fase 3): un string "pelado" (measure_names de
 // siempre, PLAN.md §7.15/§7.19) es MeasureSpec{name, {}}; una tupla (nombre, dict) es
-// MeasureSpec{name, dict_to_params(dict)} -- así engine_typed.DV01(bump=...).to_spec() (una
+// MeasureSpec{name, dict_to_params(dict)} -- así quantdesk.DV01(bump=...).to_spec() (una
 // tupla (str, dict)) y el ["PV", "DV01"] de siempre conviven en la misma llamada.
 //
 // PLAN_IMPROVE_NOTEBOOK2.md Fase 3 (opción (b)): una tupla de 3 elementos (nombre, dict, alias)
@@ -174,7 +174,7 @@ nb::dict calc_result_to_dict(const engine::PriceResult& result, const char* call
             throw std::invalid_argument(
                 std::string(caller) + ": dos medidas resuelven al mismo nombre de salida '" + entry.measure_name +
                 "' -- se pisarian en silencio en el dict de salida; dales un alias distinto "
-                "(tupla (nombre, params, alias), o Measure.to_spec(alias=...) en engine_typed, "
+                "(tupla (nombre, params, alias), o Measure.to_spec(alias=...) en quantdesk, "
                 "PLAN_IMPROVE_NOTEBOOK2.md Fase 3)"
             );
         }
@@ -624,7 +624,7 @@ NB_MODULE(engine, m) {
     // --- Portfolio (PLAN_BACKWARD.md §6.4/§9 Fase 6) ----------------------------------------
     // Se expone `engine::Portfolio` DIRECTAMENTE (nb::class_, sin dataclass/fachada Python
     // intermedia): PLAN_BACKWARD.md §6.4 esboza una fachada de dataclass
-    // (`engine_typed/portfolio.py`), pero eso no es como funciona el resto de este fichero --
+    // (`quantdesk/portfolio.py`), pero eso no es como funciona el resto de este fichero --
     // `all_greeks`/`Engine.hessian`/`Engine.hvp` exponen sus tipos C++ tal cual, sin dataclasses
     // intermedias -- asi que Portfolio sigue el mismo patron real por consistencia (una fachada
     // Python fina no aporta nada aqui: Portfolio ya tiene una API mínima de 4 metodos, igual
@@ -1008,7 +1008,7 @@ NB_MODULE(engine, m) {
             "round-trips Python<->motor), no de rendimiento; ver el ADR de esa fase. Dos medidas "
             "que resuelvan al mismo nombre de salida (con o sin alias) lanzan ValueError en vez "
             "de pisarse en silencio.\n\n"
-            ">>> from engine_typed import greeks\n"
+            ">>> from quantdesk import greeks\n"
             ">>> eng.price(trade, [\n"
             "...     greeks.delta('PayoffPriceQ', 'spot').to_spec(alias='delta'),\n"
             "...     greeks.vega('PayoffPriceQ').to_spec(alias='vega'),\n"

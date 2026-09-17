@@ -1154,6 +1154,218 @@ nombre de fichero) se actualizan a `quantdesk` in-place, sin renombrar el ficher
 **Criterio de aceptación.** `grep -rn "engine_typed"` sobre el árbol, excluyendo los
 `PLAN_*.md` históricos listados arriba y sus citas en Rust/C++, no devuelve nada.
 
+**Estado verificado / decisiones tomadas (sesión de implementación de esta fase).**
+
+- **Ficheros actualizados (inventario original de la fase, 6 ficheros):**
+  - `README.md`: sección "Quick start with Python" (líneas 83-118 tras el cambio) sustituida
+    por el bloque "Después" de §1 literal (mismos nombres de variable: `model`, `trade`,
+    `market`, `engine = Engine(...)`, `metrics`, `results.PV.scalar`). "Dynamic dict facade"
+    reencuadrada con la frase exacta del plan, traducida al inglés del resto del README (todo el
+    documento está en inglés, la frase del plan está en español): *"`engine` (the compiled
+    extension) is the low-level facade that `quantdesk` uses internally, and that Excel and the
+    C ABI also use"*. Los demás bloques de código migrados a `quantdesk` (ver detalle por
+    sección más abajo, incluye "Custom products from Python", "Calibration" y "Batch and grid
+    calculation") — más 2 referencias de prosa fuera de bloques de código que el propio grep
+    encontró y que no estaban en el inventario original de la fase pero son del mismo tipo
+    (documentación viva, no cita histórica): la fila "Payoff authoring" de la tabla de
+    capacidades (`engine_typed.payoff` → `quantdesk.payoff`) y la última viñeta de "Scope and
+    known limitations" (`engine_typed` → `quantdesk`, "Per-measure configuration... only
+    reachable from Python").
+  - `clients/python/README_PYPI.md`: mismo tratamiento (documento en español) — bloque
+    "Después" traducido al patrón de variables ya usado en el resto del fichero
+    (`model`/`trade`/`market`/`engine`/`metrics`/`results`), reencuadre de "Fachada dinámica
+    (dict crudo)" con la misma frase del plan (esta vez sin traducir, el documento ya está en
+    español), y 2 citas de prosa fuera de código (`engine_typed` también cubre `Measure`...";
+    "`engine_typed.IRSwap` la elimina...") actualizadas a `quantdesk`.
+  - `docs/schema/engine.payoff/cookbook.md`: única ocurrencia, en la frase de cabecera del
+    documento (línea 3-4), `engine_typed.payoff`/`import engine_typed as q` →
+    `quantdesk.payoff`/`import quantdesk as q`. El resto del cookbook (todos los fragmentos de
+    código) ya usaba `q.` sin `import` explícito por bloque — no había más ocurrencias que
+    cambiar, confirmado por grep exhaustivo del fichero completo, no solo de la cabecera.
+  - `clients/excel/README.md`: línea 87, cambio de una frase, sin más contenido alrededor
+    tocado.
+  - `clients/excel/tests/test_xloper.cpp`: línea 1155, comentario actualizado a
+    `test_quantdesk_payoff.py` — confirmado que ese fichero existe de verdad en
+    `clients/python/tests/` (renombrado en Fase 6).
+  - `.claude/skills/execute-plan/SKILL.md`: línea 46, `engine_typed/*.py` → `quantdesk/*.py` en
+    la lista de "archivos centrales del motor" que justifican ejecución secuencial de fases.
+    Nota: este fichero está bajo `.claude/`, que en este repositorio está **sin trackear por
+    git** (`git status` al inicio de la sesión ya mostraba `?? .claude/`) — el cambio se hizo
+    igualmente (el propio encargo de la fase lo pide explícitamente, con nota de que el fichero
+    en cuestión es el skill que orquesta esta misma ejecución) pero el commit de esta fase
+    añade ese fichero individualmente (`git add .claude/skills/execute-plan/SKILL.md`), no todo
+    `.claude/` (que también contiene `.claude/scheduled_tasks.lock`, ajeno a esta fase y a este
+    plan, no tocado ni commiteado).
+- **Migración de los bloques de código no listados explícitamente por el texto de la fase, pero
+  cubiertos por "el resto de bloques de código del README que hoy usan `eng`/`q`... se migran al
+  mismo patrón"** — cada uno verificado ejecutándolo literalmente contra
+  `venv\Scripts\python.exe` (build local ya compilado, sin recompilar nada — Fase 7 es
+  puramente documental):
+  - **"Custom products from Python", bloque 1 (call europea)**: el original creaba el producto
+    nativo solo para imprimir `product.type_name()` (`eng.create_product(...)` +
+    `.type_name()`). `quantdesk.Engine` no expone `create_product` como método público (no está
+    en su superficie, §3.2 — deliberadamente, la traducción típed→nativo es un detalle interno
+    de `price`/`price_batch`/etc.), así que replicar el patrón "mismo `eng.create_product` pero
+    con `q` = `quantdesk`" no era posible sin reintroducir la doble construcción que todo este
+    plan elimina. Decisión tomada: usar `trade.product_type` directamente (atributo plano del
+    objeto `PayoffProduct` ya construido, sin crear nada nativo) — comunica el mismo hecho
+    ("todo contrato custom se registra como el tipo genérico `Payoff`") sin la construcción
+    manual. **Hallazgo colateral real, no una invención de esta fase**: verificado por
+    introspección (`venv\Scripts\python.exe`) que `product.type_name()` en el binding nativo
+    actual **no es invocable como método** — `type_name` es un atributo string ya resuelto
+    (`TypeError: 'str' object is not callable` al intentar `product.type_name()`); el README
+    original ya tenía este bug de forma independiente al rename `engine_typed`→`quantdesk` (no
+    se investigó cuándo se introdujo, fuera de alcance). Al sustituir ese bloque por
+    `trade.product_type` el bug deja de estar presente en el README (no se dejó pasar un bloque
+    nuevo con el mismo error).
+  - **"Custom products from Python", bloque 2 (barrera)**: el original terminaba con
+    `barrier_product = eng.create_product(barrier_trade.product_type, barrier_trade.to_params())`
+    sin imprimir ni usar el resultado — solo demostraba que se podía crear. Se eliminó esa
+    llamada (ya no hace falta demostrarlo por separado: la frase introductoria de la sección ya
+    deja explícito que cualquier `PayoffProduct` se puede pasar directo a `Engine.price(...)`,
+    y el bloque 1 ya lo hace con `trade.product_type`); el bloque ahora termina en la
+    construcción del objeto típed, que es el punto real de la sección.
+  - **"Custom products from Python", bloque 3 (envelope JSON)**: sin cambios de fondo
+    (nunca citó `engine_typed`) salvo que, al haber eliminado `eng = engine.Engine()` de los
+    bloques 1-2 de la misma sección, este bloque necesitaba su propia importación/instancia de
+    `engine` para seguir siendo autocontenido — añadido `import engine` + `eng =
+    engine.Engine()` al principio. Verificado que sigue ejecutando y creando el producto sin
+    error.
+  - **"Calibration"**: el original usaba `engine.MarketSnapshot.synthetic_from_hull_white(...)`
+    (helper nativo, sin equivalente en `quantdesk` — no existe una función típed que genere una
+    curva sintética a partir de parámetros Hull-White) seguido de `eng.create_calibrator(...)`
+    + `calibrator.calibrate(...)` + `eng.create_model(...)`. `quantdesk.Engine.calibrate(
+    model_type, market, initial_guess)` exige un `market` **típed** (`quantdesk.market.Market`,
+    traducido internamente vía `market.to_params()`), no el `engine.MarketSnapshot` nativo que
+    devuelve `synthetic_from_hull_white` (confirmado por introspección:
+    `engine.MarketSnapshot` no tiene `to_params()` — `hasattr(ms, 'to_params')` → `False`).
+    Decisión tomada: mantener la llamada nativa `synthetic_from_hull_white` (sigue siendo la
+    única forma de generar esa curva sintética) y reconstruir un `quantdesk.Market` típed a
+    partir de sus atributos ya resueltos (`synthetic.pillars`/`synthetic.zero_rates`, listas
+    Python planas, confirmado por introspección — no son métodos, son propiedades ya
+    materializadas) para poder seguir usando `quantdesk.Engine.calibrate(...)` el resto del
+    flujo. Verificado end-to-end contra el venv: `fit.rmse ≈ 1.07e-14`, `fit.iterations = 9`,
+    `fit.converged = True`, `calibrated_model` reconstruido con `q.HullWhite1F(**
+    fit.optimal_params)` recupera `a=0.15`/`b=0.025` con error `< 1e-4` frente a los valores
+    verdaderos usados para generar la curva sintética (mismo resultado cualitativo que ya
+    verificó la Fase 2 para este mismo caso vía `test_calibration.py`).
+  - **"Batch and grid calculation"**: el original construía cada trade como producto nativo
+    antes de pasarlo a `eng.price_batch(...)` (`eng.create_product("IRSwap", q.IRSwap(...)
+    .to_params())`). `quantdesk.Engine.price_batch(trades, model, market, metrics, ...)` acepta
+    `trades: Sequence[TradeSpec]` **típed** directamente (§3.2/Fase 2) — la traducción a
+    `engine.Product` ocurre dentro del método. Migrado a pasar `q.IRSwap(...)` sin
+    `eng.create_product`, reutilizando `engine`/`model`/`market` definidos en la sección "Quick
+    start with Python" anterior del mismo README (mismo patrón narrativo que ya usaba el
+    original, que reutilizaba `eng_model`/`eng_market`/`eng_pricing`/`eng_execution` de esa
+    misma sección temprana sin redefinirlos). Verificado contra el venv: `PV`/`UnilateralCVA`
+    de las dos filas idénticos a los valores ya reportados por la Fase 2
+    (`948.4537547220389`/`626.7254432766481` para el primer trade — el mismo trade/model/market
+    que el bloque "Después" de §1, coincide bit a bit).
+- **Bloque "Después" de §1 (el que se insertó literal en `README.md`/`README_PYPI.md`)
+  re-ejecutado en esta sesión, no asumido de la Fase 1**: `venv\Scripts\python.exe`, mismo
+  `trade`/`model`/`market`/`n_paths=5000`/`n_steps=208`/`seed=7` que la Fase 1 — resultado
+  **`results.PV.scalar == 948.4537547220389`**, `results.DV01.scalar ==
+  480.18800212936185`, `results.UnilateralCVA.scalar == 626.7254432766481` — idénticos bit a
+  bit a los ya reportados en la Fase 1. También verificado `engine.list_models()`/
+  `list_products()`/`list_measures()`/`list_calibrators()` (usados en la frase que sigue al
+  bloque) devuelven listas no vacías sin error.
+- **Los 4 hallazgos ya conocidos, resueltos:**
+  1. `clients/python/src/engine_py_ext.cpp`: las 5 citas C++ (comentarios/docstrings, líneas
+     56, 100, 177, 627, 1011 en el momento de esta sesión — coinciden con los números que
+     estimaba la Fase 0) actualizadas a `quantdesk` 1:1, incluida
+     `">>> from engine_typed import greeks\n"` → `">>> from quantdesk import greeks\n"` y el
+     comentario que cita un futuro `engine_typed/portfolio.py` → `quantdesk/portfolio.py`.
+     Ninguna toca la superficie pública del binding (`NB_MODULE(engine, m)`, nombres de
+     método/clase expuestos) — solo texto de comentarios/docstrings, confirmado leyendo cada
+     una de las 5 ubicaciones antes de editar.
+  2. `.github/workflows/ci.yml`: **NO tocado**, tal y como razonaba ya la propia Fase 3 — los 2
+     comentarios (línea 148, cita de `PLAN_REAPI.md §6 Fase 1`; línea 173, cita de
+     `PLAN_PRODUCTS.md §12 Fase 3`) citan el nombre que tenía el paquete en el momento en que se
+     escribió esa nota de otro `PLAN_*.md` histórico — mismo criterio editorial que el resto de
+     citas cruzadas a `PLAN_*.md` ya excluidas explícitamente por esta fase. Confirmado que
+     siguen siendo exactamente esos 2 (ninguno nuevo apareció).
+  3. `clients/python/examples/price_flow.py` línea 7: **NO tocado**. La frase completa es
+     "...que es lo que hacía el flujo anterior sobre `engine_typed`" — describe explícitamente
+     el comportamiento del flujo ANTES del refactor (la traducción manual típed→nativo que
+     `quantdesk.Engine` ahora hace por dentro), no una afirmación sobre el comportamiento
+     actual con el nombre antiguo. Mismo criterio que las citas de `ci.yml` y de
+     `clients/python/notebooks/README.md` línea 7 (ya decidido en Fase 5: "cita histórica de
+     una frase, no documentación activa del patrón antiguo").
+  4. `clients/python/notebooks/08_multi_asset_options.ipynb`: **2** ocurrencias encontradas por
+     grep exhaustivo del fichero (no solo la ya señalada por Fase 5) — la ya conocida
+     (celda de código, comentario `# clients/python/tests/test_engine_typed_greeks.py::
+     test_delta_per_asset_of_a_basket_call_matches_manual_bump_and_reval` → cambiado a
+     `test_quantdesk_greeks.py`, confirmado que esa función sigue existiendo con ese nombre
+     exacto en `test_quantdesk_greeks.py` tras el rename de Fase 6) y una segunda, no señalada
+     por ningún hallazgo anterior: una celda markdown que describe la arquitectura del AST/
+     compilador de payoff ("`expression.hpp`/`docs/schema/engine.payoff/v1.schema.json`/
+     `engine_typed.payoff` en C++/Python") — esta es documentación VIVA de la arquitectura
+     actual (enumera los tres sitios donde vive el AST hoy: Rust, JSON schema, Python), no una
+     cita histórica del "antes", así que se actualizó a `quantdesk.payoff` sin ambigüedad.
+     Edición hecha con un script Python (reemplazo de texto sobre el JSON crudo del notebook,
+     no con el editor de celda a celda) para preservar bit a bit el resto del fichero
+     (saltos de línea CRLF dentro de las cadenas JSON, whitespace); verificado post-edición que
+     el fichero sigue siendo JSON válido (`json.load` sin excepción) y que el `git diff` es
+     mínimo (2 líneas, sin reformateo colateral).
+- **Hallazgo nuevo del punto 8 (búsqueda final exhaustiva), no cubierto por ningún hallazgo
+  anterior**: `pyproject.toml` tiene **2** ocurrencias (líneas 13 y 30) que no estaban en el
+  inventario de ningún hallazgo previo bajo ese nombre exacto, pero SÍ estaban ya documentadas
+  y decididas por la propia Fase 3 ("el comentario explicativo... para que cite `quantdesk` como
+  nombre actual y `engine_typed` solo como origen histórico") — confirmado releyendo el estado
+  de Fase 3: línea 13 cita literalmente `PLAN_REAPI.md §6 Fase 1` (mismo patrón que los 2
+  comentarios de `ci.yml`, cita de otro `PLAN_*.md` histórico) y línea 30 dice explícitamente
+  "renombrado desde `engine_typed` en PLAN_API_REFACTOR.md Fase 0" (cita histórica del propio
+  rename, redactada así a propósito). **No tocado** — mismo criterio editorial que el resto de
+  citas históricas ya excluidas, decisión ya tomada en Fase 3 y solo confirmada/ratificada aquí.
+  Segundo hallazgo del punto 8: el propio `PLAN_API_REFACTOR.md` (este documento) contiene
+  decenas de ocurrencias de `engine_typed` en la prosa retrospectiva de sus propias Fases 0-6 ya
+  cerradas (y ahora también en esta misma sección de Fase 7, inevitablemente, al describir qué
+  se hizo). Ninguna fase lo lista explícitamente en su "No se tocan" (esa lista nombra los OTROS
+  ocho `PLAN_*.md`, no a sí mismo), pero por el mismo principio editorial que el propio
+  documento aplica a esos ocho ("son actas históricas de fases ya cerradas... reescribir
+  historia no aporta nada"), sus propias secciones "Estado verificado / decisiones tomadas" de
+  fases ya cerradas son historia igual de legítima y no se tocan — decisión tomada aquí de forma
+  explícita porque el propio documento no lo decía por sí mismo. El criterio de aceptación de
+  esta fase, interpretado con este criterio, se cumple: ninguna ocurrencia de `engine_typed`
+  fuera de (a) los 8 `PLAN_*.md` históricos explícitamente listados, (b) este mismo documento
+  (`PLAN_API_REFACTOR.md`) en su propia prosa retrospectiva, (c) las citas cruzadas Rust/C++ a
+  esos mismos `PLAN_*.md`, y (d) los 2 comentarios de `ci.yml` + 2 de `pyproject.toml` ya
+  decididos en Fase 3 como citas históricas.
+- **Resultado EXACTO del grep final** (`grep -rn "engine_typed"` sobre el árbol completo,
+  excluyendo `.git/`; herramienta de búsqueda por ficheros, no por líneas, usada para el barrido
+  — 21 ficheros con al menos una ocurrencia):
+  - **Excluidos por nombre explícito de la fase (8):** `PLAN.md`, `PLAN_REAPI.md`,
+    `PLAN_GREEKS.md`, `PLAN_BACKWARD.md`, `PLAN_PRODUCTS.md`, `PLAN_FXFORWARD.md`,
+    `PLAN_IMPROVE_NOTEBOOK.md`, `PLAN_IMPROVE_NOTEBOOK2.md`.
+  - **Excluidos por ser citas cruzadas Rust/C++ a esos mismos históricos (6):**
+    `rust/crates/engine-core/src/payoff/mod.rs`, `.../compile.rs`, `.../ir.rs`,
+    `.../basket_api.rs`, `rust/crates/engine-core/src/models/gbm_basket.rs`,
+    `rust/crates/engine-ffi/src/lib.rs`, `cpp/engine/tests/payoff/
+    test_payoff_fixtures_cross_layer.cpp` (7 ficheros en realidad, contando
+    `gbm_basket.rs` que la Fase 0 ya había clasificado en este mismo grupo aunque el texto de
+    Fase 7 no lo repita explícitamente).
+  - **Excluido por ser este mismo documento en su prosa retrospectiva (1):**
+    `PLAN_API_REFACTOR.md` (decisión tomada explícitamente en esta sesión, ver arriba).
+  - **Excluidos por decisión ya tomada en Fase 3, ratificada aquí (2):** `.github/workflows/
+    ci.yml` (2 comentarios), `pyproject.toml` (2 comentarios).
+  - **Excluidos por decisión ya tomada en Fase 5/6, ratificada aquí (3):**
+    `clients/python/notebooks/README.md` (línea 7, "`quantdesk` sustituye a `engine_typed`"),
+    `clients/python/examples/README.md` (líneas 5-6, mismo patrón: "`quantdesk`... sustituye a
+    `engine_typed`"), `clients/python/examples/price_flow.py` (línea 7, hallazgo conocido #3
+    de esta fase, ver arriba).
+  - **Total: 8 + 7 + 1 + 2 + 3 = 21 de los 21 ficheros del grep quedan justificados por alguna
+    de las categorías anteriores.** No quedó ningún fichero sin clasificar tras el barrido
+    completo.
+  - `grep -rn "engine_typed" clients/python/src/quantdesk/__pycache__/*.pyc` encontró 3
+    ficheros `.pyc` con la cadena embebida (bytecode compilado de una versión anterior del
+    árbol, antes de esta fase) — **no forman parte del árbol git** (confirmado con
+    `git check-ignore -v`, matchean la regla `__pycache__/` de `.gitignore` línea 12) y no
+    afectan al criterio de aceptación, que es sobre el árbol versionado.
+- **`ctest`/suite Python**: fase puramente documental, sin cambios de código Python/C++/Rust más
+  allá de comentarios (`engine_py_ext.cpp`) y prosa (`.md`/`.ipynb`) — no se ha ejecutado
+  `pytest`/`ctest` completos en esta sesión (no hay superficie ejecutable nueva que verificar
+  más allá de los bloques de código del README, ya verificados uno a uno arriba contra el venv).
+
 ### Fase 8 — Excel: decisión explícita de no tocar el XLL
 
 El motivo por el que "clientes Python" tiene sentido aislar de Excel: la fricción que resuelve

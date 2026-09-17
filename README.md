@@ -39,7 +39,7 @@ The result is one vocabulary and one calculation path across every client.
 | Products | Vanilla interest-rate swap (`IRSwap`); generic composable payoff (`Payoff`) — vanilla, barrier, Asian, take-profit/stop-loss, and American/Bermuda-exercise contracts, plus `IRSwap`/`FXForward` templates that compile to the same AST |
 | Measures | `PV`, `DV01`, `ExpectedExposure`, `PFE95`, `UnilateralCVA` (via `Engine.price(...)`) |
 | Payoff valuation | Deterministic ledger PV and bump-and-reval Greeks for any `Payoff`; Monte Carlo GBM under the risk-neutral measure Q (price, barrier hit probability, exposure profile, Longstaff-Schwartz American/Bermuda exercise) and under a physical measure P (forecast, hit probability, P&L distribution/expected shortfall) — implemented and tested end-to-end in C++/Rust, not yet reachable from `Engine.price(...)` or any client (see [Scope and known limitations](#scope-and-known-limitations)) |
-| Payoff authoring | `engine_typed.payoff` builders, versioned JSON schema (`engine.payoff/v1`) with fixtures, and cross-layer `validate`/`explain` (Python, Excel, C ABI) that agree on the same canonical hash |
+| Payoff authoring | `quantdesk.payoff` builders, versioned JSON schema (`engine.payoff/v1`) with fixtures, and cross-layer `validate`/`explain` (Python, Excel, C ABI) that agree on the same canonical hash |
 | Calibration | Registry-based calibrators for both short-rate models, using damped Gauss-Newton and AAD Jacobians |
 | Compute | Burn tensor backend; CPU by default; opt-in WGPU backend |
 | Clients | Python extension, Excel XLL, native C++ API, and versioned C ABI |
@@ -91,73 +91,45 @@ cd engine_quant
 python -m pip install .
 ```
 
-`engine-quant` installs two packages: the compiled `engine` extension, and `engine_typed` —
-a pure-Python, `pydantic`-backed facade for building `Trade`/`Model`/`Market`/
-`PricingContext`/`ExecutionContext` with real validation instead of raw dicts. It is the
-recommended way to use the engine from Python; see [Dynamic dict facade](#dynamic-dict-facade)
-below for the lower-level alternative that Excel and the C ABI use.
+`engine-quant` installs two packages: the compiled `engine` extension, and `quantdesk` — a
+pure-Python, `pydantic`-backed facade with a single `Engine` class that builds
+`Trade`/`Model`/`Market` and prices them in one call, with real validation instead of raw
+dicts. It is the recommended way to use the engine from Python; see
+[Dynamic dict facade](#dynamic-dict-facade) below for the lower-level facade that `quantdesk`
+uses internally, and that Excel and the C ABI also use.
 
 ```python
-import engine
-import engine_typed as q
+from quantdesk import Engine, HullWhite1F, IRSwap, Market
 
-eng = engine.Engine()
+model = HullWhite1F(a=0.10, b=0.03, sigma=0.01, r0=0.02)
+trade = IRSwap(notional=1_000_000.0, fixed_rate=0.02,
+                payment_times=[1.0, 2.0, 3.0, 4.0, 5.0], accruals=[1.0] * 5)
+market = Market(pillars=[1.0, 2.0], zero_rates=[0.02, 0.02],
+                 hazard_rate=0.02, recovery_rate=0.40)
 
-model = q.HullWhite1F(a=0.10, b=0.03, sigma=0.01, r0=0.02)
+engine = Engine(backend="auto", n_paths=5_000, n_steps=208, seed=7)
 
-# Omitting fixed_rate is a validation error, not a par swap — use IRSwap.par(...) for that.
-trade = q.IRSwap(
-    notional=1_000_000.0,
-    fixed_rate=0.02,
-    payment_times=[1.0, 2.0, 3.0, 4.0, 5.0],
-    accruals=[1.0, 1.0, 1.0, 1.0, 1.0],
-)
-
-market = q.Market(
-    pillars=[1.0, 2.0],
-    zero_rates=[0.02, 0.02],
-    hazard_rate=0.02,
-    recovery_rate=0.40,
-)
-pricing = q.PricingContext(n_paths=5_000, n_steps=208, seed=7)
-execution = q.ExecutionContext(backend="auto")
-
-eng_model = eng.create_model(model.model_type, model.to_params())
-eng_trade = eng.create_product(trade.product_type, trade.to_params())
-eng_market = engine.MarketSnapshot(**market.to_params())
-eng_pricing = engine.PricingContext(pricing.to_params())
-eng_execution = engine.ExecutionContext(execution.to_params())
-
-results = eng.price(
-    eng_trade,
-    ["PV", "DV01", "ExpectedExposure", "PFE95", "UnilateralCVA"],
-    eng_model,
-    eng_market,
-    eng_pricing,
-    eng_execution,
-)
-
-print(results["PV"].scalar)
-print(results["ExpectedExposure"].times)
-print(results["ExpectedExposure"].primary)
-print(results["UnilateralCVA"].scalar)
+metrics = ["PV", "DV01", "ExpectedExposure", "PFE95", "UnilateralCVA"]
+results = engine.price(trade, model, market, metrics)
+print(results.PV.scalar)
 ```
 
-Discover the registered surface at runtime with `list_models()`, `list_products()`,
-`list_measures()`, and `list_calibrators()`.
+Discover the registered surface at runtime with `engine.list_models()`,
+`engine.list_products()`, `engine.list_measures()`, and `engine.list_calibrators()`.
 
 ### Dynamic dict facade
 
-`engine_typed` translates to the same `Params`/dict that `engine.Engine` already accepts
-directly — the facade Excel and the C ABI use, and still valid from Python for quick scripts
-or raw JSON:
+`engine` (the compiled extension) is the low-level facade that `quantdesk` uses internally,
+and that Excel and the C ABI also use — still valid from Python directly for quick scripts or
+raw JSON, without going through `quantdesk`'s typed objects and without the batching/greeks/
+calibration convenience methods that `quantdesk.Engine` adds on top:
 
 ```python
 import engine
 
 eng = engine.Engine()
 model = eng.create_model("HullWhite1F", {"a": 0.10, "b": 0.03, "sigma": 0.01, "r0": 0.02})
-# Omitting fixed_rate here means "par swap" — the one ambiguity engine_typed.IRSwap removes.
+# Omitting fixed_rate here means "par swap" — the one ambiguity quantdesk.IRSwap removes.
 trade = eng.create_product(
     "IRSwap",
     {
@@ -176,18 +148,17 @@ print(results["PV"].scalar)
 
 ### Custom products from Python
 
-Custom products are represented by `engine_typed.PayoffProduct`: compose a contract from
+Custom products are represented by `quantdesk.PayoffProduct`: compose a contract from
 expressions, predicates, and timed cashflows, then register it with the generic `"Payoff"`
-product type. The typed builders validate the tree before it crosses into the native engine.
+product type. The typed builders validate the tree before it ever reaches the native engine —
+every custom contract registers under the same generic product type, and can be passed
+straight into `Engine.price(...)` like any other trade, with no separate construction step.
 
 For example, this creates a one-year European call on an observable named
 `EQ.SPOT.AAPL`:
 
 ```python
-import engine
-import engine_typed as q
-
-eng = engine.Engine()
+import quantdesk as q
 
 call = q.when(
     1.0,
@@ -197,9 +168,8 @@ call = q.when(
     ),
 )
 trade = q.PayoffProduct(id="AAPL_CALL_100", contract=call)
-product = eng.create_product(trade.product_type, trade.to_params())
 
-print(product.type_name())  # Payoff
+print(trade.product_type)  # Payoff
 ```
 
 The same contract nodes can be combined to create path-dependent products. For example, this
@@ -218,18 +188,16 @@ barrier_call = q.trigger(
     on_miss=q.zero(),
 )
 barrier_trade = q.PayoffProduct(id="AAPL_UP_AND_IN", contract=barrier_call)
-barrier_product = eng.create_product(
-    barrier_trade.product_type,
-    barrier_trade.to_params(),
-)
 ```
 
-For integrations that already produce JSON, the lower-level facade accepts the same
-`engine.payoff/v1` envelope:
+For integrations that already produce JSON, the lower-level facade (see
+[Dynamic dict facade](#dynamic-dict-facade)) accepts the same `engine.payoff/v1` envelope:
 
 ```python
+import engine
 import json
 
+eng = engine.Engine()
 spec = {
     "schema": "engine.payoff/v1",
     "id": "FIXED_LEG_2Y",
@@ -285,15 +253,21 @@ Calibrators use the same registry pattern as models and products. Their output c
 passed directly to `create_model`:
 
 ```python
+import engine
+import quantdesk as q
+
 pillars = [0.5, 1.0, 2.0, 3.0, 5.0, 7.0, 10.0]
-market = engine.MarketSnapshot.synthetic_from_hull_white(
+# synthetic_from_hull_white is a native-only helper (no quantdesk equivalent); wrap its
+# output back into a typed Market to keep using quantdesk.Engine for the rest of the flow.
+synthetic = engine.MarketSnapshot.synthetic_from_hull_white(
     a=0.15, b=0.025, sigma=0.008, r0=0.02, pillars=pillars,
 )
+market = q.Market(pillars=list(synthetic.pillars), zero_rates=list(synthetic.zero_rates))
 
 initial_guess = q.HullWhite1F(a=0.30, b=0.01, sigma=0.008, r0=0.02)
-calibrator = eng.create_calibrator("HullWhite1F")
-fit = calibrator.calibrate(market, initial_guess.to_params())
-calibrated_model = eng.create_model("HullWhite1F", q.HullWhite1F(**fit.optimal_params).to_params())
+qeng = q.Engine(backend="auto", n_paths=5_000, n_steps=208, seed=7)
+fit = qeng.calibrate("HullWhite1F", market, initial_guess.to_params())
+calibrated_model = q.HullWhite1F(**fit.optimal_params)
 
 print(fit.rmse, fit.iterations, fit.converged)
 ```
@@ -323,13 +297,15 @@ All three return one row per trade (and, for `price_grid`, per model/market too)
 index attached explicitly — never a nested list:
 
 ```python
+import quantdesk as q
+
 schedule = {"payment_times": [1.0, 2.0, 3.0, 4.0, 5.0], "accruals": [1.0] * 5}
 trades = [
-    eng.create_product("IRSwap", q.IRSwap(notional=1_000_000.0, fixed_rate=0.02, **schedule).to_params()),
-    eng.create_product("IRSwap", q.IRSwap(notional=2_500_000.0, fixed_rate=0.015, **schedule).to_params()),
+    q.IRSwap(notional=1_000_000.0, fixed_rate=0.02, **schedule),
+    q.IRSwap(notional=2_500_000.0, fixed_rate=0.015, **schedule),
 ]
 
-for row in eng.price_batch(trades, ["PV", "UnilateralCVA"], eng_model, eng_market, eng_pricing, eng_execution):
+for row in engine.price_batch(trades, model, market, ["PV", "UnilateralCVA"]):
     print(row.trade_index, row.measures["PV"].scalar, row.measures["UnilateralCVA"].scalar)
 ```
 
@@ -448,7 +424,7 @@ PLAN_PRODUCTS.md           Universal payoff engine: AST, Q/P Monte Carlo, phased
 - GPU support is experimental and must be enabled explicitly. `backend="auto"` resolves to
   GPU only in a GPU-enabled build; otherwise it resolves to CPU.
 - Per-measure configuration (`DV01(bump=...)`/`DV01(bucketed=True)`) is only reachable from
-  Python (`engine_typed`, or a `(name, params)` tuple against `Engine.price`) — Excel and the
+  Python (`quantdesk`, or a `(name, params)` tuple against `Engine.price`) — Excel and the
   C ABI still take plain measure names.
 
 See [PLAN.md](PLAN.md) for the detailed architecture record, numerical-validation strategy,
