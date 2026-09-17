@@ -15,7 +15,9 @@ métricas y visualizaciones financieras — cada uno explota una parte distinta 
    straddle/strangle vía `q.call_leg`/`q.put_leg`/`q.custom_strategy`
    (PLAN_IMPROVE_NOTEBOOK2.md Fase 6, réplica manual como celda de verificación cruzada).
 3. `03_bermudan_exercise.ipynb` — ejercicio bermuda vía Longstaff-Schwartz (`PayoffExerciseQ`),
-   diagnósticos de ejercicio por fecha, convergencia hacia el límite americano.
+   diagnósticos de ejercicio por fecha, convergencia hacia el límite americano. La pata europea
+   que sirve de rama de continuación (`european_put_contract`) delega en `q.put_leg`
+   (PLAN_IMPROVE_NOTEBOOK2.md Fase 6, auditoría de Fase 7) en vez de horneado a mano.
 4. `04_greeks_and_risk_surfaces.ipynb` — barrido automático (`Engine.all_greeks`), Hessiana
    completa y HVP (`Engine.hessian`/`Engine.hvp`: gamma/vanna/volga vía likelihood-ratio,
    AAD forward-over-forward en Hull-White), superficie precio/delta vía `price_grid`.
@@ -23,13 +25,20 @@ métricas y visualizaciones financieras — cada uno explota una parte distinta 
    supervivencia empírica de `S_T`, VaR/ES (`PayoffPnlDistributionP`), mapa de riesgo de caída.
 6. `06_exposure_cva_portfolio.ipynb` — perfil de exposición EE/PFE y CVA (nativo para IRS,
    integrado a mano desde `PayoffExposureProfileQ` para una opción), portfolio de opciones vía
-   `price_grid` bajo escenarios de mercado.
-7. `07_montecarlo_paths_q_vs_p.ipynb` — el motor no expone las trayectorias Monte Carlo por el
-   binding Python (solo medidas agregadas), así que este notebook replica en NumPy la misma
-   SDE exacta de `GBM`/`GBM_P` para dibujar TODAS las trayectorias (fan chart Q vs P, mismo
-   horizonte), calcula esperanza/varianza/asimetría/curtosis/percentiles de cada medida, y
-   valida esos números contra las medidas reales del motor (`PayoffPriceQ`, `PayoffForecastP`,
-   `PayoffHitProbabilityQ`/`P`).
+   `price_grid` bajo escenarios de mercado. Los contratos de call (opción única y cesta de
+   strikes) se construyen con `q.call_leg` (PLAN_IMPROVE_NOTEBOOK2.md Fase 6, auditoría de
+   Fase 7) en vez de horneado a mano.
+7. `07_montecarlo_paths_q_vs_p.ipynb` — nació de una limitación ya cerrada (el binding Python
+   no exponía las trayectorias Monte Carlo, solo medidas agregadas); desde
+   `PLAN_IMPROVE_NOTEBOOK.md` Fase 0, `Engine.simulate_paths(model, market, pricing)` devuelve
+   la matriz de trayectorias REAL que `GBM`/`GBM_P` calculan por dentro, y es la fuente de TODO
+   lo que dibuja/calcula este notebook (fan chart Q vs P, estadísticas terminales,
+   esperanza/varianza/asimetría/curtosis/percentiles). La reimplementación NumPy de la SDE
+   (antes la única fuente) se conserva como test de regresión cruzada explícito (sección 1b,
+   por momentos agregados, no ruta a ruta — friccion 7 de `PLAN_IMPROVE_NOTEBOOK2.md`, RNG
+   distinto entre motor y NumPy, documentada como fuera de alcance), no como fuente de datos.
+   Valida además esos números contra las medidas reales del motor (`PayoffPriceQ`,
+   `PayoffForecastP`, `PayoffHitProbabilityQ`/`P`).
 8. `08_multi_asset_options.ipynb` — modelo multi-activo correlacionado (`GbmBasket`,
    PLAN_IMPROVE_NOTEBOOK.md Fase 3): basket call, spread option, worst-of/best-of, y un compo
    option ("quanto-style" — un quanto de tipo fijo real necesitaría un ajuste de drift que

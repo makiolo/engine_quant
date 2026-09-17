@@ -1222,6 +1222,88 @@ spread, `DEFAULT_THETA_BUMP`, helpers de estrategia locales) referencian la solu
 del workaround. Los nueve notebooks ejecutan limpio de extremo a extremo en la misma pasada de
 verificacion final.
 
+**Estado verificado / decisiones tomadas (sesion de implementacion de esta fase).**
+
+**Metodo de auditoria (instruccion 1 de ejecucion).** Grep sistematico de los NUEVE notebooks
+(celdas de codigo, no solo markdown) contra cada patron obsoleto que las Fases 0-6 dejan atras:
+`np.maximum(`/`intrinsic` (Fase 1), `pricing_date`/`method="auto"` sobre un `pricing_date != 0`
+(Fase 0), `NaN`/`skipped`/`calendar_spread` (Fase 2), `all_greeks(`/multiples entradas `"Greek"`
+sin alias en la misma llamada (Fase 3), `call_leg`/`put_leg`/`custom_strategy`/`vanilla_call_
+contract`/`def .*strike` local (Fase 6), `DEFAULT_THETA_BUMP`/`bump_used` (Fase 5),
+`evaluate_scenario`/`simulate_paths`/`ScenarioEvaluator` (Fase 1/4). Cada notebook con matches se
+leyo en contexto completo (no solo la linea del grep) antes de decidir si el patron era real o un
+falso positivo (p.ej. `all_greeks` en `04` es un barrido COMPLETO deliberado, no una lectura
+parcial de `report.greeks` -- el propio criterio que la Fase 3 dejo escrito para esta fase decia
+explicitamente no tocarlo).
+
+| Notebook | Hallazgos | Accion tomada |
+|----------|-----------|----------------|
+| `01_vanilla_options_black_scholes.ipynb` | Ninguno nuevo -- ya migrado en Fase 5 (`bump_used` de `MeasureResult`, sin `DEFAULT_THETA_BUMP`). | Sin cambios de codigo. Reejecutado (`nbconvert --execute --inplace`): 0 celdas de error, diff vs. HEAD anterior = **cero bytes** (idempotente). |
+| `02_exotic_and_path_dependent_options.ipynb` | Ninguno nuevo -- ya migrado en Fase 6 (`q.call_leg`/`q.put_leg`/`q.custom_strategy`, con `*_manual` como verificacion cruzada). | Sin cambios de codigo. Reejecutado: 0 celdas de error; el unico diff es fragmentacion de `stream` de nbconvert (dos prints consecutivos fusionados/separados entre corridas), mismo texto y mismos valores numericos. |
+| `03_bermudan_exercise.ipynb` | **Real**: `european_put_contract(strike)` reimplementaba a mano exactamente `q.put_leg(observable, strike, qty, maturity)` (`q.when(T, q.cashflow("USD", q.maximum(strike - q.fixing(OBS, T), 0.0)))`) -- notebook nunca tocado por Fases 0-6, nunca tuvo el patron editorial de "version manual conservada como celda de verificacion cruzada" que si tienen `02`/`09`. | `european_put_contract` pasa a delegar en `q.put_leg(OBS, strike, 1.0, T)` (PLAN_IMPROVE_NOTEBOOK2.md Fase 6) -- sigue devolviendo el mismo `Contract` crudo que `bermudan_put_contract` necesita como rama de continuacion, sin cambiar ninguna firma publica del notebook. No se forzo el patron editorial "manual + cruzada" (el notebook nunca lo tuvo, criterio explicito de las instrucciones de ejecucion: "no lo introduzcas de nuevo si el notebook nunca lo tuvo"). Reejecutado: 0 celdas de error, mismos precios/graficas (europea/bermuda/convergencia) que antes del cambio. |
+| `04_greeks_and_risk_surfaces.ipynb` | `all_greeks(` presente (2 llamadas) pero es barrido COMPLETO deliberado (`names = [g.risk_factor for g in report.greeks]` sobre TODO `report.greeks`, mismo con `include_second_order=True`) -- exactamente el caso que la propia Fase 3 dejo documentado como "no tocar" para Fase 7. El resto de llamadas Greek (`comparisons` loop de spot/vol/rate/dividend_yield contra `PayoffSensitivityQ`) son una `eng.price(..., [spec_unico], ...)` por iteracion, nunca dos `"Greek"` en la misma lista -- sin colision que alias resuelva. `pricing_date` siempre `0.0`. Sin `NaN`/`skipped`/`intrinsic`/`call_leg`/`DEFAULT_THETA_BUMP`. | Sin cambios de codigo (ningun patron obsoleto real). Reejecutado: 0 celdas de error; el unico diff es fragmentacion de `stream` de nbconvert, mismos valores. |
+| `05_physical_measure_forecasting.ipynb` | Ninguno -- sin `all_greeks`/Greeks multiples, sin `intrinsic`/`np.maximum`, sin `call_leg`/`put_leg` locales, `pricing_date` siempre `0.0`. | Sin cambios de codigo. Reejecutado: 0 celdas de error; el unico diff es un desplazamiento de `execution_count` en 3 celdas (artefacto de kernel, sin cambio de contenido/valores). |
+| `06_exposure_cva_portfolio.ipynb` | **Real**: el contrato de la opcion frente a contraparte (seccion 2, `call_contract`) y el contrato por strike de la cesta de portfolio (seccion 3, dentro del bucle `for k in strikes`) reimplementaban a mano `q.call_leg(observable, strike, qty, maturity)` (`q.when(T, q.cashflow("USD", q.maximum(q.fixing(OBS, T) - strike, 0.0)))`) -- notebook nunca tocado por Fases 0-6. | Ambos sitios delegan ahora en `q.call_leg(OBS, strike, 1.0, T)` (Fase 6); nota markdown de la seccion 2 actualizada para mencionarlo. Verificado numericamente: `PV portfolio (base)=-4.47`/`(estres)=-2.83`, delta neta `0.008`/`-0.007` -- identicos byte a byte al valor previo al cambio. Reejecutado: 0 celdas de error. |
+| `07_montecarlo_paths_q_vs_p.ipynb` | Ninguno de Fases 0-6 de ESTE documento (ya usa `Engine.simulate_paths` real desde `PLAN_IMPROVE_NOTEBOOK.md` Fase 0, la reimplementacion NumPy es celda de verificacion cruzada explicita 1b, no la fuente). `pricing_date` siempre `0.0` (sin PricingContext, usa el default). Hallazgo colateral fuera del patron de grep pero dentro del espiritu de esta fase: la descripcion de `07` en `README.md` seguia describiendo la limitacion YA CERRADA ("el motor no expone las trayectorias Monte Carlo por el binding Python") como si fuera el estado actual, en vez de mencionar `simulate_paths`. | Sin cambios de codigo en el notebook. `README.md` (entrada de `07`) reescrita para describir el estado real (`Engine.simulate_paths` como fuente, NumPy como test de regresion cruzada). Reejecutado: 0 celdas de error; el diff es fragmentacion de `stream` + desplazamiento de `execution_count` en 3 celdas, mismos valores. |
+| `08_multi_asset_options.ipynb` | Ninguno nuevo -- ya migrado en Fase 4 (`simulate_paths`/`greeks.delta`/`greeks.cross_gamma` para `GbmBasket`, `bump_used` ya via `MeasureResult`). | Sin cambios de codigo. Reejecutado: 0 celdas de error, diff vs. HEAD anterior = **cero bytes** (idempotente). |
+| `09_option_strategies_and_greeks.ipynb` | Ninguno nuevo -- ya migrado en Fases 0/1/2/3/5/6 (charm via `bump_and_reval` por diseno, `intrinsic_value` via `evaluate_scenario`, `HessianReport.skipped` para calendarios, alias `"delta"/"vega"/"theta"` en una sola llamada, `bump_used`, `call_leg`/`put_leg`/`custom_strategy`). | Sin cambios de codigo. Reejecutado (39 celdas, notebook mas grande de la bateria): 0 celdas de error, diff vs. HEAD anterior = **cero bytes** (idempotente pese a ser el notebook mas pesado -- confirma que las 6 fases previas ya lo dejaron en su forma final). |
+
+**Verificacion cruzada de colision de "Greek" sin alias (nota dejada por la Fase 3 para esta
+fase).** Se escaneo por separado, en los ocho notebooks `01`-`08` (mas `09`, ya cubierto en su
+propia fase), cualquier lista pasada a `eng.price(...)`/`price_batch`/`price_many`/`price_grid`
+con dos o mas entradas `"Greek"`/`greeks.*(...).to_spec()` sin alias -- **ninguna encontrada**:
+todas las llamadas Greek de `01`-`08` son de una entrada por llamada (incluidas las de `04`/`06`/
+`08` que en un primer grep parecian candidatas por tener varios `.to_spec()` en la misma celda,
+pero cada uno vive en una llamada `eng.price(...)` separada, no en la misma lista). El `ValueError`
+nuevo de la Fase 3 nunca se disparo durante la reejecucion completa de la bateria.
+
+**Verificacion final de motor (instruccion 6 de ejecucion, sin cambios de motor esperados y sin
+cambios encontrados).** `venv/Scripts/python.exe -m pytest clients/python/tests -q`: **190
+passed** + los mismos 2 errores preexistentes de fixture `abi_dll_path` (no relacionados) --
+identico a la linea base del HEAD de partida (`67e1cab`), como se esperaba (esta fase no toca
+`cpp/engine/`/`rust/`/bindings). No se ejecuto `cargo test`/`ctest` (ningun archivo de motor
+tocado).
+
+**Verificacion final de notebooks.** Los NUEVE notebooks (`01`-`09`) se reejecutaron con
+`jupyter nbconvert --to notebook --execute --inplace --ExecutePreprocessor.record_timing=False`
+en esta misma sesion: **9/9 con 0 celdas de error**. Diffs resultantes: `01`/`08`/`09` con diff
+CERO (idempotentes); `03`/`06` con el cambio de codigo real descrito arriba (mismos valores
+numericos verificados); `02`/`04`/`05`/`07` con diffs puramente cosmeticos de nbconvert
+(fragmentacion de bloques `stream` consecutivos y/o desplazamiento de `execution_count`, sin
+ningun cambio de valor/texto de resultado) -- inspeccionados uno a uno con `git diff`, no
+asumidos.
+
+**`clients/python/notebooks/README.md`**: entradas de `03` (nota sobre `q.put_leg`), `06` (nota
+sobre `q.call_leg`) y `07` (descripcion reescrita para citar `Engine.simulate_paths` como fuente
+real en vez de la limitacion ya cerrada) actualizadas. `01`/`02`/`08`/`09` no necesitaron cambios
+adicionales (ya actualizadas por sus fases respectivas).
+
+**Cierre general del documento (§3/§5).** Con esta fase, las 8 fases de contenido (0-6) mas esta
+fase de cierre (7) quedan todas construidas, verificadas end-to-end y con su auditoria final de
+notebooks completada -- no queda ninguna fase de `PLAN_IMPROVE_NOTEBOOK2.md` pendiente de
+implementar. Explicitamente fuera de alcance, documentadas y no bloqueantes (ver §4 y las
+propias fases): **Fase 2b** (fallback bump-and-reval generico de segundo orden para Hessiana
+multi-fecha -- calendar spreads de `09` siguen en `HessianReport.skipped`, no con un numero),
+**Fase 3b** (informe de riesgo de una sola pasada Monte Carlo compartiendo trayectorias entre
+precio+Greeks -- la Fase 3 de aqui solo implemento el alias de ergonomia, opcion (b)), y la
+friccion 7 (alineacion de RNG motor vs NumPy ruta a ruta, sin fase propia por diseno, §4). La
+tabla de priorizacion de §3 y la trazabilidad de §5 no requieren correcciones -- ambas ya
+describian correctamente el estado ANTES de esta fase (fase 7 "bloqueada por 0-6", notebooks
+`01`/`02`/`08`/`09` como los tocados por fases previas) y ahora, con esta fase cerrada, quedan
+como registro historico correcto del proceso, no desactualizadas: la auditoria de esta fase
+confirmo que solo `03`/`06` tenian hallazgos reales fuera de esa tabla (que por diseno de §5 solo
+lista la fase que motivo cada friccion, no la auditoria transversal de cierre) -- no se anadieron
+filas nuevas a la tabla de §5 porque esta fase documenta sus propios hallazgos aqui mismo, no
+como una fila mas de "fase -> notebook -> celda" (esa tabla es sobre el ORIGEN de cada friccion,
+no sobre el cierre).
+
+**Criterio de aceptacion: SATISFECHO.** Ningun notebook de `01` a `09` contiene, tras esta fase,
+un patron que duplique a mano algo que el motor ya sabe hacer nativamente segun las Fases 0-6
+(los dos hallazgos reales, `03`/`06`, quedaron cerrados); las limitaciones ya resueltas (`NaN` de
+calendar spread en `09`, `DEFAULT_THETA_BUMP` en `01`/`09`, helpers de estrategia locales en
+`02`/`03`/`06`/`09`) referencian la solucion nueva; los nueve notebooks ejecutan limpio de
+extremo a extremo en la misma pasada de verificacion final (esta sesion).
+
 ## 3. Priorizacion sugerida
 
 | Fase | Esfuerzo relativo | Notebooks que mejora | Bloquea |
