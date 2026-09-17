@@ -144,6 +144,94 @@ def test_simulate_paths_rejects_n_paths_times_n_steps_over_the_hard_cap():
         eng.simulate_paths(model, market, over_steps)
 
 
+def _gbm_basket_model(eng, s0=(100.0, 50.0), r=(0.03, 0.03), q=(0.0, 0.0), sigma=(0.2, 0.35), rho=0.4):
+    return eng.create_model(
+        "GbmBasket",
+        {
+            "observables": ["EQ.SPOT.A", "EQ.SPOT.B"],
+            "s0": list(s0),
+            "r": list(r),
+            "q": list(q),
+            "sigma": list(sigma),
+            "correlation": [1.0, rho, rho, 1.0],
+        },
+    )
+
+
+# PLAN_IMPROVE_NOTEBOOK2.md Fase 4: eng.simulate_paths sobre GbmBasketModel -- generaliza los
+# tests de arriba (GBM/GBM_P, un unico observable) a N activos correlacionados. La forma de salida
+# gana una dimension extra (n_assets); el resto de la convencion (times[0] == 0.0, paths[:, 0, :]
+# == s0 sin simular, malla uniforme dt = T/n_steps) es identica.
+
+
+def test_simulate_paths_basket_shape_times_grid_and_t0_columns_equal_s0_per_asset():
+    eng = engine.Engine()
+    s0 = (100.0, 50.0)
+    maturity = 2.0
+    n_paths, n_steps = 500, 8
+    model = _gbm_basket_model(eng, s0=s0)
+    market = _market(maturity)
+    pricing = _pricing(n_paths, n_steps, seed=1)
+
+    times, paths = eng.simulate_paths(model, market, pricing)
+
+    assert times.shape == (n_steps + 1,)
+    assert paths.shape == (n_paths, n_steps + 1, 2)
+    assert times[0] == 0.0
+    assert math.isclose(times[-1], maturity, rel_tol=1e-12)
+    dt = maturity / n_steps
+    assert np.allclose(np.diff(times), dt)
+    # t=0 no se simula: S0 de CADA activo, identico para todas las rutas.
+    assert np.all(paths[:, 0, 0] == s0[0])
+    assert np.all(paths[:, 0, 1] == s0[1])
+
+
+def test_simulate_paths_basket_terminal_marginal_moments_per_asset_match_black_scholes_lognormal_formula():
+    # PLAN_IMPROVE_NOTEBOOK2.md Fase 4, criterio de aceptacion: paridad de momentos MARGINALES por
+    # activo -- mismo criterio de tolerancia que el test equivalente de GBM de un unico activo
+    # arriba, aplicado a cada activo del basket por separado (la correlacion solo afecta la
+    # relacion ENTRE activos, nunca la distribucion marginal de uno solo).
+    eng = engine.Engine()
+    s0 = (100.0, 60.0)
+    r, q_div, sigma = (0.05, 0.05), (0.01, 0.02), (0.25, 0.3)
+    maturity = 1.5
+    n_paths, n_steps = 30_000, 10
+    model = _gbm_basket_model(eng, s0=s0, r=r, q=q_div, sigma=sigma, rho=0.5)
+    market = _market(maturity, zero_rate=r[0])
+    pricing = _pricing(n_paths, n_steps, seed=7)
+
+    _, paths = eng.simulate_paths(model, market, pricing)
+
+    for asset in (0, 1):
+        terminal = paths[:, -1, asset]
+        mean = terminal.mean()
+        variance = terminal.var(ddof=1)
+        std_error = math.sqrt(variance / n_paths)
+
+        expected_mean = s0[asset] * math.exp((r[asset] - q_div[asset]) * maturity)
+        assert abs(mean - expected_mean) < 6.0 * std_error, (
+            f"asset={asset} mean={mean} expected={expected_mean} se={std_error}"
+        )
+
+        expected_variance = (
+            s0[asset] ** 2 * math.exp(2.0 * (r[asset] - q_div[asset]) * maturity) * (math.exp(sigma[asset] ** 2 * maturity) - 1.0)
+        )
+        relative_error = abs(variance - expected_variance) / expected_variance
+        assert relative_error < 0.1, f"asset={asset} variance={variance} expected={expected_variance} rel_err={relative_error}"
+
+
+def test_simulate_paths_basket_same_seed_is_reproducible():
+    eng = engine.Engine()
+    model = _gbm_basket_model(eng)
+    market = _market(1.0)
+    pricing = _pricing(200, 5, seed=123)
+
+    _, paths_1 = eng.simulate_paths(model, market, pricing)
+    _, paths_2 = eng.simulate_paths(model, market, pricing)
+
+    assert np.array_equal(paths_1, paths_2)
+
+
 def test_simulate_paths_uses_the_last_pillar_of_the_market_as_the_horizon():
     eng = engine.Engine()
     model = _gbm_q_model(eng)

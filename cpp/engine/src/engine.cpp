@@ -410,4 +410,27 @@ PathMatrix simulate_paths_gbm_p(
     }
 }
 
+BasketPathMatrix simulate_paths_gbm_basket_q(
+    const std::string& backend,
+    const std::vector<double>& s0, const std::vector<double>& r, const std::vector<double>& q,
+    const std::vector<double>& sigma, const std::vector<double>& correlation_flat,
+    double maturity, std::uint64_t n_steps, std::uint64_t n_paths, std::uint64_t seed
+) {
+    try {
+        ffi::BasketPathMatrixResult result = ffi::simulate_paths_gbm_basket_q(
+            backend, to_rust_vec(s0), to_rust_vec(r), to_rust_vec(q), to_rust_vec(sigma),
+            to_rust_vec(correlation_flat), maturity, n_steps, n_paths, seed
+        );
+        return BasketPathMatrix{
+            std::vector<double>(result.times.begin(), result.times.end()),
+            std::vector<double>(result.paths_flat.begin(), result.paths_flat.end()),
+            result.n_paths,
+            result.n_steps,
+            result.n_assets
+        };
+    } catch (const std::exception& e) {
+        throw std::invalid_argument(std::string("simulate_paths_gbm_basket_q: ") + e.what());
+    }
+}
+
 } // namespace engine

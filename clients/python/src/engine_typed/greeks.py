@@ -45,6 +45,11 @@ class Greek(Measure):
     order: int = 1
     method: str = "auto"
     bump: Optional[float] = None
+    # PLAN_IMPROVE_NOTEBOOK2.md Fase 4: string namespaced opcional (mismo formato que
+    # risk_factor, p.ej. "model.spot_1") que habilita la derivada CRUZADA de 4 puntos que ya
+    # calcula `compute_greek` (Vanna, o para GbmBasket la cross-gamma real entre dos activos) --
+    # ver `cross_gamma()` mas abajo para el builder "amigable" equivalente a `delta()`/`gamma()`.
+    cross_factor: Optional[str] = None
 
     def to_params(self) -> dict:
         params: dict = {
@@ -53,6 +58,8 @@ class Greek(Measure):
             "order": float(self.order),
             "method": self.method,
         }
+        if self.cross_factor is not None:
+            params["cross_factor"] = self.cross_factor
         for key, value in self.metric_params.items():
             params[f"metric.{key}"] = value
         if self.bump is not None:
@@ -95,6 +102,24 @@ def gamma(metric: str, risk_factor: str, *, bump: Optional[float] = None, **metr
     mismo estencil de 3 puntos que ya usa `compute_greek` cuando `order=2`. Sin `method`: las
     rutas especializadas solo cubren `order=1` (§5.2), Gamma siempre es bump-and-reval."""
     return delta(metric, risk_factor, bump=bump, **metric_params).model_copy(update={"order": 2})
+
+
+def cross_gamma(
+    metric: str, risk_factor: str, cross_risk_factor: str, *, bump: Optional[float] = None, **metric_params
+) -> Greek:
+    """Derivada cruzada de primer orden (Vanna, o -- PLAN_IMPROVE_NOTEBOOK2.md Fase 4 -- la
+    cross-gamma real entre dos activos de un `GbmBasket`, `d^2V/dS_i dS_j`) via el estencil
+    generico de 4 puntos de `compute_greek` (`order=1` con `cross_factor` poblado, ver el
+    doc-comment de `engine::greeks::GreekMeasure` en `greeks.hpp`). `risk_factor`/
+    `cross_risk_factor` son nombres "amigables" SIN el prefijo "model." (mismo criterio que
+    `delta`) -- p.ej. `cross_gamma("PayoffPriceQ", "spot_0", "spot_1")` para la cross-gamma de un
+    basket de 2 activos. Sin `method`: la especializacion pathwise (Vanna de GBM/GBM_P via
+    likelihood ratio) se intenta primero automaticamente bajo `method="auto"` (default) si aplica
+    -- para GbmBasket ninguna especializacion esta cableada todavia (PLAN_IMPROVE_NOTEBOOK2.md
+    Fase 4, decision documentada: bump-and-reval generico, no una ruta pathwise nueva), asi que
+    siempre cae al estencil de 4 puntos."""
+    base = delta(metric, risk_factor, bump=bump, **metric_params)
+    return base.model_copy(update={"cross_factor": f"model.{cross_risk_factor}"})
 
 
 def dv01(

@@ -11,6 +11,7 @@
 #include <stdexcept>
 
 #include "engine/bootstrap.hpp"
+#include "engine/engine.hpp"
 #include "engine/model.hpp"
 #include "engine/payoff/errors.hpp"
 #include "engine/payoff/expression.hpp"
@@ -165,6 +166,46 @@ TEST(RiskNeutralGbmBasketMeasureTest, PayoffPriceQViaRegistryMatchesDirectCallTo
 
     ASSERT_TRUE(via_registry.has_scalar);
     EXPECT_DOUBLE_EQ(via_registry.scalar, direct.mean);
+}
+
+// PLAN_IMPROVE_NOTEBOOK2.md Fase 4: engine::simulate_paths_gbm_basket_q generaliza
+// engine::simulate_paths_gbm_q (PLAN_IMPROVE_NOTEBOOK.md Fase 0) a GbmBasketModel -- este test
+// ejercita la capa C++/FFI (Rust ya lo cubre a nivel de engine_core::api, ver
+// api::tests::simulate_paths_gbm_basket_q_*); Python (test_engine_simulate_paths.py) ejercita el
+// binding nanobind por encima de esto.
+TEST(SimulateGbmBasketPathsTest, ShapeTimesAndT0ColumnsPerAssetMatchS0) {
+    const double s0_a = 100.0, s0_b = 50.0, maturity = 1.5;
+    const std::uint64_t n_paths = 500, n_steps = 8, n_assets = 2;
+
+    engine::BasketPathMatrix result = engine::simulate_paths_gbm_basket_q(
+        "cpu", {s0_a, s0_b}, {0.03, 0.03}, {0.0, 0.0}, {0.2, 0.35}, {1.0, 0.4, 0.4, 1.0}, maturity, n_steps, n_paths, 42
+    );
+
+    EXPECT_EQ(result.times.size(), n_steps + 1);
+    EXPECT_DOUBLE_EQ(result.times.front(), 0.0);
+    EXPECT_NEAR(result.times.back(), maturity, 1e-12);
+    EXPECT_EQ(result.n_paths, n_paths);
+    EXPECT_EQ(result.n_steps, n_steps);
+    EXPECT_EQ(result.n_assets, n_assets);
+    ASSERT_EQ(result.paths_flat.size(), n_paths * (n_steps + 1) * n_assets);
+
+    // Convencion (path, step, asset): paths_flat[path*(n_steps+1)*n_assets + asset] es la columna
+    // t=0 del activo `asset` -- S0 de ESE activo, identico en todas las rutas (no simulado).
+    const std::size_t cols = n_steps + 1;
+    for (std::size_t path = 0; path < n_paths; ++path) {
+        std::size_t base = path * cols * n_assets;
+        EXPECT_DOUBLE_EQ(result.paths_flat[base], s0_a);
+        EXPECT_DOUBLE_EQ(result.paths_flat[base + 1], s0_b);
+    }
+}
+
+TEST(SimulateGbmBasketPathsTest, RejectsAMismatchedCorrelationShapeBeforeSimulating) {
+    EXPECT_THROW(
+        engine::simulate_paths_gbm_basket_q(
+            "cpu", {100.0, 100.0}, {0.03, 0.03}, {0.0, 0.0}, {0.2, 0.2}, {1.0, 0.0, 0.0}, 1.0, 5, 10, 1
+        ),
+        std::invalid_argument
+    );
 }
 
 } // namespace

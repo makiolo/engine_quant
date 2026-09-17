@@ -3100,3 +3100,233 @@ TEST(GreeksImproveNotebook2Fase0Test, ComputeHessianSkipsWithAnExplicitPricingDa
     ASSERT_EQ(report.skipped.size(), 1u);
     EXPECT_NE(report.skipped.front().find("pricing_date"), std::string::npos) << report.skipped.front();
 }
+
+// --- PLAN_IMPROVE_NOTEBOOK2.md Fase 4: Greeks por activo de GbmBasket (delta_i) y cross-gamma --
+//
+// Decision de diseno (documentada tambien en PLAN_IMPROVE_NOTEBOOK2.md junto a la Fase 4): NO se
+// extiende `try_pathwise`/`pathwise_capabilities()` a GbmBasket (habria exigido una nueva funcion
+// Rust de sensibilidad pathwise multi-activo) -- en su lugar, `resolve_bump`/`bump_state`
+// (el motor GENERICO de bump-and-reval que ya usa cualquier otro modelo bajo method="auto" cuando
+// pathwise no aplica) se extienden para reconocer los parametros VECTOR de
+// `GbmBasketModel::to_params()` ("s0"/"r"/"q"/"sigma") indexados por activo
+// ("model.spot_<i>"/etc., ver `resolve_basket_indexed_param` en greeks.cpp). Como GbmBasket nunca
+// aparece en `pathwise_capabilities()`, `method="auto"` cae SIEMPRE al bump-and-reval generico
+// para este modelo -- exactamente lo que estos tests verifican. La cross-gamma (order=1 CON
+// cross_factor) reutiliza, sin codigo nuevo, el estencil generico de 4 puntos que
+// `compute_greek` ya aplicaba para Vanna (PLAN_GREEKS.md §11 Fase 6) -- alcanzable desde
+// `Engine.price(...)` gracias a que `GreekMeasure::GreekMeasure` ahora parsea un "cross_factor"
+// opcional (antes de esta fase, siempre quedaba en std::nullopt en ese camino).
+
+namespace {
+
+pf::ContractPtr basket_call_on_sum(
+    const pf::ObservableId& a, const pf::ObservableId& b, double strike, double maturity
+) {
+    return pf::when(
+        tp(maturity),
+        pf::cashflow(
+            pf::Currency{"USD"},
+            pf::maximum(
+                pf::sub(pf::add(pf::fixing(a, tp(maturity)), pf::fixing(b, tp(maturity))), pf::constant(strike)),
+                pf::constant(0.0)
+            )
+        )
+    );
+}
+
+engine::GbmBasketModel make_two_asset_basket(
+    double s0_a, double s0_b, double r, double q, double sigma_a, double sigma_b, double rho,
+    const std::string& observable_a, const std::string& observable_b
+) {
+    return engine::GbmBasketModel(Params{
+        {"observables", observable_a + "," + observable_b},
+        {"s0", std::vector<double>{s0_a, s0_b}},
+        {"r", std::vector<double>{r, r}},
+        {"q", std::vector<double>{q, q}},
+        {"sigma", std::vector<double>{sigma_a, sigma_b}},
+        {"correlation", std::vector<double>{1.0, rho, rho, 1.0}},
+    });
+}
+
+engine::GbmBasketModel basket_with_bumped_asset(const engine::GbmBasketModel& base, std::size_t asset, double h) {
+    Params params = base.to_params();
+    std::vector<double> s0 = base.s0();
+    s0[asset] += h;
+    params["s0"] = s0;
+    return engine::GbmBasketModel(params);
+}
+
+} // namespace
+
+TEST(GreeksImproveNotebook2Fase4Test, AutoDeltaPerAssetOfABasketCallFallsBackToBumpAndRevalAndMatchesManualBumpAndReval) {
+    Registries registries;
+    register_builtins(registries);
+    const pf::ObservableId a{"EQ.SPOT.A"}, b{"EQ.SPOT.B"};
+    const double s0_a = 100.0, s0_b = 100.0, r = 0.03, q = 0.0, sigma = 0.2, rho = 0.4, strike = 190.0, maturity = 1.0;
+    pf::PayoffProduct product("BASKET_CALL", basket_call_on_sum(a, b, strike, maturity));
+    engine::GbmBasketModel model = make_two_asset_basket(s0_a, s0_b, r, q, sigma, sigma, rho, a.value, b.value);
+    PricingContext pricing = pricing_context(300'000, 11);
+
+    for (std::size_t asset : {std::size_t{0}, std::size_t{1}}) {
+        GreekRequest request;
+        request.metric_name = "PayoffPriceQ";
+        request.risk_factor = RiskFactor{RiskFactorKind::ModelParameter, "model", "spot_" + std::to_string(asset), std::nullopt};
+        request.order = GreekOrder{1, std::nullopt};
+        request.method = GreekMethod::Auto;
+
+        engine::greeks::GreekResult result =
+            engine::greeks::compute_greek(registries, request, model, product, flat_market(), pricing, cpu_execution());
+
+        EXPECT_EQ(result.method_used, GreekMethod::BumpAndReval)
+            << "GbmBasket no esta en pathwise_capabilities() -- Auto siempre cae al estencil generico, activo="
+            << asset;
+        ASSERT_TRUE(result.bump_used.has_value());
+        const double h = *result.bump_used;
+        EXPECT_DOUBLE_EQ(h, std::max(1e-2 * 100.0, 1e-4)); // default_model_parameter_bump(s0=100)
+
+        // Oraculo manual: mismo bump/mismo seed (numeros aleatorios comunes), reconstruyendo el
+        // modelo a mano exactamente como bump_state -- solo el activo pedido se desplaza.
+        engine::GbmBasketModel up = basket_with_bumped_asset(model, asset, h);
+        engine::GbmBasketModel down = basket_with_bumped_asset(model, asset, -h);
+        auto measure = registries.measures.create("PayoffPriceQ");
+        engine::MeasureResult up_result = measure->evaluate(up, product, flat_market(), pricing, cpu_execution());
+        engine::MeasureResult down_result = measure->evaluate(down, product, flat_market(), pricing, cpu_execution());
+        double manual_delta = (up_result.scalar - down_result.scalar) / (2.0 * h);
+
+        EXPECT_NEAR(result.value, manual_delta, 1e-9)
+            << "activo=" << asset << " compute_greek=" << result.value << " manual=" << manual_delta;
+    }
+}
+
+TEST(GreeksImproveNotebook2Fase4Test, DeltaOfAssetZeroDiffersFromDeltaOfAssetOneWhenTheirSpotsDiffer) {
+    // Confirma que "spot_0"/"spot_1" de verdad se resuelven a activos DISTINTOS (no al mismo
+    // indice por error de un off-by-one) -- basket asimetrico (s0 distinto por activo) para que
+    // sus deltas sean economicamente distinguibles.
+    Registries registries;
+    register_builtins(registries);
+    const pf::ObservableId a{"EQ.SPOT.A"}, b{"EQ.SPOT.B"};
+    pf::PayoffProduct product("BASKET_CALL", basket_call_on_sum(a, b, 150.0, 1.0));
+    engine::GbmBasketModel model = make_two_asset_basket(100.0, 50.0, 0.03, 0.0, 0.2, 0.35, 0.3, a.value, b.value);
+    PricingContext pricing = pricing_context(300'000, 11);
+
+    auto delta_of = [&](std::size_t asset) {
+        GreekRequest request;
+        request.metric_name = "PayoffPriceQ";
+        request.risk_factor = RiskFactor{RiskFactorKind::ModelParameter, "model", "spot_" + std::to_string(asset), std::nullopt};
+        request.order = GreekOrder{1, std::nullopt};
+        request.method = GreekMethod::Auto;
+        return engine::greeks::compute_greek(registries, request, model, product, flat_market(), pricing, cpu_execution()).value;
+    };
+
+    double delta_a = delta_of(0);
+    double delta_b = delta_of(1);
+    EXPECT_GT(std::abs(delta_a - delta_b), 0.02) << "delta_a=" << delta_a << " delta_b=" << delta_b;
+}
+
+TEST(GreeksImproveNotebook2Fase4Test, RejectsAnUnrecognizedBasketRiskFactorNameExplicitlyInsteadOfSilentlyReturningZero) {
+    Registries registries;
+    register_builtins(registries);
+    const pf::ObservableId a{"EQ.SPOT.A"}, b{"EQ.SPOT.B"};
+    pf::PayoffProduct product("BASKET_CALL", basket_call_on_sum(a, b, 190.0, 1.0));
+    engine::GbmBasketModel model = make_two_asset_basket(100.0, 100.0, 0.03, 0.0, 0.2, 0.2, 0.4, a.value, b.value);
+
+    // "spot" SIN sufijo de activo (el nombre valido para GBM/GBM_P de un unico activo) no es un
+    // factor reconocido para un basket -- debe rechazarse explicito, nunca degradar a "activo 0"
+    // en silencio.
+    GreekRequest request;
+    request.metric_name = "PayoffPriceQ";
+    request.risk_factor = RiskFactor{RiskFactorKind::ModelParameter, "model", "spot", std::nullopt};
+    request.order = GreekOrder{1, std::nullopt};
+    request.method = GreekMethod::Auto;
+
+    try {
+        engine::greeks::compute_greek(registries, request, model, product, flat_market(), pricing_context(1'000, 1), cpu_execution());
+        FAIL() << "se esperaba std::invalid_argument";
+    } catch (const std::invalid_argument& e) {
+        EXPECT_NE(std::string(e.what()).find("GbmBasket"), std::string::npos) << e.what();
+    }
+
+    // Un indice de activo fuera de rango (solo hay 2 activos, 0 y 1) tambien se rechaza explicito.
+    GreekRequest out_of_range = request;
+    out_of_range.risk_factor.name = "spot_5";
+    try {
+        engine::greeks::compute_greek(
+            registries, out_of_range, model, product, flat_market(), pricing_context(1'000, 1), cpu_execution()
+        );
+        FAIL() << "se esperaba std::invalid_argument";
+    } catch (const std::invalid_argument& e) {
+        EXPECT_NE(std::string(e.what()).find("spot_5"), std::string::npos) << e.what();
+    }
+}
+
+TEST(GreeksImproveNotebook2Fase4Test, CrossGammaBetweenTwoAssetsOfABasketMatchesManualFourPointStencilBumpAndReval) {
+    Registries registries;
+    register_builtins(registries);
+    const pf::ObservableId a{"EQ.SPOT.A"}, b{"EQ.SPOT.B"};
+    const double s0 = 100.0, r = 0.03, q = 0.0, sigma = 0.2, rho = 0.4, strike = 190.0, maturity = 1.0;
+    pf::PayoffProduct product("BASKET_CALL", basket_call_on_sum(a, b, strike, maturity));
+    engine::GbmBasketModel model = make_two_asset_basket(s0, s0, r, q, sigma, sigma, rho, a.value, b.value);
+    PricingContext pricing = pricing_context(400'000, 23);
+
+    GreekRequest request;
+    request.metric_name = "PayoffPriceQ";
+    request.risk_factor = RiskFactor{RiskFactorKind::ModelParameter, "model", "spot_0", std::nullopt};
+    request.order = GreekOrder{1, RiskFactor{RiskFactorKind::ModelParameter, "model", "spot_1", std::nullopt}};
+    request.method = GreekMethod::Auto;
+
+    engine::greeks::GreekResult result =
+        engine::greeks::compute_greek(registries, request, model, product, flat_market(), pricing, cpu_execution());
+
+    EXPECT_EQ(result.method_used, GreekMethod::BumpAndReval)
+        << "GbmBasket no tiene ninguna especializacion pathwise cruzada -- cae al estencil generico de 4 puntos";
+    ASSERT_TRUE(result.bump_used.has_value());
+    const double h1 = *result.bump_used;
+    const double h2 = std::max(1e-2 * s0, 1e-4); // cross_factor siempre usa su propio default
+
+    engine::GbmBasketModel up_up = basket_with_bumped_asset(basket_with_bumped_asset(model, 0, h1), 1, h2);
+    engine::GbmBasketModel up_down = basket_with_bumped_asset(basket_with_bumped_asset(model, 0, h1), 1, -h2);
+    engine::GbmBasketModel down_up = basket_with_bumped_asset(basket_with_bumped_asset(model, 0, -h1), 1, h2);
+    engine::GbmBasketModel down_down = basket_with_bumped_asset(basket_with_bumped_asset(model, 0, -h1), 1, -h2);
+    auto measure = registries.measures.create("PayoffPriceQ");
+    double v_up_up = measure->evaluate(up_up, product, flat_market(), pricing, cpu_execution()).scalar;
+    double v_up_down = measure->evaluate(up_down, product, flat_market(), pricing, cpu_execution()).scalar;
+    double v_down_up = measure->evaluate(down_up, product, flat_market(), pricing, cpu_execution()).scalar;
+    double v_down_down = measure->evaluate(down_down, product, flat_market(), pricing, cpu_execution()).scalar;
+    double manual_cross_gamma = (v_up_up - v_up_down - v_down_up + v_down_down) / (4.0 * h1 * h2);
+
+    EXPECT_NEAR(result.value, manual_cross_gamma, 1e-9)
+        << "compute_greek=" << result.value << " manual=" << manual_cross_gamma;
+}
+
+TEST(GreeksImproveNotebook2Fase4Test, GreekMeasureViaEnginePriceReachesTheCrossFactorParamForABasketCrossGamma) {
+    // Confirma el camino ALCANZABLE DESDE PYTHON (Engine.price(...)["Greek"]): antes de esta fase
+    // GreekMeasure::GreekMeasure nunca poblaba GreekOrder::cross_factor (unreachable salvo por
+    // Engine.hessian, que no cubre GbmBasket) -- este test ejercita exactamente ese camino via
+    // registries.measures.create("Greek", params), sin pasar por compute_greek directamente.
+    Registries registries;
+    register_builtins(registries);
+    const pf::ObservableId a{"EQ.SPOT.A"}, b{"EQ.SPOT.B"};
+    pf::PayoffProduct product("BASKET_CALL", basket_call_on_sum(a, b, 190.0, 1.0));
+    engine::GbmBasketModel model = make_two_asset_basket(100.0, 100.0, 0.03, 0.0, 0.2, 0.2, 0.4, a.value, b.value);
+    PricingContext pricing = pricing_context(300'000, 23);
+
+    Params greek_params{
+        {"metric", std::string("PayoffPriceQ")},
+        {"risk_factor", std::string("model.spot_0")},
+        {"cross_factor", std::string("model.spot_1")},
+        {"order", 1.0},
+    };
+    auto measure = registries.measures.create("Greek", greek_params);
+    engine::MeasureResult via_price = measure->evaluate(model, product, flat_market(), pricing, cpu_execution());
+
+    GreekRequest direct_request;
+    direct_request.metric_name = "PayoffPriceQ";
+    direct_request.risk_factor = RiskFactor{RiskFactorKind::ModelParameter, "model", "spot_0", std::nullopt};
+    direct_request.order = GreekOrder{1, RiskFactor{RiskFactorKind::ModelParameter, "model", "spot_1", std::nullopt}};
+    direct_request.method = GreekMethod::Auto;
+    engine::greeks::GreekResult direct =
+        engine::greeks::compute_greek(registries, direct_request, model, product, flat_market(), pricing, cpu_execution());
+
+    ASSERT_TRUE(via_price.has_scalar);
+    EXPECT_DOUBLE_EQ(via_price.scalar, direct.value);
+}

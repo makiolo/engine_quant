@@ -292,6 +292,15 @@ HvpReport compute_hvp(
 // `Params` anidado real. `evaluate` aplana el `GreekResult` (Fase 2: puede llevar `has_scalar`,
 // perfil `times`/`primary`/`secondary`, o ambos) a la misma forma de `MeasureResult` sin perder
 // ningún componente.
+//
+// `"cross_factor"` (PLAN_IMPROVE_NOTEBOOK2.md Fase 4, opcional, mismo formato namespaced que
+// `"risk_factor"`): puebla `GreekOrder::cross_factor`, alcanzando el estencil genérico de 4
+// puntos de `compute_greek` (Vanna/derivadas cruzadas) desde `Engine.price(...)` -- antes de esta
+// fase ese campo quedaba siempre `std::nullopt` aquí, el único camino era `Engine.hessian`
+// (`hessian_capabilities()`, tabla cerrada que no cubre GbmBasket). Esto habilita, sin código de
+// motor NUEVO por modelo, la cross-gamma real entre dos activos de un basket
+// (`d^2V/dS_i dS_j`, distinta de la vanna spot-vol de un único activo que ya calcula la Hessiana
+// existente): `risk_factor="model.spot_0"`, `cross_factor="model.spot_1"`, `order=1`.
 class GreekMeasure : public IMeasure {
 public:
     GreekMeasure(const Params& params, const Registries& registries);

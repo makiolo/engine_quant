@@ -15,6 +15,8 @@ if len(sys.argv) > 1:
     sys.path.insert(0, sys.argv[1])
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+import pytest  # noqa: E402
+
 import engine  # noqa: E402
 import engine_typed as q  # noqa: E402
 from engine_typed import greeks  # noqa: E402
@@ -36,6 +38,22 @@ def test_gamma_sets_order_two_on_the_same_risk_factor():
     spec = greeks.gamma("PayoffPriceQ", "spot").to_spec()
     assert spec[1]["risk_factor"] == "model.spot"
     assert spec[1]["order"] == 2.0
+
+
+def test_cross_gamma_sets_the_cross_factor_with_the_model_prefix():
+    # PLAN_IMPROVE_NOTEBOOK2.md Fase 4: "cross_factor" es nuevo en el bag de Params de "Greek" --
+    # antes de esta fase GreekMeasure nunca lo leia (siempre nullopt del lado C++).
+    spec = greeks.cross_gamma("PayoffPriceQ", "spot_0", "spot_1").to_spec()
+    assert spec[1]["risk_factor"] == "model.spot_0"
+    assert spec[1]["cross_factor"] == "model.spot_1"
+    assert spec[1]["order"] == 1.0
+
+
+def test_delta_without_cross_gamma_never_sends_a_cross_factor_key():
+    # Ausencia = comportamiento identico al de antes de esta fase (Greek.cross_factor por
+    # defecto es None, to_params() lo omite del bag en vez de mandar None).
+    spec = greeks.delta("PayoffPriceQ", "spot").to_spec()
+    assert "cross_factor" not in spec[1]
 
 
 def test_dv01_defaults_to_pv_and_curve_parallel():
@@ -374,10 +392,131 @@ def test_hvp_with_empty_direction_raises():
     raise AssertionError("se esperaba una excepcion con direction={} (HVP sin direccion no significa nada)")
 
 
+def _gbm_basket_call_fixture(s0=(100.0, 100.0), sigma=(0.2, 0.2), rho=0.4, strike=190.0, n_paths=300_000, seed=11):
+    # PLAN_IMPROVE_NOTEBOOK2.md Fase 4: fixture de basket de 2 activos con delta/cross-gamma
+    # alcanzables via greeks.delta/cross_gamma -- mismo patron que _gbm_call_fixture arriba, pero
+    # GbmBasket en vez de GBM (n_assets=2) y un contrato de basket call sobre la SUMA.
+    eng = engine.Engine()
+    model = eng.create_model(
+        "GbmBasket",
+        {
+            "observables": ["EQ.SPOT.A", "EQ.SPOT.B"],
+            "s0": list(s0),
+            "r": [0.03, 0.03],
+            "q": [0.0, 0.0],
+            "sigma": list(sigma),
+            "correlation": [1.0, rho, rho, 1.0],
+        },
+    )
+    total = q.fixing("EQ.SPOT.A", 1.0) + q.fixing("EQ.SPOT.B", 1.0)
+    contract = q.when(1.0, q.cashflow("USD", q.maximum(total - strike, 0.0)))
+    product = eng.create_product("Payoff", q.PayoffProduct(id="BASKET_CALL", contract=contract).to_params())
+    market = engine.MarketSnapshot(pillars=[1.0], zero_rates=[0.03])
+    pricing = engine.PricingContext({"pricing_date": 0.0, "n_paths": float(n_paths), "n_steps": 1.0, "seed": float(seed)})
+    execution = engine.ExecutionContext({"backend": "cpu"})
+    return eng, product, model, market, pricing, execution
+
+
+def _basket_delta_via_manual_bump(eng, product, s0, sigma, rho, strike, asset, h, market, pricing, execution):
+    """Oraculo manual: reconstruye GbmBasketModel con solo `asset` desplazado en +-h (mismos
+    numeros aleatorios comunes, mismo seed/n_paths) y calcula la diferencia central -- exactamente
+    lo que hace bump_state/compute_greek por dentro (ver test_greeks.cpp,
+    GreeksImproveNotebook2Fase4Test, para el equivalente C++ de este mismo oraculo)."""
+
+    def _model_with_bump(delta):
+        bumped_s0 = list(s0)
+        bumped_s0[asset] += delta
+        return eng.create_model(
+            "GbmBasket",
+            {
+                "observables": ["EQ.SPOT.A", "EQ.SPOT.B"],
+                "s0": bumped_s0,
+                "r": [0.03, 0.03],
+                "q": [0.0, 0.0],
+                "sigma": list(sigma),
+                "correlation": [1.0, rho, rho, 1.0],
+            },
+        )
+
+    up = eng.price(product, ["PayoffPriceQ"], _model_with_bump(h), market, pricing, execution)["PayoffPriceQ"].scalar
+    down = eng.price(product, ["PayoffPriceQ"], _model_with_bump(-h), market, pricing, execution)["PayoffPriceQ"].scalar
+    return (up - down) / (2.0 * h)
+
+
+def test_delta_per_asset_of_a_basket_call_matches_manual_bump_and_reval():
+    # PLAN_IMPROVE_NOTEBOOK2.md Fase 4, criterio de aceptacion explicito: "un basket de 2 activos
+    # tiene delta por activo alcanzable via greeks.delta(...), verificado contra bump-and-reval
+    # manual". method="auto" cae SIEMPRE a bump-and-reval para GbmBasket (no esta en
+    # pathwise_capabilities() del lado C++) -- se confirma leyendo method_used si estuviera
+    # expuesto (no lo esta en MeasureResult, solo en GreekResult/all_greeks), asi que aqui basta
+    # con la paridad numerica contra el oraculo manual.
+    s0, sigma, rho, strike = (100.0, 100.0), (0.2, 0.2), 0.4, 190.0
+    eng, product, model, market, pricing, execution = _gbm_basket_call_fixture(s0=s0, sigma=sigma, rho=rho, strike=strike)
+
+    for asset, risk_factor in ((0, "spot_0"), (1, "spot_1")):
+        result = eng.price(product, [greeks.delta("PayoffPriceQ", risk_factor).to_spec()], model, market, pricing, execution)
+        delta = result["Greek"].scalar
+        bump_used = result["Greek"].bump_used
+        assert bump_used is not None
+        manual_delta = _basket_delta_via_manual_bump(
+            eng, product, s0, sigma, rho, strike, asset, bump_used, market, pricing, execution
+        )
+        assert math.isclose(delta, manual_delta, rel_tol=0.0, abs_tol=1e-9), (
+            f"asset={asset} delta={delta} manual={manual_delta}"
+        )
+
+
+def test_delta_per_asset_rejects_an_out_of_range_asset_index_explicitly():
+    eng, product, model, market, pricing, execution = _gbm_basket_call_fixture()
+    with pytest.raises(Exception):
+        eng.price(product, [greeks.delta("PayoffPriceQ", "spot_7").to_spec()], model, market, pricing, execution)
+
+
+def test_cross_gamma_between_two_assets_of_a_basket_matches_manual_four_point_stencil():
+    # PLAN_IMPROVE_NOTEBOOK2.md Fase 4: la cross-gamma real entre dos activos (d^2V/dS_0 dS_1),
+    # alcanzable via greeks.cross_gamma(...) sobre Engine.price(...) (GreekMeasure ahora parsea
+    # "cross_factor") -- verificada contra el mismo estencil de 4 puntos calculado a mano.
+    s0, sigma, rho, strike = (100.0, 100.0), (0.2, 0.2), 0.4, 190.0
+    eng, product, model, market, pricing, execution = _gbm_basket_call_fixture(s0=s0, sigma=sigma, rho=rho, strike=strike)
+
+    spec = greeks.cross_gamma("PayoffPriceQ", "spot_0", "spot_1").to_spec()
+    assert spec[1]["cross_factor"] == "model.spot_1"
+    result = eng.price(product, [spec], model, market, pricing, execution)["Greek"]
+    cross_gamma_value = result.scalar
+    h1 = result.bump_used
+    assert h1 is not None
+    h2 = max(1e-2 * s0[1], 1e-4)  # cross_factor siempre usa su propio default (ver resolve_bump)
+
+    def _model_with_bumps(d0, d1):
+        bumped_s0 = [s0[0] + d0, s0[1] + d1]
+        return eng.create_model(
+            "GbmBasket",
+            {
+                "observables": ["EQ.SPOT.A", "EQ.SPOT.B"],
+                "s0": bumped_s0,
+                "r": [0.03, 0.03],
+                "q": [0.0, 0.0],
+                "sigma": list(sigma),
+                "correlation": [1.0, rho, rho, 1.0],
+            },
+        )
+
+    def _price(d0, d1):
+        m = _model_with_bumps(d0, d1)
+        return eng.price(product, ["PayoffPriceQ"], m, market, pricing, execution)["PayoffPriceQ"].scalar
+
+    manual = (_price(h1, h2) - _price(h1, -h2) - _price(-h1, h2) + _price(-h1, -h2)) / (4.0 * h1 * h2)
+    assert math.isclose(cross_gamma_value, manual, rel_tol=0.0, abs_tol=1e-9), (
+        f"cross_gamma={cross_gamma_value} manual={manual}"
+    )
+
+
 if __name__ == "__main__":
     test_delta_to_spec_uses_the_model_prefix()
     test_vega_and_rho_default_risk_factors()
     test_gamma_sets_order_two_on_the_same_risk_factor()
+    test_cross_gamma_sets_the_cross_factor_with_the_model_prefix()
+    test_delta_without_cross_gamma_never_sends_a_cross_factor_key()
     test_dv01_defaults_to_pv_and_curve_parallel()
     test_dv01_with_pillar_uses_curve_pillar()
     test_theta_and_credit_builders_default_metrics()
@@ -397,4 +536,7 @@ if __name__ == "__main__":
     test_hessian_with_explicit_factors_restricts_to_the_requested_sub_hessian()
     test_hvp_on_hull_white1f_swap_with_unit_direction_on_a_matches_the_hessian_row()
     test_hvp_with_empty_direction_raises()
+    test_delta_per_asset_of_a_basket_call_matches_manual_bump_and_reval()
+    test_delta_per_asset_rejects_an_out_of_range_asset_index_explicitly()
+    test_cross_gamma_between_two_assets_of_a_basket_matches_manual_four_point_stencil()
     print("OK: tests de engine_typed.greeks/Engine.all_greeks/Engine.hessian/Engine.hvp pasaron")

@@ -34,7 +34,16 @@ métricas y visualizaciones financieras — cada uno explota una parte distinta 
    PLAN_IMPROVE_NOTEBOOK.md Fase 3): basket call, spread option, worst-of/best-of, y un compo
    option ("quanto-style" — un quanto de tipo fijo real necesitaría un ajuste de drift que
    `GbmBasket` no implementa, ver la nota del notebook), comparando tres niveles de correlación
-   y razonando el signo del efecto producto a producto (no es el mismo para los cinco).
+   y razonando el signo del efecto producto a producto (no es el mismo para los cinco). Sección 2b
+   (PLAN_IMPROVE_NOTEBOOK2.md Fase 4): `Engine.simulate_paths` generalizado a `GbmBasket` (fan
+   chart de trayectorias correlacionadas por activo), delta por activo del basket call
+   (`greeks.delta("PayoffPriceQ", "spot_0"/"spot_1")`, verificado contra bump-and-reval manual) y
+   la cross-gamma real entre los dos activos (`greeks.cross_gamma(...)`, estencil genérico de 4
+   puntos) — con una nota explícita de que su signo (positivo) y su dirección frente a la
+   correlación (BAJA, al contrario que el precio) no son la misma pregunta: el precio es monótono
+   en varianza, la cross-gamma mide curvatura concentrada en el strike, que se diluye con más
+   volatilidad efectiva (misma lógica que la gamma de Black-Scholes decreciendo con la
+   volatilidad).
 9. `09_option_strategies_and_greeks.ipynb` — 14 estrategias custom construidas via
    `q.call_leg`/`q.put_leg`/`q.custom_strategy` (PLAN_IMPROVE_NOTEBOOK2.md Fase 6, misma fuente
    que `02`; réplica manual con `q.both` a mano como celda de verificación cruzada)

@@ -572,6 +572,114 @@ la Fase 3 original).
 de Greeks del motor); `simulate_paths` funciona sobre `GbmBasket` con un test de paridad de momentos
 igual que ya exige el criterio de aceptacion de la Fase 0 original para GBM/GBM_P.
 
+**Estado verificado / decisiones tomadas (sesión de implementación de esta fase).**
+
+1. **`simulate_paths` sobre `GbmBasket`: implementado capa por capa, mismo patrón que
+   `simulate_paths_gbm_q`/`_p` (Fase 0 de `PLAN_IMPROVE_NOTEBOOK.md`), generalizando a `n_assets`
+   observables.** Nueva función `engine_core::api::simulate_paths_gbm_basket_q`
+   (`rust/crates/engine-core/src/api.rs`) reutiliza `models::gbm_basket::GbmBasket::simulate_at_times`
+   tal cual (mismos límites duros `SIMULATE_PATHS_MAX_PATHS`/`SIMULATE_PATHS_MAX_STEPS`, mismo
+   preflight `check_simulate_paths_limits`). **Decisión de forma de aplanado**: `paths_flat` usa el
+   orden `(path, step, asset)` — `paths_flat[path*(n_steps+1)*n_assets + step*n_assets + asset]` —
+   en vez de `(asset, path, step)`, para que la capa Python solo necesite un único
+   `reshape((n_paths, n_steps+1, n_assets))` sin transponer, igual de explícito que la convención de
+   aplanado por-path que fijó la Fase 0 original. Bridge cxx nuevo (`BasketPathMatrixResult`,
+   `rust/crates/engine-ffi/src/lib.rs`), wrapper C++ (`engine::BasketPathMatrix`/
+   `engine::simulate_paths_gbm_basket_q`, `cpp/engine/include/engine/engine.hpp` +
+   `cpp/engine/src/engine.cpp`), y una rama nueva en `Engine::simulate_paths`
+   (`clients/python/src/engine_py_ext.cpp`) que hace `dynamic_cast<const engine::GbmBasketModel*>`
+   ANTES de la rama GBM/GBM_P existente (misma función Python, forma de salida distinta según el
+   modelo — documentado en el docstring del binding).
+
+2. **Delta por activo: bump-and-reval genérico, NO una especialización pathwise nueva — decisión
+   explícita, con la razón documentada en el propio código (`greeks.cpp`).** `GbmBasketModel` nunca
+   se añadió a `pathwise_capabilities()`: extender pathwise habría exigido escribir una función Rust
+   de sensibilidad pathwise multi-activo nueva solo para esto (payoff::sensitivity no tiene hoy
+   ningún equivalente multi-activo). En su lugar, se extendió el motor GENÉRICO que YA usa cualquier
+   otro modelo bajo `method="auto"` cuando pathwise no aplica: `resolve_bump`/`bump_state`
+   (`cpp/engine/src/greeks.cpp`) reconocen ahora `GbmBasketModel` como caso especial dentro de
+   `RiskFactorKind::ModelParameter`, vía un helper nuevo `resolve_basket_indexed_param` que parsea
+   nombres de factor `"spot_<i>"`/`"rate_<i>"`/`"dividend_yield_<i>"`/`"volatility_<i>"` (mismos
+   alias "amigables" que GBM, con sufijo de índice de activo 0-based, mismo orden que
+   `"observables"`) y los resuelve contra los parámetros VECTOR de `GbmBasketModel::to_params()`
+   (`"s0"`/`"r"`/`"q"`/`"sigma"`) — a diferencia de GBM/GBM_P, estos NO son claves `double`
+   escalares en `to_params()`, así que la resolución genérica existente
+   (`resolve_model_parameter_key`, que solo sabe de claves escalares) no aplicaba; se añadió una
+   rama paralela, no se modificó esa función. Un nombre no reconocido, o un índice de activo fuera
+   de rango, lanza `std::invalid_argument` explícito (nombrando el modelo/factor) — nunca degrada a
+   "activo 0" en silencio. Como `GbmBasketModel` nunca aparece en `pathwise_capabilities()`,
+   `method="auto"` cae SIEMPRE al bump-and-reval genérico para este modelo.
+
+3. **Cross-gamma real entre dos activos: SÍ implementada en esta fase — reutilizando, sin código de
+   motor nuevo por modelo, el estencil genérico de 4 puntos que `compute_greek` ya aplicaba para
+   Vanna (`order=1` con `cross_factor`, Fase 6 de `PLAN_GREEKS.md`).** Con `resolve_bump`/
+   `bump_state` ya extendidos para `GbmBasketModel` (punto 2), pedir `risk_factor="model.spot_0"` +
+   `cross_factor="model.spot_1"` + `order=1` cae automáticamente en el bloque de derivada cruzada de
+   `compute_greek` (líneas ~1118-1191 de `greeks.cpp`), que ya componía dos `bump_state` para
+   cualquier par de `RiskFactor` — CERO código de motor nuevo hizo falta para la cross-gamma en sí.
+   Lo que SÍ faltaba era el CAMINO para llegar hasta ahí desde Python: antes de esta fase,
+   `GreekMeasure::GreekMeasure` (el traductor `Params` -> `GreekRequest` que usa la medida `"Greek"`
+   expuesta vía `Engine.price(...)`) nunca leía `GreekOrder::cross_factor` — quedaba siempre
+   `std::nullopt`, el único acceso a ese campo era `Engine.hessian` (`compute_hessian`, tabla
+   cerrada `hessian_capabilities()` que no cubre `GbmBasket` y no se tocó). Se añadió un campo
+   `"cross_factor"` opcional (mismo formato namespaced que `"risk_factor"`) al bag de `Params` de la
+   medida `"Greek"`, parseado con `greeks::parse_risk_factor` igual que el campo existente. Del lado
+   Python, `engine_typed.greeks.Greek` gana un campo `cross_factor: Optional[str]` y un builder
+   nuevo `cross_gamma(metric, risk_factor, cross_risk_factor)` (mismo criterio "amigable, sin
+   prefijo `model.`" que `delta`/`gamma`). Esta extensión es genérica (no específica de
+   `GbmBasket`): cualquier modelo que ya soportara la Hessiana vía `Engine.hessian` gana ahora
+   también una vía alternativa vía `Engine.price(...)["Greek"]` con `cross_factor` — no cambia
+   ningún comportamiento existente (el campo es opcional, ausente = comportamiento idéntico al de
+   antes de esta fase).
+
+4. **Signo/dirección de la cross-gamma frente a la correlación — hallazgo verificado
+   empíricamente, DISTINTO de la intuición ingenua planteada en el enunciado original de esta
+   fase.** El enunciado sugería (sin verificar) que la cross-gamma "sube con la correlación... igual
+   que el precio". La ejecución real del notebook (`08_multi_asset_options.ipynb`, sección 2b)
+   muestra lo contrario para un basket call sobre la suma: cross-gamma = 0.0105 (rho=0.0), 0.0093
+   (rho=0.4), 0.0083 (rho=0.8) — **positiva en los tres niveles** (confirma la intuición de signo:
+   co-movimiento amplifica el payoff), pero **decreciente** con rho, al contrario que el precio
+   (8.90 / 11.34 / 13.51 en los mismos tres niveles). Razón: el precio es monótono en varianza (sin
+   kink, Jensen/convexidad), mientras que la cross-gamma mide la curvatura CONCENTRADA cerca del
+   strike — más correlación sube la volatilidad efectiva de la suma
+   (`Var(A+B) = var_A + var_B + 2*rho*cov`), lo que reparte esa curvatura sobre una región más
+   ancha de resultados posibles y la diluye, exactamente la misma lógica por la que la gamma de
+   Black-Scholes de una vainilla decrece con la volatilidad. Documentado explícitamente en el
+   notebook (celda de cross-gamma y resumen de la sección 6) en vez de forzar una aserción de
+   "sube con la correlación" que no se sostiene numéricamente — mismo criterio de "nunca aproximar
+   ni omitir en silencio" del resto de este documento, aplicado aquí a una intuición equivocada en
+   vez de a un bug de motor.
+
+**Trabajo realizado, por capa:**
+- Rust: `rust/crates/engine-core/src/api.rs` (`simulate_paths_gbm_basket_q`/
+  `flatten_basket_paths`/`BasketPathMatrix`, más 4 tests nuevos); `rust/crates/engine-ffi/src/lib.rs`
+  (`BasketPathMatrixResult`, bridge `simulate_paths_gbm_basket_q`).
+- C++: `cpp/engine/include/engine/engine.hpp` + `cpp/engine/src/engine.cpp`
+  (`BasketPathMatrix`/`simulate_paths_gbm_basket_q`); `cpp/engine/src/greeks.cpp`
+  (`resolve_basket_indexed_param`/`basket_indexed_param_value`, extensión de `resolve_bump`/
+  `bump_state`, `"cross_factor"` en `GreekMeasure::GreekMeasure`); `cpp/engine/include/engine/greeks.hpp`
+  (doc-comment); tests nuevos en `cpp/engine/tests/test_greeks.cpp`
+  (`GreeksImproveNotebook2Fase4Test`, 5 tests) y `cpp/engine/tests/payoff/test_gbm_basket_measures.cpp`
+  (`SimulateGbmBasketPathsTest`, 2 tests).
+- Python: `clients/python/src/engine_py_ext.cpp` (rama `GbmBasketModel` en `Engine::simulate_paths`,
+  docstring actualizado); `clients/python/src/engine_typed/greeks.py` (`Greek.cross_factor`,
+  `cross_gamma()`); tests nuevos en `clients/python/tests/test_engine_simulate_paths.py` (3 tests),
+  `clients/python/tests/test_engine_typed_greeks.py` (5 tests).
+- Notebook: `clients/python/notebooks/08_multi_asset_options.ipynb` sección 2b nueva (fan chart de
+  `simulate_paths`, delta por activo verificado contra bump-and-reval manual, cross-gamma vs
+  correlación con la nota de signo/dirección del punto 4), tabla resumen de la sección 6 ampliada.
+  `clients/python/notebooks/README.md` actualizado.
+
+**Relevante para la Fase 7 (siguiente en orden de prioridad):** el campo `"cross_factor"` nuevo en
+la medida `"Greek"` es una extensión genérica del bag de `Params`, no específica de `GbmBasket` —
+cualquier fase futura que quiera una derivada cruzada de dos factores de modelo/curva/crédito ya
+soportados individualmente puede reutilizarlo tal cual, sin volver a tocar `GreekMeasure`. La Fase 3
+(informe de riesgo de una sola pasada Monte Carlo) es ortogonal a esta fase: el bump-and-reval
+genérico usado aquí para `GbmBasket` sigue dependiendo de una simulación Monte Carlo por punto del
+estencil (2 para delta, 4 para cross-gamma) — si la Fase 3 implementa la opción (a) (una única
+pasada que comparta trayectorias entre Greeks), `GbmBasket` no se beneficia automáticamente de eso a
+menos que esa fase decida extenderlo explícitamente a este modelo también (no se asuma).
+
 ### Fase 5 — Cerrar la asimetria `bump_used` entre `GreekResult` y `MeasureResult`
 
 **Problema.** `engine.GreekResult` (lo que devuelve `Engine.all_greeks`/`Engine.hessian`) expone

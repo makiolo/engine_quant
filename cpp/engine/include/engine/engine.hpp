@@ -345,4 +345,30 @@ PathMatrix simulate_paths_gbm_p(
     std::uint64_t n_steps, std::uint64_t n_paths, std::uint64_t seed
 );
 
+// Equivalente de `PathMatrix` para `GbmBasketModel` (PLAN_IMPROVE_NOTEBOOK2.md Fase 4):
+// `n_assets` observables correlacionados en vez de uno solo. **Orden de aplanado: ROW-MAJOR POR
+// (path, step, asset)** -- `paths_flat[path * (n_steps + 1) * n_assets + step * n_assets +
+// asset]` es el valor del activo `asset` de la ruta `path` en `times[step]` -- MISMA convencion
+// que `ffi::BasketPathMatrixResult` (Rust) y el docstring de `Engine.simulate_paths` (Python):
+// ninguna capa reordena. Elegida para que Python solo necesite `reshape((n_paths, n_steps+1,
+// n_assets))`, sin transponer.
+struct BasketPathMatrix {
+    std::vector<double> times;
+    std::vector<double> paths_flat;
+    std::uint64_t n_paths = 0;
+    std::uint64_t n_steps = 0;
+    std::uint64_t n_assets = 0;
+};
+
+// Trayectorias crudas de GbmBasket bajo Q en una malla uniforme [0, maturity] de n_steps
+// intervalos -- mismo criterio de preflight/tope duro que simulate_paths_gbm_q (ver
+// engine_core::api::simulate_paths_gbm_basket_q); `s0`/`r`/`q`/`sigma` uno por activo (define
+// n_assets = s0.size()), `correlation_flat` aplanada fila a fila n_assets x n_assets.
+BasketPathMatrix simulate_paths_gbm_basket_q(
+    const std::string& backend,
+    const std::vector<double>& s0, const std::vector<double>& r, const std::vector<double>& q,
+    const std::vector<double>& sigma, const std::vector<double>& correlation_flat,
+    double maturity, std::uint64_t n_steps, std::uint64_t n_paths, std::uint64_t seed
+);
+
 } // namespace engine

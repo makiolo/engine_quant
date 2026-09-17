@@ -1272,6 +1272,164 @@ fn flatten_paths<B: Backend<FloatElem = f64>>(
     PathMatrix { times: full_times, paths_flat, n_paths, n_steps }
 }
 
+// --- GbmBasket (PLAN_IMPROVE_NOTEBOOK2.md Fase 4) --------------------------------------------
+//
+// Generaliza `simulate_paths_gbm_q` (un unico observable) a `n_assets` observables
+// correlacionados via `models::gbm_basket::GbmBasket::simulate_at_times` (misma funcion de
+// simulacion que ya usa `payoff::basket_api::price_payoff_basket_gbm_q_on` internamente para
+// "PayoffPriceQ" -- aqui se expone la matriz de trayectorias CRUDA, no solo el agregado
+// descontado, mismo criterio que `simulate_paths_gbm_q` respecto de `Gbm`).
+
+/// Matriz cruda de trayectorias de un `GbmBasket` de `n_assets` activos: `times.len() ==
+/// n_steps + 1` (incluye `t=0`, `S0` repetido sin simular, mismo criterio que `PathMatrix`).
+/// **Orden de aplanado: ROW-MAJOR POR (path, step, asset)** -- `paths_flat[path * (n_steps + 1)
+/// * n_assets + step * n_assets + asset]` es el valor del activo `asset` de la ruta `path` en
+/// `times[step]` -- convencion elegida para que la capa Python solo necesite un `reshape((n_paths,
+/// n_steps + 1, n_assets))` en vez de un `reshape` + `transpose`, MISMA convencion documentada en
+/// `ffi::BasketPathMatrixResult` (`engine-ffi/src/lib.rs`), `engine::BasketPathMatrix` (C++) y el
+/// docstring de `Engine.simulate_paths` (Python) -- ninguna capa reordena.
+#[derive(Debug, Clone)]
+pub struct BasketPathMatrix {
+    pub times: Vec<f64>,
+    pub paths_flat: Vec<f64>,
+    pub n_paths: u64,
+    pub n_steps: u64,
+    pub n_assets: u64,
+}
+
+/// Trayectorias crudas de `GbmBasket` (medida Q) en una malla uniforme `[0, maturity]` de
+/// `n_steps` intervalos -- mismos limites/preflight que `simulate_paths_gbm_q`
+/// (`check_simulate_paths_limits`, PLAN_IMPROVE_NOTEBOOK.md Fase 0), mas la validacion de forma
+/// de `GbmBasket::new` (longitudes de `s0`/`r`/`q`/`sigma` y que `correlation` sea PSD).
+/// `s0`/`r`/`q`/`sigma` uno por activo (define `n_assets = s0.len()`); `correlation_flat` es la
+/// matriz de correlacion aplanada FILA A FILA, `n_assets x n_assets` (mismo convenio que
+/// `payoff::basket_api::price_payoff_basket_gbm_q`) -- `Err` explicito ANTES de simular si
+/// `correlation_flat.len() != n_assets * n_assets` (evita un panic de slicing fuera de rango).
+#[allow(clippy::too_many_arguments)]
+pub fn simulate_paths_gbm_basket_q(
+    backend: &str,
+    s0: &[f64],
+    r: &[f64],
+    q: &[f64],
+    sigma: &[f64],
+    correlation_flat: &[f64],
+    maturity: f64,
+    n_steps: u64,
+    n_paths: u64,
+    seed: u64,
+) -> Result<BasketPathMatrix, String> {
+    check_simulate_paths_limits(n_paths, n_steps, maturity)?;
+    let n_assets = s0.len();
+    if n_assets == 0 {
+        return Err("simulate_paths_gbm_basket_q: 's0' no puede estar vacio (se requiere al menos un activo)".to_string());
+    }
+    if correlation_flat.len() != n_assets * n_assets {
+        return Err(format!(
+            "simulate_paths_gbm_basket_q: 'correlation' aplanada debe tener {n}x{n}={} elementos (uno por activo \
+             declarado en 's0'), se recibieron {}",
+            n_assets * n_assets,
+            correlation_flat.len(),
+            n = n_assets
+        ));
+    }
+    Ok(match resolve_backend(backend) {
+        ComputeBackend::Cpu => {
+            let device = burn::tensor::Device::<CpuBackend>::default();
+            simulate_paths_gbm_basket_q_on::<CpuBackend>(
+                &device, s0, r, q, sigma, correlation_flat, maturity, n_steps, n_paths, seed,
+            )?
+        }
+        ComputeBackend::Gpu => {
+            #[cfg(feature = "gpu")]
+            {
+                let device = burn::tensor::Device::<crate::backend::GpuBackend>::default();
+                simulate_paths_gbm_basket_q_on::<crate::backend::GpuBackend>(
+                    &device, s0, r, q, sigma, correlation_flat, maturity, n_steps, n_paths, seed,
+                )?
+            }
+            #[cfg(not(feature = "gpu"))]
+            {
+                let device = burn::tensor::Device::<CpuBackend>::default();
+                simulate_paths_gbm_basket_q_on::<CpuBackend>(
+                    &device, s0, r, q, sigma, correlation_flat, maturity, n_steps, n_paths, seed,
+                )?
+            }
+        }
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn simulate_paths_gbm_basket_q_on<B: Backend<FloatElem = f64>>(
+    device: &burn::tensor::Device<B>,
+    s0: &[f64],
+    r: &[f64],
+    q: &[f64],
+    sigma: &[f64],
+    correlation_flat: &[f64],
+    maturity: f64,
+    n_steps: u64,
+    n_paths: u64,
+    seed: u64,
+) -> Result<BasketPathMatrix, String> {
+    B::seed(device, seed);
+    let dt = maturity / n_steps as f64;
+    let times: Vec<f64> = (1..=n_steps).map(|i| i as f64 * dt).collect();
+    let n_assets = s0.len();
+
+    let s0_t: Vec<Tensor<B, 1>> = s0.iter().map(|&v| scalar(v, device)).collect();
+    let r_t: Vec<Tensor<B, 1>> = r.iter().map(|&v| scalar(v, device)).collect();
+    let q_t: Vec<Tensor<B, 1>> = q.iter().map(|&v| scalar(v, device)).collect();
+    let sigma_t: Vec<Tensor<B, 1>> = sigma.iter().map(|&v| scalar(v, device)).collect();
+    let correlation: Vec<Vec<f64>> =
+        (0..n_assets).map(|i| correlation_flat[i * n_assets..(i + 1) * n_assets].to_vec()).collect();
+    let model = crate::models::gbm_basket::GbmBasket::<B>::new(s0_t, r_t, q_t, sigma_t, correlation)?;
+
+    // simulated[step][asset] -> Tensor<B,1> forma [n_paths] (times SIN t=0, ver el doc-comment de
+    // GbmBasket::simulate_at_times).
+    let simulated = model.simulate_at_times(&times, n_paths as usize, device);
+    Ok(flatten_basket_paths::<B>(s0, &times, simulated, n_paths, n_steps, n_assets as u64))
+}
+
+/// Equivalente de `flatten_paths` para `GbmBasket`: antepone `t=0`/`s0` (uno por activo) y
+/// aplana a la convencion `(path, step, asset)` documentada en `BasketPathMatrix`.
+fn flatten_basket_paths<B: Backend<FloatElem = f64>>(
+    s0: &[f64],
+    times: &[f64],
+    simulated: Vec<Vec<Tensor<B, 1>>>,
+    n_paths: u64,
+    n_steps: u64,
+    n_assets: u64,
+) -> BasketPathMatrix {
+    // columns[step][asset] -> Vec<f64> (longitud n_paths)
+    let columns: Vec<Vec<Vec<f64>>> = simulated
+        .into_iter()
+        .map(|per_asset| per_asset.into_iter().map(|t| t.into_data().to_vec::<f64>().unwrap()).collect())
+        .collect();
+    let cols = n_steps as usize + 1;
+    let n_assets_usize = n_assets as usize;
+    let n_paths_usize = n_paths as usize;
+
+    let mut full_times = Vec::with_capacity(cols);
+    full_times.push(0.0);
+    full_times.extend_from_slice(times);
+
+    let mut paths_flat = vec![0.0_f64; n_paths_usize * cols * n_assets_usize];
+    for path in 0..n_paths_usize {
+        let base = path * cols * n_assets_usize;
+        for (asset, &s0_asset) in s0.iter().enumerate() {
+            paths_flat[base + asset] = s0_asset;
+        }
+        for (step, per_asset_at_step) in columns.iter().enumerate() {
+            let step_base = base + (step + 1) * n_assets_usize;
+            for (asset, column) in per_asset_at_step.iter().enumerate() {
+                paths_flat[step_base + asset] = column[path];
+            }
+        }
+    }
+
+    BasketPathMatrix { times: full_times, paths_flat, n_paths, n_steps, n_assets }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1958,5 +2116,95 @@ mod tests {
         assert!(simulate_paths_gbm_q("cpu", 100.0, 0.05, 0.0, 0.2, 1.0, 0, 10, 1).is_err());
         assert!(simulate_paths_gbm_q("cpu", 100.0, 0.05, 0.0, 0.2, 0.0, 10, 10, 1).is_err());
         assert!(simulate_paths_gbm_q("cpu", 100.0, 0.05, 0.0, 0.2, -1.0, 10, 10, 1).is_err());
+    }
+
+    // --- simulate_paths_gbm_basket_q (PLAN_IMPROVE_NOTEBOOK2.md Fase 4) ---------------------
+
+    #[test]
+    fn simulate_paths_gbm_basket_q_shape_and_t0_columns_equal_s0_per_asset() {
+        let _guard = crate::rng_test_lock::LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (s0, r, q, sigma, maturity) = ([100.0, 50.0], [0.03, 0.03], [0.0, 0.0], [0.2, 0.35], 1.0);
+        let (n_steps, n_paths) = (10_u64, 1_000_u64);
+        let n_assets = 2_u64;
+        let pm = simulate_paths_gbm_basket_q(
+            "cpu", &s0, &r, &q, &sigma, &[1.0, 0.4, 0.4, 1.0], maturity, n_steps, n_paths, 42,
+        )
+        .unwrap();
+
+        assert_eq!(pm.times.len(), (n_steps + 1) as usize);
+        assert_eq!(pm.times[0], 0.0);
+        assert!((pm.times.last().unwrap() - maturity).abs() < 1e-12);
+        assert_eq!(pm.n_paths, n_paths);
+        assert_eq!(pm.n_steps, n_steps);
+        assert_eq!(pm.n_assets, n_assets);
+        assert_eq!(pm.paths_flat.len(), (n_paths * (n_steps + 1) * n_assets) as usize);
+
+        // Convencion (path, step, asset): paths_flat[path*(n_steps+1)*n_assets + asset] es la
+        // columna t=0 del activo `asset` de esa ruta -- S0 de ESE activo, identico en todas las
+        // rutas (no simulado).
+        let cols = (n_steps + 1) as usize;
+        let n_assets_usize = n_assets as usize;
+        for path in 0..n_paths as usize {
+            let base = path * cols * n_assets_usize;
+            assert_eq!(pm.paths_flat[base], s0[0]);
+            assert_eq!(pm.paths_flat[base + 1], s0[1]);
+        }
+    }
+
+    #[test]
+    fn simulate_paths_gbm_basket_q_terminal_marginal_moments_match_univariate_gbm() {
+        // PLAN_IMPROVE_NOTEBOOK2.md Fase 4, criterio de aceptacion: paridad de momentos MARGINALES
+        // por activo, mismo criterio que ya exige simulate_paths_gbm_q para el caso N=1 (y que
+        // gbm_basket::tests::marginal_moments_match_univariate_gbm_regardless_of_correlation ya
+        // exige a nivel de GbmBasket::simulate_at_times).
+        let _guard = crate::rng_test_lock::LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (s0, r, q, sigma, maturity) = (100.0, 0.04, 0.01, 0.3, 1.5);
+        let (n_steps, n_paths) = (12_u64, 30_000_u64);
+        let pm = simulate_paths_gbm_basket_q(
+            "cpu",
+            &[s0, s0],
+            &[r, r],
+            &[q, q],
+            &[sigma, sigma],
+            &[1.0, 0.6, 0.6, 1.0],
+            maturity,
+            n_steps,
+            n_paths,
+            13,
+        )
+        .unwrap();
+
+        let cols = (n_steps + 1) as usize;
+        let n_assets = 2usize;
+        let asset0: Vec<f64> = (0..n_paths as usize)
+            .map(|path| pm.paths_flat[path * cols * n_assets + (n_steps as usize) * n_assets])
+            .collect();
+        let n = n_paths as f64;
+        let mean: f64 = asset0.iter().sum::<f64>() / n;
+        let variance: f64 = asset0.iter().map(|s| (s - mean).powi(2)).sum::<f64>() / (n - 1.0);
+        let std_error = (variance / n).sqrt();
+
+        let expected_mean = s0 * ((r - q) * maturity).exp();
+        assert!(
+            (mean - expected_mean).abs() < 6.0 * std_error,
+            "mean={mean} expected={expected_mean} se={std_error}"
+        );
+    }
+
+    #[test]
+    fn simulate_paths_gbm_basket_q_rejects_mismatched_correlation_shape_before_simulating() {
+        let err = simulate_paths_gbm_basket_q(
+            "cpu", &[100.0, 100.0], &[0.03, 0.03], &[0.0, 0.0], &[0.2, 0.2], &[1.0, 0.0, 0.0], 1.0, 5, 10, 1,
+        )
+        .expect_err("correlation 2x1 en vez de 2x2 deberia rechazarse antes de simular");
+        assert!(err.contains("correlation"), "err={err}");
+    }
+
+    #[test]
+    fn simulate_paths_gbm_basket_q_rejects_n_paths_or_n_steps_over_the_hard_cap() {
+        let over_paths = simulate_paths_gbm_basket_q(
+            "cpu", &[100.0], &[0.05], &[0.0], &[0.2], &[1.0], 1.0, 10, SIMULATE_PATHS_MAX_PATHS + 1, 1,
+        );
+        assert!(over_paths.is_err(), "n_paths por encima del tope debe rechazarse");
     }
 }

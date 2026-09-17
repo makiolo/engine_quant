@@ -354,6 +354,25 @@ public:
         }
         double maturity = pillars.back();
 
+        // GbmBasketModel (PLAN_IMPROVE_NOTEBOOK2.md Fase 4): rama SEPARADA de GBM/GBM_P porque su
+        // resultado tiene una dimension extra (n_assets) -- ver el reshape de mas abajo, distinto
+        // del de dos ejes que usan GBM/GBM_P.
+        if (const auto* basket = dynamic_cast<const engine::GbmBasketModel*>(&model)) {
+            engine::BasketPathMatrix result = engine::simulate_paths_gbm_basket_q(
+                "cpu", basket->s0(), basket->r(), basket->q(), basket->sigma(), basket->correlation(),
+                maturity, pricing.n_steps(), pricing.n_paths(), pricing.seed()
+            );
+            nb::module_ np = nb::module_::import_("numpy");
+            nb::object times_arr = np.attr("array")(result.times);
+            nb::object paths_arr = np.attr("array")(result.paths_flat)
+                                        .attr("reshape")(
+                                            static_cast<std::size_t>(result.n_paths),
+                                            static_cast<std::size_t>(result.n_steps + 1),
+                                            static_cast<std::size_t>(result.n_assets)
+                                        );
+            return nb::make_tuple(times_arr, paths_arr);
+        }
+
         engine::PathMatrix result;
         if (const auto* gbm = dynamic_cast<const engine::GbmModel*>(&model)) {
             result = engine::simulate_paths_gbm_q(
@@ -368,8 +387,8 @@ public:
         } else {
             throw std::invalid_argument(
                 "Engine.simulate_paths: modelo no soportado: " + model.type_name() +
-                " (solo GBM/GBM_P generan un observable simulable -- diagnostico fuera de "
-                "alcance para modelos de curva de tipos como HullWhite1F/2F)"
+                " (solo GBM/GBM_P/GbmBasket generan un observable simulable -- diagnostico fuera "
+                "de alcance para modelos de curva de tipos como HullWhite1F/2F)"
             );
         }
 
@@ -1063,14 +1082,22 @@ NB_MODULE(engine, m) {
             "longitud n_steps+1 (times[0] == 0.0, S0 conocido sin simular); paths es np.ndarray "
             "de forma (n_paths, n_steps+1), paths[:, 0] == model.s0() para todas las rutas. El "
             "horizonte T es SIEMPRE market.pillars()[-1] (el ultimo pillar de la curva); "
-            "n_steps/n_paths/seed vienen de pricing. Solo modelos GBM (medida Q) y GBM_P (medida "
-            "fisica P) generan un observable simulable -- cualquier otro modelo (p.ej. "
-            "HullWhite1F/2F) lanza ValueError. Tope duro de n_paths x n_steps (50000 x 500, "
-            "PLAN_IMPROVE_NOTEBOOK.md Fase 0) para no agotar memoria -- herramienta de "
-            "diagnostico, no un pricer de produccion; excede el tope y lanza ValueError.\n\n"
+            "n_steps/n_paths/seed vienen de pricing. Modelos GBM (medida Q), GBM_P (medida "
+            "fisica P) y GbmBasket (PLAN_IMPROVE_NOTEBOOK2.md Fase 4, N activos correlacionados) "
+            "generan un observable simulable -- cualquier otro modelo (p.ej. HullWhite1F/2F) "
+            "lanza ValueError. Sobre GbmBasket, paths tiene una dimension EXTRA: forma "
+            "(n_paths, n_steps+1, n_assets), paths[:, 0, :] == model.s0() (broadcast por activo) "
+            "para todas las rutas -- convencion elegida para que baste un unico reshape, ver el "
+            "docstring de engine::BasketPathMatrix (C++)/ffi::BasketPathMatrixResult (Rust). "
+            "Tope duro de n_paths x n_steps (50000 x 500, PLAN_IMPROVE_NOTEBOOK.md Fase 0) para "
+            "no agotar memoria -- herramienta de diagnostico, no un pricer de produccion; excede "
+            "el tope y lanza ValueError.\n\n"
             ">>> times, paths = eng.simulate_paths(model_q, market, pricing)\n"
             ">>> paths.shape\n"
-            "(pricing.n_paths, pricing.n_steps + 1)"
+            "(pricing.n_paths, pricing.n_steps + 1)\n"
+            ">>> times, paths = eng.simulate_paths(basket_model, market, pricing)\n"
+            ">>> paths.shape\n"
+            "(pricing.n_paths, pricing.n_steps + 1, len(basket_spec.observables))"
         )
         .def(
             "evaluate_scenario",

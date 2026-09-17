@@ -98,6 +98,65 @@ std::string risk_factor_name_for_param_key(const std::string& model_type, const 
     return param_key;
 }
 
+// Alias "amigable" -> clave de VECTOR de `GbmBasketModel::to_params()` por activo
+// (PLAN_IMPROVE_NOTEBOOK2.md Fase 4): "model.spot_0"/"model.rate_1"/"model.dividend_yield_0"/
+// "model.volatility_1" -- MISMOS alias que GBM (spot/rate/dividend_yield/volatility, ver
+// `gbm_risk_factor_to_param_key`), con sufijo "_<indice de activo>", resuelto contra los
+// parametros VECTOR de `to_params()` ("s0"/"r"/"q"/"sigma", uno por activo, mismo orden que
+// "observables"). A diferencia de GBM/GBM_P (parametros escalares), un basket no tiene una clave
+// `double` propia por activo en `to_params()` -- se resuelve la clave del VECTOR y el indice
+// DENTRO de ese vector, nunca se inventan N*4 claves sinteticas que `GbmBasketModel`/su
+// constructor jamas reconocerian.
+struct BasketIndexedParam {
+    std::string vector_key;
+    std::size_t asset_index;
+};
+
+std::optional<BasketIndexedParam> resolve_basket_indexed_param(const std::string& risk_factor_name) {
+    static const std::vector<std::pair<std::string, std::string>> prefix_to_vector_key = {
+        {"spot_", "s0"}, {"rate_", "r"}, {"dividend_yield_", "q"}, {"volatility_", "sigma"}
+    };
+    for (const auto& [prefix, vector_key] : prefix_to_vector_key) {
+        if (risk_factor_name.rfind(prefix, 0) != 0) continue;
+        const std::string idx_str = risk_factor_name.substr(prefix.size());
+        if (idx_str.empty()) return std::nullopt;
+        std::size_t consumed = 0;
+        long idx = 0;
+        try {
+            idx = std::stol(idx_str, &consumed);
+        } catch (...) {
+            return std::nullopt;
+        }
+        if (idx < 0 || consumed != idx_str.size()) return std::nullopt;
+        return BasketIndexedParam{vector_key, static_cast<std::size_t>(idx)};
+    }
+    return std::nullopt;
+}
+
+// Lee `params[vector_key][asset_index]` con el mismo mensaje de error auto-explicativo (nombra el
+// factor pedido) tanto si falta la clave, no es un vector, o el indice esta fuera de rango --
+// compartido por `resolve_bump`/`bump_state` para no duplicar la validacion.
+double basket_indexed_param_value(
+    const IModel& model, const Params& params, const RiskFactor& risk_factor, const BasketIndexedParam& indexed
+) {
+    auto it = params.find(indexed.vector_key);
+    if (it == params.end() || !std::holds_alternative<std::vector<double>>(it->second)) {
+        throw std::invalid_argument(
+            "compute_greek: el modelo '" + model.type_name() + "' no tiene el parametro de riesgo '" +
+            to_string(risk_factor) + "'"
+        );
+    }
+    const std::vector<double>& vec = std::get<std::vector<double>>(it->second);
+    if (indexed.asset_index >= vec.size()) {
+        throw std::invalid_argument(
+            "compute_greek: '" + to_string(risk_factor) + "' referencia el activo " +
+            std::to_string(indexed.asset_index) + ", pero el modelo '" + model.type_name() + "' solo declara " +
+            std::to_string(vec.size()) + " activos"
+        );
+    }
+    return vec[indexed.asset_index];
+}
+
 // Política de bump por defecto (PLAN_GREEKS.md §4.3): relativo con piso absoluto para parámetros
 // de modelo. `GreekRequest::bump_override` la sustituye cuando está presente.
 double default_model_parameter_bump(double base_value) {
@@ -151,6 +210,24 @@ bool is_second_order_capable_kind(RiskFactorKind kind) {
 // `compute_greek`); el `cross_factor` siempre usa su propio default.
 double resolve_bump(const IModel& model, const MarketSnapshot& market, const RiskFactor& risk_factor, std::optional<double> override_h) {
     if (risk_factor.kind == RiskFactorKind::ModelParameter) {
+        // GbmBasketModel (PLAN_IMPROVE_NOTEBOOK2.md Fase 4): sus parametros por activo son
+        // VECTORES en to_params() ("s0"/"r"/"q"/"sigma"), no un `double` escalar como GBM/GBM_P --
+        // `resolve_model_parameter_key` (que solo sabe de claves escalares) no aplica aqui, se
+        // resuelve por separado via `resolve_basket_indexed_param`.
+        if (model.type_name() == "GbmBasket") {
+            std::optional<BasketIndexedParam> indexed = resolve_basket_indexed_param(risk_factor.name);
+            if (!indexed.has_value()) {
+                throw std::invalid_argument(
+                    "compute_greek: 'GbmBasket' no reconoce el factor de riesgo '" + to_string(risk_factor) +
+                    "' (validos: model.spot_<i>, model.rate_<i>, model.dividend_yield_<i>, "
+                    "model.volatility_<i>, con <i> el indice de activo -- 0-based, mismo orden que "
+                    "'observables')"
+                );
+            }
+            Params params = model.to_params();
+            double base_value = basket_indexed_param_value(model, params, risk_factor, *indexed);
+            return override_h.value_or(default_model_parameter_bump(base_value));
+        }
         const std::string param_key = resolve_model_parameter_key(model.type_name(), risk_factor.name);
         Params params = model.to_params();
         auto it = params.find(param_key);
@@ -201,6 +278,29 @@ BumpedState bump_state(
     BumpedState state(model, market);
     switch (risk_factor.kind) {
         case RiskFactorKind::ModelParameter: {
+            // GbmBasketModel (PLAN_IMPROVE_NOTEBOOK2.md Fase 4): igual que en `resolve_bump`, el
+            // parametro bumpeado vive DENTRO de un vector<double> ("s0"/"r"/"q"/"sigma") -- se
+            // reconstruye ese vector con solo el indice del activo desplazado, dejando el resto
+            // intacto, en vez de reasignar una clave escalar completa.
+            if (model.type_name() == "GbmBasket") {
+                std::optional<BasketIndexedParam> indexed = resolve_basket_indexed_param(risk_factor.name);
+                if (!indexed.has_value()) {
+                    throw std::invalid_argument(
+                        "compute_greek: 'GbmBasket' no reconoce el factor de riesgo '" + to_string(risk_factor) +
+                        "' (validos: model.spot_<i>, model.rate_<i>, model.dividend_yield_<i>, "
+                        "model.volatility_<i>, con <i> el indice de activo -- 0-based, mismo orden que "
+                        "'observables')"
+                    );
+                }
+                Params params = model.to_params();
+                basket_indexed_param_value(model, params, risk_factor, *indexed); // valida existencia/rango
+                std::vector<double> vec = std::get<std::vector<double>>(params[indexed->vector_key]);
+                vec[indexed->asset_index] += h;
+                params[indexed->vector_key] = std::move(vec);
+                state.owned_model = registries.models.create(model.type_name(), params);
+                state.model = state.owned_model.get();
+                break;
+            }
             const std::string param_key = resolve_model_parameter_key(model.type_name(), risk_factor.name);
             Params params = model.to_params();
             auto it = params.find(param_key);
@@ -1579,6 +1679,16 @@ GreekMeasure::GreekMeasure(const Params& params, const Registries& registries) :
 
     request_.risk_factor = greeks::parse_risk_factor(get_string(params, "risk_factor"));
     request_.order = greeks::GreekOrder{static_cast<int>(get_double(params, "order", 1.0)), std::nullopt};
+    // PLAN_IMPROVE_NOTEBOOK2.md Fase 4: "cross_factor" (opcional, mismo formato namespaced que
+    // "risk_factor") habilita la derivada cruzada (Vanna, o para GbmBasket la CROSS-GAMMA real
+    // entre dos activos d^2V/dS_i dS_j) desde la medida "Greek" expuesta via Engine.price(...) --
+    // antes de esta fase, `request_.order.cross_factor` quedaba SIEMPRE en `std::nullopt` aqui
+    // (el unico camino a `compute_greek` con `cross_factor` poblado era `Engine.hessian`, que
+    // exige (modelo,metrica) en `hessian_capabilities()`, una tabla cerrada que GbmBasket no
+    // integra). Ausente = comportamiento identico al de antes de esta fase (order=1 puro).
+    if (contains(params, "cross_factor")) {
+        request_.order.cross_factor = greeks::parse_risk_factor(get_string(params, "cross_factor"));
+    }
     request_.method = greeks::parse_greek_method(get_string(params, "method", "auto"));
     if (contains(params, "bump")) {
         request_.bump_override = get_double(params, "bump");

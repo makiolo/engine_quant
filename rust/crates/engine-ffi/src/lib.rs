@@ -31,6 +31,21 @@ mod ffi {
         n_steps: u64,
     }
 
+    /// Equivalente de `PathMatrixResult` para `GbmBasket` (PLAN_IMPROVE_NOTEBOOK2.md Fase 4):
+    /// `n_assets` observables correlacionados en vez de uno solo. `paths_flat` es la matriz
+    /// `(n_paths, n_steps+1, n_assets)` aplanada **ROW-MAJOR POR (path, step, asset)** --
+    /// `paths_flat[path * (n_steps + 1) * n_assets + step * n_assets + asset]`, MISMA convencion
+    /// documentada en `engine_core::api::BasketPathMatrix`, `engine::BasketPathMatrix` (C++) y el
+    /// docstring de `Engine.simulate_paths` (Python) -- ninguna capa reordena. Elegida para que
+    /// Python solo necesite `reshape((n_paths, n_steps+1, n_assets))`, sin transponer.
+    struct BasketPathMatrixResult {
+        times: Vec<f64>,
+        paths_flat: Vec<f64>,
+        n_paths: u64,
+        n_steps: u64,
+        n_assets: u64,
+    }
+
     /// Resultado plano de calibrar `HullWhite1F` a un mercado (PLAN.md §7.14:
     /// `crate::calibration::HullWhiteCalibrationResult`, ver ese módulo para el porqué solo
     /// `a`/`b` se calibran).
@@ -367,6 +382,28 @@ mod ffi {
             n_paths: u64,
             seed: u64,
         ) -> Result<PathMatrixResult>;
+
+        // PLAN_IMPROVE_NOTEBOOK2.md Fase 4: equivalente de simulate_paths_gbm_q para GbmBasket
+        // (`n_assets` activos correlacionados) -- ver
+        // engine_core::api::simulate_paths_gbm_basket_q. `s0`/`r`/`q`/`sigma` uno por activo
+        // (define `n_assets = s0.len()`); `correlation_flat` es la matriz de correlacion
+        // aplanada FILA A FILA, `n_assets x n_assets` (mismo convenio que
+        // price_payoff_basket_gbm_q). Mismo tope duro que simulate_paths_gbm_q/_p
+        // (SIMULATE_PATHS_MAX_PATHS/SIMULATE_PATHS_MAX_STEPS) -- herramienta de diagnostico, NUNCA
+        // expuesta a Excel/C ABI (misma decision que el resto de esta familia de funciones).
+        #[allow(clippy::too_many_arguments)]
+        fn simulate_paths_gbm_basket_q(
+            backend: String,
+            s0: Vec<f64>,
+            r: Vec<f64>,
+            q: Vec<f64>,
+            sigma: Vec<f64>,
+            correlation_flat: Vec<f64>,
+            maturity: f64,
+            n_steps: u64,
+            n_paths: u64,
+            seed: u64,
+        ) -> Result<BasketPathMatrixResult>;
 
         fn is_gpu_backend_available() -> bool;
 
@@ -1144,6 +1181,33 @@ fn simulate_paths_gbm_p(
 ) -> Result<ffi::PathMatrixResult, String> {
     let pm = engine_core::api::simulate_paths_gbm_p(&backend, s0, mu, sigma, maturity, n_steps, n_paths, seed)?;
     Ok(ffi::PathMatrixResult { times: pm.times, paths_flat: pm.paths_flat, n_paths: pm.n_paths, n_steps: pm.n_steps })
+}
+
+// PLAN_IMPROVE_NOTEBOOK2.md Fase 4: equivalente de simulate_paths_gbm_q para GbmBasket (`n_assets`
+// activos correlacionados) -- ver engine_core::api::simulate_paths_gbm_basket_q.
+#[allow(clippy::too_many_arguments)]
+fn simulate_paths_gbm_basket_q(
+    backend: String,
+    s0: Vec<f64>,
+    r: Vec<f64>,
+    q: Vec<f64>,
+    sigma: Vec<f64>,
+    correlation_flat: Vec<f64>,
+    maturity: f64,
+    n_steps: u64,
+    n_paths: u64,
+    seed: u64,
+) -> Result<ffi::BasketPathMatrixResult, String> {
+    let pm = engine_core::api::simulate_paths_gbm_basket_q(
+        &backend, &s0, &r, &q, &sigma, &correlation_flat, maturity, n_steps, n_paths, seed,
+    )?;
+    Ok(ffi::BasketPathMatrixResult {
+        times: pm.times,
+        paths_flat: pm.paths_flat,
+        n_paths: pm.n_paths,
+        n_steps: pm.n_steps,
+        n_assets: pm.n_assets,
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
