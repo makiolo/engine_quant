@@ -1379,6 +1379,17 @@ cálculo de una hoja — cada paso *necesita* su propia celda para que el recál
 funcione. No hay una versión "más bonita" de eso que siga siendo una hoja de cálculo. Este plan
 no toca `clients/excel/` (solo la mención de una frase en su README, Fase 7).
 
+**Estado verificado / decisiones tomadas (sesión de implementación de esta fase).** Confirmado
+con `git log --name-only 930dda5..HEAD -- clients/excel/` (rango que cubre todas las Fases 0-7 ya
+commiteadas) que los únicos dos ficheros tocados en `clients/excel/` en todo el plan son
+`clients/excel/README.md` (la frase de una línea, Fase 7) y `clients/excel/tests/test_xloper.cpp`
+(el comentario que cita el nombre de fichero de test renombrado, Fase 7) — ningún fichero del XLL
+en sí (código fuente, proyecto de build) fue modificado. La decisión de no tocar Excel, ya
+justificada arriba, se mantiene sin ninguna excepción adicional descubierta durante la
+implementación del resto de fases. No hay código que verificar en esta fase (es una decisión de
+alcance, no una implementación) — la verificación consiste en confirmar que el resto del plan
+respetó el límite que esta fase declara.
+
 ### Fase 9 — Verificación final
 
 - `grep -rn "engine_typed"` limpio salvo lo listado en Fase 7.
