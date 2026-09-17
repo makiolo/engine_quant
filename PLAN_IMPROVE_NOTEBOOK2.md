@@ -289,6 +289,128 @@ mano.
 sobre el mismo grid de spot, un resultado identico (no solo "dentro de tolerancia": es un calculo
 determinista) al que hoy produce `intrinsic_value(...)` en NumPy.
 
+**Estado verificado / decisiones tomadas (sesión de implementación de esta fase).** El enunciado
+se verificó contra el código real antes de tocar nada: `grep` confirmó cero coincidencias de
+`ScenarioEvaluator`/`market_snapshot_bridge` en `engine_py_ext.cpp`, y la lectura de
+`market_snapshot_bridge.cpp` reveló un matiz no anticipado por el enunciado: ese puente (el que
+ya usa `PresentValueMeasure` para `PayoffProduct`) NO soporta ningún `Fixing`/`Current` -- solo
+resuelve el schedule de cashflows fijos de un contrato tipo IRS (evalúa el ledger sobre un
+`MarketPath` vacío solo para *descubrir la moneda*, nunca para fijar un spot). Las 14 estrategias
+de `09` SÍ dependen de `Fixing(observable, maturity)`, así que `PresentValueMeasure` tal cual no
+sirve para este caso -- había que ir un nivel más abajo, directo a `ScenarioEvaluator` +
+`MarketPath::set_fixing`, no reutilizar el puente existente sin modificarlo.
+
+**Decisión de diseño: `ScenarioEvaluator` nativo C++, NO evaluación sobre `CompiledPayoff` de
+Rust con `n_paths=1`.** Comparación real hecha antes de decidir (instrucción 1 de ejecución):
+`ScenarioEvaluator` (`cpp/engine/include/engine/payoff/scenario_evaluator.hpp`) ya declara
+explícitamente en su propio doc-comment que "interpreta el contrato sobre una única ruta
+conocida... no descuenta, no decide Q/P -- solo ejecuta el programa" (PLAN_PRODUCTS.md §5.1/§5.2)
+-- es literalmente la pieza que este caso de uso necesita, ya construida, ya probada
+(`cpp/engine/tests/payoff/test_scenario_evaluator_vanilla.cpp`), operando directamente sobre el
+`ContractPtr` que `PayoffProduct::payoff_program()->contract` ya expone. La ruta Rust
+(`CompiledPayoff` con `n_paths=1`) habría exigido: (a) compilar el AST C++ a la representación
+Rust (`payoff::compile`) -- un paso que hoy solo ocurre dentro de las medidas Q/P vía el bridge
+cxx, nunca expuesto sin pasar por un modelo; (b) fingir una "simulación" Monte Carlo de un único
+path para un cálculo que por definición no tiene componente aleatoria; (c) tocar Rust +
+`engine-ffi` + el bridge cxx para exponer algo que el propio C++ ya resuelve sin cruzar el FFI.
+Cero beneficio a cambio de mucho más código -- se descartó sin ambigüedad.
+
+**Diseño de `scenario`: `dict {observable: spot}`, sin fecha explícita.** El spot dado se
+registra en TODAS las fechas de `DependencyReport::fixing_dates` para ese observable (via
+`DependencyVisitor`, ya existente, reutilizado sin cambios) -- deliberadamente MÁS simple que
+`{(observable, time): spot}` porque ninguna de las 14 estrategias de `09` lo necesita (todas usan
+un único observable; las de calendario usan el mismo observable en dos fechas distintas, y
+`intrinsic_value` en NumPy YA asumía el mismo spot en ambas patas al indexar `spot_grid[i]` sin
+importar la pata). Verificado con un test manual: un calendar spread con patas en `T=0.5` y
+`T=1.5` sobre `spot=110.0` da `[(0.5, 'USD', -10.0), (1.5, 'USD', 10.0)]`, exactamente lo
+esperado. Un observable requerido ausente de `scenario` lanza el `EvaluationError` nativo de
+`ScenarioEvaluator` (mensaje `"fixing ausente para observable '...'"`), nunca `0.0` silencioso.
+
+**Trabajo realizado, por capa:**
+
+- **Rust: sin cambios** (Opción elegida no los requiere). `cargo test -p engine-core --release`
+  no se ejecutó, mismo criterio que las fases anteriores ("solo si tocaste Rust").
+- **C++ (bridge nanobind, NO el core `cpp/engine/src`)**: toda la lógica nueva vive en
+  `clients/python/src/engine_py_ext.cpp` (mismo patrón que `Engine::simulate_paths`, que
+  tampoco vive en `engine.hpp`/`engine.cpp`, según su propio comentario: "el dispatch... vive en
+  `Engine::simulate_paths` (Python, `clients/python/src/engine_py_ext.cpp`), NO aqui"):
+  - Nuevos `#include` de `engine/payoff/{dependency_visitor,evaluation_context,market_path,
+    scenario_evaluator}.hpp` y `<nanobind/stl/tuple.h>`.
+  - `Engine::evaluate_scenario(const engine::IProduct&, const nb::dict& scenario) ->
+    std::vector<std::tuple<double, std::string, double>>`: valida `dynamic_cast<const
+    payoff::PayoffProduct*>` (mismo criterio de "producto no soportado" explícito que
+    `PresentValueMeasure`/`simulate_paths`), corre `DependencyVisitor` sobre el contrato, puebla
+    un `MarketPath` con `set_fixing(observable, t, spot)` para cada fecha requerida de cada
+    observable presente en `scenario`, y llama a `ScenarioEvaluator().evaluate(root, context)`
+    con `FixingStore`/`RuntimeState` vacíos (mismo patrón que
+    `market_snapshot_bridge.cpp::evaluate_ledger_currency_probe`). Devuelve el `CashflowLedger`
+    crudo como `(time, currency, amount)` -- SIN descontar, a propósito.
+  - Binding en `NB_MODULE` inmediatamente después de `simulate_paths`, mismo estilo de docstring
+    extenso con ejemplo `>>>`.
+- **Tests nuevos** (`clients/python/tests/test_engine_evaluate_scenario.py`, 16 tests): las 14
+  estrategias de `09` reproducidas letra a letra (mismos `kind/strike/qty/maturity` que
+  `STRATEGY_LEGS`, duplicadas a propósito para no depender de ejecutar el notebook en CI) --
+  `test_evaluate_scenario_matches_numpy_intrinsic_value_exactly` (parametrizado x14) compara
+  `Engine.evaluate_scenario` contra una copia literal de `intrinsic_value` (NumPy) sobre un grid
+  de 41 spots con `np.testing.assert_array_equal` (exacto, no `np.isclose`); más dos tests de
+  error explícito (observable ausente del escenario; producto no-`PayoffProduct`, usando
+  `"IRSwap"`).
+- **Notebook** `09_option_strategies_and_greeks.ipynb`: `intrinsic_value(legs, spot_grid)` pasa a
+  delegar en `Engine.evaluate_scenario` (bucle Python sobre `spot_grid`, el binding acepta un
+  escenario a la vez); la fórmula NumPy original se conserva como
+  `intrinsic_value_manual(legs, spot_grid)`, celda de verificación cruzada (mismo criterio
+  editorial que `call_leg_manual`/`put_leg_manual`/`build_contract_manual` de Fase 6). Se añadió
+  un bucle de asserts sobre las 14 estrategias (incluidas las dos de calendario, que no dibujan
+  la curva de payoff intrinseco en el notebook pero sí se verifican aquí) comparando
+  `intrinsic_value` vs `intrinsic_value_manual` con `np.array_equal` -- pasa para las 14. No se
+  tocó `02_exotic_and_path_dependent_options.ipynb`: se revisó explícitamente (grep de
+  `np.maximum`/`intrinsic` sobre el notebook) y ninguna celda calcula un payoff intrínseco a mano
+  ahí, así que no aplica.
+- **Verificación en capas** (todas en verde, ninguna se saltó):
+  - C++: `cmd.exe /C "vcvars64.bat && cmake --build build --config Release"` compiló limpio
+    (solo recompiló `engine_py_ext.cpp`/el `.pyd`, ningún archivo de `cpp/engine/src` cambió).
+    `ctest --test-dir build -C Release`: **480/480** (sin cambios frente a la línea base: esta
+    fase no tocó ningún test C++ ni ningún archivo de `cpp/engine/`).
+  - Python: `.pyd`/`engine_typed` recién compilados copiados a mano a
+    `venv/Lib/site-packages` (venv con copias STALE, según la nota de entorno). `pytest
+    clients/python/tests`: **179 passed** (163 previos + 16 nuevos de este test) + los mismos 2
+    errores preexistentes de fixture `abi_dll_path` (no relacionados, no tocados).
+  - Notebook: `jupyter nbconvert --to notebook --execute --inplace
+    --ExecutePreprocessor.record_timing=False
+    clients/python/notebooks/09_option_strategies_and_greeks.ipynb` ejecutó de punta a punta sin
+    errores (0 celdas `output_type == "error"`); el nuevo print de verificación cruzada confirma
+    "coinciden exactamente en las 14 estrategias, grid de 41 spots"; el diff resultante contra
+    HEAD anterior es de 39 líneas, contenido exclusivamente en la celda de leg builders/`PRODUCTS`
+    (código nuevo + su output), ninguna otra celda cambió.
+
+**Limitaciones/decisiones que las fases siguientes deben conocer:**
+
+- **El diseño de `scenario` (`{observable: spot}`, sin fecha) NO distingue observables con
+  fechas propias**: si un contrato futuro tiene MÁS DE UN observable, cada uno requerido solo en
+  SUS PROPIAS fechas (p.ej. un basket multi-activo con fixings escalonados por activo), este
+  diseño aplicaría el spot de cada observable a TODAS las fechas de `DependencyReport::
+  fixing_dates` del contrato completo (unión de fechas de TODOS los observables), no solo a las
+  suyas -- inofensivo hoy (fechas de más nunca usadas no generan error, `ScenarioEvaluator` solo
+  falla si falta algo que SÍ necesita), pero potencialmente confuso si a alguien se le ocurriera
+  fijar spots DISTINTOS por fecha para el MISMO observable (no soportado: una sola entrada por
+  observable en el dict). **Relevante para Fase 2** (calendar spreads) solo en la medida en que
+  Fase 2 trabaja con Hessiana/Greeks, no con `evaluate_scenario` -- no hay interacción directa,
+  pero si Fase 2 (u otra) quisiera reutilizar `evaluate_scenario` para diagnosticar un contrato
+  multi-fecha con Greeks a mano, esta limitación aplicaría igual. Si una fase futura necesita
+  distinguir fechas por observable, extender la clave del dict a `(observable, time)`.
+  Respondiendo explícitamente a la pregunta del enunciado de esta fase: **sí sirve tal cual para
+  los calendar spreads de `09`/Fase 2** (un único observable en dos fechas, el caso que sí está
+  cubierto) -- la limitación solo aparecería con más de un observable, que ningún calendar spread
+  de este documento usa.
+- `PresentValueMeasure`/`market_snapshot_bridge.hpp` siguen sin soportar `Fixing`/`Current`
+  (confirmado, no una limitación nueva de esta fase) -- `evaluate_scenario` es un camino
+  completamente separado (usa `ScenarioEvaluator` directamente, no pasa por el puente), así que
+  esta fase no cierra ni amplía esa limitación preexistente del puente, solo la esquiva para el
+  caso de uso que necesitaba.
+- `Engine.evaluate_scenario` queda fuera de la C ABI/Excel a propósito (mismo criterio que
+  `simulate_paths`, herramienta de notebook/diagnóstico, no una medida de producción) -- ninguna
+  tarea de este documento lo pedía.
+
 ### Fase 2 — Hessiana con fallback bump-and-reval para contratos multi-fecha
 
 **Problema.** `Engine.hessian` (likelihood-ratio, una unica pasada Monte Carlo) exige que el

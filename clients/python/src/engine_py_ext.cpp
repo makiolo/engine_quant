@@ -1,12 +1,15 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <tuple>
+#include <unordered_map>
 #include <vector>
 
 #include <nanobind/nanobind.h>
 #include <nanobind/stl/optional.h>
 #include <nanobind/stl/shared_ptr.h>
 #include <nanobind/stl/string.h>
+#include <nanobind/stl/tuple.h>
 #include <nanobind/stl/unique_ptr.h>
 #include <nanobind/stl/vector.h>
 
@@ -15,7 +18,11 @@
 #include "engine/engine.hpp"
 #include "engine/greeks.hpp"
 #include "engine/model.hpp"
+#include "engine/payoff/dependency_visitor.hpp"
+#include "engine/payoff/evaluation_context.hpp"
+#include "engine/payoff/market_path.hpp"
 #include "engine/payoff/payoff_product.hpp"
+#include "engine/payoff/scenario_evaluator.hpp"
 #include "engine/portfolio.hpp"
 
 namespace nb = nanobind;
@@ -374,6 +381,86 @@ public:
                                         static_cast<std::size_t>(result.n_steps + 1)
                                     );
         return nb::make_tuple(times_arr, paths_arr);
+    }
+
+    // Evaluacion determinista de un PayoffProduct sobre un ESCENARIO de mercado fijo
+    // (PLAN_IMPROVE_NOTEBOOK2.md Fase 1): utilidad de autoria/notebook, NO una IMeasure (mismo
+    // criterio que simulate_paths arriba: no ensucia Registry<IMeasure> con algo que no admite
+    // price_batch/price_many/price_grid).
+    //
+    // Decision de diseno (ScenarioEvaluator nativo C++ vs evaluacion sobre CompiledPayoff de
+    // Rust con n_paths=1): se eligio ScenarioEvaluator
+    // (engine/payoff/scenario_evaluator.hpp) porque ya existe exactamente para esto
+    // ("interpreta el contrato sobre una unica ruta conocida", PLAN_PRODUCTS.md §5.1/§5.2) y
+    // opera directamente sobre el AST C++ que ya construye PayoffProduct -- cero cambios en
+    // Rust/el bridge cxx. La ruta Rust habria significado serializar el AST a un CompiledPayoff
+    // y fingir una "simulacion" Monte Carlo de un unico paso para un calculo que es, por
+    // definicion, determinista y sin modelo: un rodeo mas caro para llegar al mismo resultado
+    // que ScenarioEvaluator ya da hoy (es el mismo evaluador que usa
+    // market_snapshot_bridge.hpp/PresentValueMeasure para IrSwapProduct, aqui expuesto
+    // directamente sin el paso de descuento que ese puente le anade).
+    //
+    // `scenario`: dict {observable: spot} -- SIN fecha explicita. El spot dado se registra en
+    // TODAS las fechas de fixing que el contrato requiere para ese observable
+    // (DependencyVisitor::fixing_dates): suficiente para las 14 estrategias de
+    // 09_option_strategies_and_greeks.ipynb (un unico observable, una o dos fechas de
+    // vencimiento) y para cualquier contrato de un unico observable con varias fechas (p.ej. un
+    // calendar spread: el mismo spot en T_NEAR y T_FAR -- exactamente lo que ya asumia
+    // `intrinsic_value` en NumPy al aplicar el mismo `spot_grid[i]` a todas las patas de la
+    // estrategia sin importar su vencimiento). LIMITACION conocida para contratos futuros con
+    // MAS DE UN observable que requieran spots DISTINTOS por observable en fechas distintas
+    // (p.ej. un basket multi-activo con fixings escalonados): este disenio no lo distingue --
+    // aplicaria el spot de cada observable a TODAS las fechas del contrato, no solo a las
+    // suyas. Ningun caso de uso de esta fase lo necesita (ver notebooks 02/09, un unico
+    // observable por contrato); si una fase futura lo necesita, extender `scenario` a
+    // {(observable, time): spot} en vez de {observable: spot}.
+    //
+    // Un observable requerido que falte en `scenario` NO se aproxima: ScenarioEvaluator lanza
+    // EvaluationError explicito al intentar leerlo (nunca 0.0 silencioso).
+    //
+    // Devuelve el CashflowLedger crudo, SIN descontar a proposito (es el payoff a un instante
+    // fijo -- p.ej. a vencimiento -- no un valor presente; para eso ya existe
+    // PresentValueMeasure/PayoffPriceQ): lista de (time, currency, amount), mismo shape que
+    // market_snapshot_bridge.hpp usa internamente antes de descontar.
+    std::vector<std::tuple<double, std::string, double>> evaluate_scenario(
+        const engine::IProduct& product, const nb::dict& scenario
+    ) const {
+        const auto* payoff_product = dynamic_cast<const engine::payoff::PayoffProduct*>(&product);
+        if (!payoff_product) {
+            throw std::invalid_argument(
+                "Engine.evaluate_scenario: producto no soportado: " + product.type_name() +
+                " (solo PayoffProduct tiene un AST evaluable por ScenarioEvaluator)"
+            );
+        }
+        const engine::payoff::ContractPtr& root = payoff_product->payoff_program()->contract;
+
+        std::unordered_map<std::string, double> spot_by_observable;
+        for (auto item : scenario) {
+            spot_by_observable.emplace(nb::cast<std::string>(item.first), nb::cast<double>(item.second));
+        }
+
+        engine::payoff::DependencyReport deps = engine::payoff::DependencyVisitor().analyze(root);
+
+        engine::payoff::MarketPath path;
+        for (const engine::payoff::ObservableId& observable : deps.observables) {
+            auto it = spot_by_observable.find(observable.value);
+            if (it == spot_by_observable.end()) continue; // ScenarioEvaluator lo detectara si de verdad hace falta
+            for (engine::payoff::TimePoint t : deps.fixing_dates) {
+                path.set_fixing(observable, t, it->second);
+            }
+        }
+
+        engine::payoff::FixingStore historical;
+        engine::payoff::RuntimeState state;
+        engine::payoff::EvaluationContext context{path, historical, state};
+        engine::payoff::CashflowLedger ledger = engine::payoff::ScenarioEvaluator().evaluate(root, context);
+
+        std::vector<std::tuple<double, std::string, double>> result;
+        result.reserve(ledger.size());
+        for (const auto& entry : ledger) {
+            result.emplace_back(entry.payment_time.year_fraction, entry.currency.code, entry.amount);
+        }
+        return result;
     }
 
 private:
@@ -984,5 +1071,31 @@ NB_MODULE(engine, m) {
             ">>> times, paths = eng.simulate_paths(model_q, market, pricing)\n"
             ">>> paths.shape\n"
             "(pricing.n_paths, pricing.n_steps + 1)"
+        )
+        .def(
+            "evaluate_scenario",
+            &Engine::evaluate_scenario,
+            nb::arg("product"),
+            nb::arg("scenario"),
+            "Evaluacion DETERMINISTA de un PayoffProduct sobre un escenario de mercado fijo "
+            "(PLAN_IMPROVE_NOTEBOOK2.md Fase 1) -- SIN modelo, SIN Monte Carlo, SIN descuento: "
+            "ejecuta el AST ya construido (ScenarioEvaluator) sobre una unica ruta conocida, "
+            "igual que hace market_snapshot_bridge.hpp/PresentValueMeasure internamente, pero "
+            "devolviendo el ledger crudo en vez de un valor presente. Util para dibujar el "
+            "payoff a un instante fijo (p.ej. el payoff intrinseco a vencimiento de una "
+            "estrategia de opciones) sin reimplementar max(S-K,0)/max(K-S,0) a mano en NumPy.\n\n"
+            "`scenario` es un dict {observable: spot}: el spot dado se registra en TODAS las "
+            "fechas de fixing que el contrato requiere para ese observable -- suficiente para "
+            "cualquier contrato de un unico observable (una o varias fechas, p.ej. un calendar "
+            "spread). Un observable requerido que falte en `scenario` lanza ValueError "
+            "explicito (ScenarioEvaluator), nunca 0.0 silencioso. LIMITACION: un contrato con "
+            "MAS DE UN observable, cada uno con sus propias fechas, aplicaria el spot de cada "
+            "observable a TODAS las fechas del contrato, no solo a las suyas -- ningun caso de "
+            "uso de esta fase lo necesita.\n\n"
+            "Devuelve list[tuple[float, str, float]] -- (time, currency, amount) por cashflow "
+            "generado, SIN descontar (a proposito: es el payoff en ese instante, no un valor "
+            "presente).\n\n"
+            ">>> eng.evaluate_scenario(product, {\"EQ.SPOT\": 105.0})\n"
+            "[(1.0, 'USD', 5.0)]"
         );
 }

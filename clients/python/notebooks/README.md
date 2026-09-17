@@ -45,7 +45,12 @@ métricas y visualizaciones financieras — cada uno explota una parte distinta 
    para charm — por diseño, no como workaround: ninguna especialización pathwise/likelihood-ratio
    cubre `RiskFactorKind::TimeShift`, y desde PLAN_IMPROVE_NOTEBOOK2.md Fase 0 el motor además
    rechaza explícitamente la especialización pathwise de spot/vega/rho bajo `pricing_date != 0` en
-   vez de ignorarlo en silencio). Análisis escrito antes y después de cada bloque de gráficos.
+   vez de ignorarlo en silencio). El payoff intrínseco a vencimiento (`intrinsic_value`) ya no se
+   reimplementa a mano en NumPy: delega en `Engine.evaluate_scenario` (PLAN_IMPROVE_NOTEBOOK2.md
+   Fase 1, `ScenarioEvaluator` nativo sobre un escenario de spot fijo, sin modelo ni Monte Carlo);
+   la fórmula NumPy se conserva como `intrinsic_value_manual`, celda de verificación cruzada que
+   confirma coincidencia exacta para las 14 estrategias. Análisis escrito antes y después de cada
+   bloque de gráficos.
 
 Varios notebooks documentan, en la celda donde aparece, un workaround motivado por una
 limitación concreta del motor (no del binding Python) — cada uno enlaza a la fase
