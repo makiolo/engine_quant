@@ -6,8 +6,8 @@
 
 [![CI](https://github.com/makiolo/engine_quant/actions/workflows/ci.yml/badge.svg)](https://github.com/makiolo/engine_quant/actions/workflows/ci.yml)
 [![Rust 1.97.1](https://img.shields.io/badge/Rust-1.97.1-000000?logo=rust)](rust/rust-toolchain.toml)
-[![Python 3.9+](https://img.shields.io/badge/Python-3.9%2B-3776AB?logo=python&logoColor=white)](pyproject.toml)
 [![C++17](https://img.shields.io/badge/C%2B%2B-17-00599C?logo=cplusplus)](CMakeLists.txt)
+[![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)](pyproject.toml)
 
 Research-oriented pricing, exposure, and counterparty-credit analytics built around a
 single registry-driven domain model.
