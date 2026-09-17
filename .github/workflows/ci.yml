@@ -158,9 +158,12 @@ jobs:
 
       # PLAN_REAPI.md §6 Fase 3: MeasureSpec en price.hpp -- tuplas (nombre, params) desde
       # Python, DV01(bump=...) con efecto real, price() resolviendo nombres directos del
-      # registry (p.ej. "ExposureProfile").
+      # registry (p.ej. "ExposureProfile"). Usa pytest.raises para la colision de nombres
+      # duplicados (PLAN_IMPROVE_NOTEBOOK2.md Fase 3), asi que necesita pytest instalado.
       - name: Python price test (MeasureSpec -- DV01 bump configurable, tuplas (nombre, params))
-        run: python clients/python/tests/test_price_measure_spec.py build/clients/python
+        run: |
+          pip install pytest
+          python clients/python/tests/test_price_measure_spec.py build/clients/python
 
       - name: Python quantdesk test (Measure tipadas -- PV/DV01/ExposureProfile/UnilateralCVA)
         run: python clients/python/tests/test_quantdesk_measure.py build/clients/python
