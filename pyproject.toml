@@ -9,7 +9,7 @@ name = "engine-quant"
 version = "0.0.0"
 description = "Motor de calculo XVA (CVA/DVA/FVA/MVA/KVA): cliente Python (import engine) sobre el registry C++/Rust del motor."
 readme = "clients/python/README_PYPI.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 # `pydantic` es dependencia obligatoria desde PLAN_REAPI.md §6 Fase 1 (engine_typed): renuncia
 # deliberada a la promesa anterior "sin dependencias Python en tiempo de ejecución"
 # (README_PYPI.md) a cambio de la fachada tipada q.IRSwap/q.HullWhite1F/... -- la extensión
