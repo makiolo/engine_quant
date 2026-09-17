@@ -626,6 +626,126 @@ actualiza en la misma fase (describe qué hace cada script).
 el mismo output numérico que antes del refactor (se comparan antes/después, no solo "no
 lanza excepción").
 
+**Estado verificado / decisiones tomadas (sesión de implementación de esta fase).**
+
+- **Captura del "antes".** `engine_typed` ya no existe en el árbol (Fase 0), así que no se pudo
+  ejecutar literalmente el script tal cual estaba en el commit padre de la Fase 0 (`930dda5~1`)
+  sin antes reconstruir el paquete borrado. Se optó por el segundo camino que ofrecía la tarea
+  ("reconstruir manualmente el mismo cálculo con `engine` + clases de `quantdesk`... comportamiento
+  idéntico verificado en Fase 0"): para cada uno de los 4 scripts se copió el contenido EXACTO
+  leído del árbol de trabajo actual (idéntico línea a línea al que había en `930dda5~1`, confirmado
+  por lectura directa de ambos con `Read`/`git show` antes de tocar nada) a un script temporal en
+  el scratchpad de la sesión, cambiando únicamente `import engine_typed as q` →
+  `import quantdesk as q` (y `from engine_typed import greeks` → `from quantdesk import greeks` en
+  `greeks_flow.py`) — ningún otro carácter tocado, ni siquiera comentarios. Los 4 scripts "antes"
+  se ejecutaron con `venv\Scripts\python.exe` contra el `.pyd` nativo ya compilado (mismo venv que
+  Fase 3 dejó con `quantdesk` instalado) y su stdout exacto se guardó en el scratchpad
+  (`before_price_flow.out`, `before_price_flow_typed.out`, `before_price_batch_flow.out`,
+  `before_greeks_flow.out`).
+- **Reescritura de los 4 scripts** (todos en `clients/python/examples/`), sobre `quantdesk.Engine`
+  tal como quedó definido en Fase 1/2 (constructor con `n_paths`/`n_steps`/`seed`/`backend` fijados
+  una vez; `.price`/`.price_batch`/`.price_many`/`.price_grid`/`.all_greeks` reciben
+  `trade`/`model`/`market` tipados directamente, sin `create_product`/`create_model`/
+  `MarketSnapshot`/`PricingContext`/`ExecutionContext` manuales):
+  - `price_flow.py`: `q.Engine(backend="auto", n_paths=5000, n_steps=208, seed=7)` sustituye las
+    ~10 líneas de traducción manual; `qeng.price(trade, model, market, [...])` sustituye
+    `eng.price(product, [...], eng_model, eng_market, eng_pricing, eng_execution)`. El rol
+    pedagógico del docstring (contraste fachada dinámica vs fachada tipada) se mantiene, ahora
+    citando `quantdesk` en vez de `engine_typed`; el propio código conserva un contraste real
+    puntual (no solo de prosa): la única pieza de información que el flujo original imprimía y que
+    `quantdesk.Engine` no expone (el backend `"auto"` ya resuelto a `"cpu"`/`"gpu"`) se obtiene
+    con una llamada explícita a la fachada dinámica cruda (`engine.ExecutionContext({"backend":
+    "auto", "precision": "FP64"}).backend`), documentada inline. 72 → 68 líneas.
+  - `price_flow_typed.py`: mismo patrón; medidas tipadas (`q.PV()`, `q.DV01(bump=...)`,
+    `q.DV01(bucketed=True)`) pasadas directamente a `qeng.price(...)` sin `.to_spec()` explícito
+    (`quantdesk.Engine._to_native_metrics` ya hace `x.to_spec() if isinstance(x, Measure) else x`
+    por elemento). Igual que `price_flow.py`, conserva la consulta puntual del backend resuelto vía
+    `engine.ExecutionContext(...)` cruda (se había omitido en un primer borrador de esta fase y el
+    diff antes/después lo detectó — ver "Discrepancias" más abajo). 82 → 72 líneas.
+  - `price_batch_flow.py`: `qeng.price_batch(trades, model, market, metrics)`/`qeng.price_many(...)`/
+    `qeng.price_grid(trades, models, markets, metrics)` sustituyen las versiones nativas con
+    `eng_model`/`eng_market`/`eng_pricing`/`eng_execution` repetidos en cada llamada — el mismo
+    `Engine` construido una vez cubre los tres niveles. 82 → 61 líneas.
+  - `greeks_flow.py`: `qeng.price(...)`/`qeng.all_greeks(...)` sustituyen las llamadas nativas.
+    **Hallazgo real, no cubierto por ninguna fase anterior** (buscado explícitamente por la
+    instrucción de esta fase, "verifica si algún script usaba algo sin equivalente directo"):
+    `quantdesk.model` solo tipa `HullWhite1F`/`HullWhite2F`/`GbmBasket` — no existe un `ModelSpec`
+    para el modelo univariante `"GBM"` que usa este script (confirmado por `grep -n GBM` sobre
+    `clients/python/src/quantdesk/model.py`: cero coincidencias de clase, solo una mención en el
+    docstring de `GbmBasket`). `GbmBasket` NO es un sustituto válido (es multi-activo
+    correlacionado, invocaría un modelo nativo distinto y cambiaría el resultado). Confirmado
+    también que `quantdesk.Engine.price`/`.all_greeks` no aceptan un `engine.Product`/`engine.Model`
+    nativo ya construido en su lugar (`_to_native_product`/`_to_native_model` llaman
+    incondicionalmente a `trade.product_type`/`trade.to_params()`, que un objeto nativo no tiene —
+    verificado con `hasattr(prod, 'product_type') == False` sobre un `engine.Product` real).
+    Resuelto sin tocar `quantdesk/model.py` (fuera de alcance de esta fase, que es solo
+    `examples/`): se define un `ModelSpec` mínimo local en el propio script (`class
+    Gbm(q.ModelSpec)`, mismo patrón de 2 métodos — `model_type`/`to_params()` — que ya usan
+    `HullWhite1F`/`HullWhite2F` en `quantdesk/model.py`), documentado con una nota explícita en el
+    docstring del módulo para que Fase 5/6 no lo redescubran a ciegas. `trade` (`PayoffProduct`,
+    `product_type = "Payoff"`) y `market` (`q.Market(pillars=[1.0], zero_rates=[0.05])`, con
+    `hazard_rate`/`recovery_rate` por defecto a `0.0` — mismos valores que el `MarketSnapshot`
+    nativo original, que tampoco los pasaba) sí tenían equivalente tipado directo, sin problema.
+    71 → 90 líneas (más largo que el original, no más corto — la única excepción a "cada script
+    queda considerablemente más corto": el coste de tipar `Gbm` localmente más el docstring que
+    documenta el hallazgo pesa más que las líneas de traducción manual que desaparecen en un
+    script ya corto).
+  - `clients/python/examples/README.md`: descripción de los 4 scripts actualizada
+    (`engine_typed` → `quantdesk`, `Engine.price`/`price_batch`/`price_many`/`price_grid`/
+    `all_greeks` ahora citados como métodos de `q.Engine`), con una nota nueva en el párrafo
+    introductorio sobre los dos puntos donde estos ejemplos siguen tocando la fachada dinámica
+    cruda (backend resuelto en `price_flow.py`/`price_flow_typed.py`; modelo `GBM` sin tipar en
+    `greeks_flow.py`) para que quien lea el README no los confunda con un patrón general.
+- **Resultado exacto de la comparación antes/después** (`diff` byte a byte entre el stdout
+  capturado del flujo nativo-manual reconstruido y el stdout real de cada script reescrito,
+  ejecutados contra el mismo venv/`.pyd`, sin fijar ninguna tolerancia numérica — comparación de
+  texto exacta):
+  - `price_flow.py`: `diff` vacío — **idéntico byte a byte** (incluye `PV`, `DV01`,
+    `UnilateralCVA`, el perfil `ExpectedExposure`/`PFE95` por fecha de reseteo, `PV (swap par) =
+    0.000000`, y la línea `Backend resuelto: cpu`).
+  - `price_flow_typed.py`: **idéntico byte a byte** tras corregir la omisión detectada (ver
+    "Discrepancias" abajo) — incluye `PV`, `DV01 (1bp)`/`DV01 (2bp)`, el desglose `DV01 bucketed
+    (por pillar)` con su suma, `UnilateralCVA`, `ExpectedExposure`/`PFE95`, y `Backend resuelto:
+    cpu`.
+  - `price_batch_flow.py`: **idéntico byte a byte** (3 filas de `price_batch`, 3 filas de
+    `price_many`, 8 celdas de `price_grid`, incluidos los acentos de "homogéneo"/"heterogéneo" —
+    ver nota sobre el primer intento de comparación más abajo).
+  - `greeks_flow.py`: **idéntico byte a byte** (`PayoffPriceQ = 10,463.80`, `Delta (spot) =
+    637.5072`, las 8 Greeks de primer orden con su `método`/`medida`, `skipped` vacío, y las 4
+    Gammas puras con `include_second_order=True`).
+- **Discrepancias detectadas por el propio proceso de comparación (no silenciadas, corregidas):**
+  - Un primer borrador de `price_flow_typed.py` omitió por completo la línea `Backend resuelto:
+    ...` que sí imprimía el script original (y que `price_flow.py` sí conservaba desde el primer
+    borrador) — detectado por el `diff` antes/después (`1d0 < Backend resuelto: cpu`), no por
+    inspección visual. Corregido añadiendo la misma consulta puntual a la fachada dinámica cruda
+    que usa `price_flow.py`.
+  - Un primer `diff` de `price_batch_flow.py` marcó como distintas las líneas de cabecera
+    (`"lote homogéneo"`/`"lote heterogéneo"`) — investigado y confirmado que la causa era un
+    defecto del propio script de reconstrucción "antes" (tecleado sin tilde por error, `"lote
+    homogeneo"`), no del script reescrito (que sí conservaba la tilde original, confirmado leyendo
+    el fichero reescrito con `grep`). Corregida la reconstrucción "antes" y repetida la
+    comparación — `diff` vacío tras la corrección. Documentado aquí para que quede explícito que
+    no era una regresión real, solo un defecto de la propia verificación.
+  - El hallazgo de `greeks_flow.py`/modelo `GBM` sin `ModelSpec` tipado (arriba) es una
+    discrepancia de alcance de `quantdesk`, no de comportamiento numérico — no afectó al resultado
+    del `diff` (que dio idéntico), solo a cómo se tuvo que escribir el script.
+- **Verificación de entorno.** `S:\Projects\engine_quant\venv` y `S:\Projects\engine_quant\build`
+  seguían íntegros de la Fase 3 (no hizo falta recompilar nada — Fase 4 es Python puro):
+  `venv\Scripts\python.exe -c "import quantdesk; import engine"` resuelve ambos módulos desde
+  `site-packages` sin necesidad de `sys.path.insert` manual adicional (el wheel de Fase 3 ya
+  instaló `quantdesk` como paquete top-level).
+- **Nota para Fase 5/6.** Los notebooks y los tests nuevos de `quantdesk.Engine` probablemente
+  repiten patrones de estos 4 scripts — dos cosas a tener en cuenta si aparecen casos similares:
+  (1) si algún notebook consulta el backend `"auto"` ya resuelto, no hay atajo en
+  `quantdesk.Engine` — hay que usar `engine.ExecutionContext({...}).backend` puntualmente, como
+  aquí; (2) si algún notebook/test usa el modelo `GBM` univariante (no `GbmBasket`) con
+  `quantdesk.Engine`, no existe `q.GBM`/`q.Gbm` en el paquete — hay que definir un `ModelSpec`
+  local (2 campos: `model_type`/`to_params()`) igual que hace `greeks_flow.py`, o bien valorar si
+  merece la pena añadir un `Gbm(ModelSpec)` real a `quantdesk/model.py` en una fase futura (fuera
+  de alcance de Fase 4, que solo toca `examples/`) — el `notebook 07_montecarlo_paths_q_vs_p.ipynb`
+  (citado en Fase 2 como usuario de `simulate_paths` con modelo `GBM`) es candidato directo a
+  toparse con este mismo hueco.
+
 ### Fase 5 — Notebooks
 
 Los 10 notebooks de `clients/python/notebooks/` (`01`...`09` + `demo_registry.ipynb`) importan
