@@ -11,24 +11,24 @@ if len(sys.argv) > 1:
     sys.path.insert(0, sys.argv[1])
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-import quantdesk as q  # noqa: E402
+import quantdesk as qd  # noqa: E402
 
 
 def main():
-    model = q.HullWhite1F(a=0.1, b=0.03, sigma=0.01, r0=0.02)
-    model_2f = q.HullWhite2F(a=0.1, b=0.2, sigma=0.01, eta=0.012, rho=-0.7, r0=0.03)
-    market = q.Market(pillars=[1.0], zero_rates=[0.02], hazard_rate=0.02, recovery_rate=0.4)
-    market_stressed = q.Market(pillars=[1.0], zero_rates=[0.05], hazard_rate=0.05, recovery_rate=0.3)
+    model = qd.HullWhite1F(a=0.1, b=0.03, sigma=0.01, r0=0.02)
+    model_2f = qd.HullWhite2F(a=0.1, b=0.2, sigma=0.01, eta=0.012, rho=-0.7, r0=0.03)
+    market = qd.Market(pillars=[1.0], zero_rates=[0.02], hazard_rate=0.02, recovery_rate=0.4)
+    market_stressed = qd.Market(pillars=[1.0], zero_rates=[0.05], hazard_rate=0.05, recovery_rate=0.3)
 
-    qeng = q.Engine(backend="auto", n_paths=5000, n_steps=208, seed=7)
+    qeng = qd.Engine(backend="auto", n_paths=5000, n_steps=208, seed=7)
 
     # price_batch: lote homogéneo -- mismo calendario, cada trade con su propio notional/
     # fixed_rate explícito (sin "a la par": el lote no lo soporta).
     payment_times = [1.0, 2.0, 3.0, 4.0, 5.0]
     accruals = [1.0] * 5
-    trade_a = q.IRSwap(notional=1_000_000.0, fixed_rate=0.02, payment_times=payment_times, accruals=accruals)
-    trade_b = q.IRSwap(notional=2_500_000.0, fixed_rate=0.015, payment_times=payment_times, accruals=accruals)
-    trade_c = q.IRSwap(notional=500_000.0, fixed_rate=0.025, payment_times=payment_times, accruals=accruals)
+    trade_a = qd.IRSwap(notional=1_000_000.0, fixed_rate=0.02, payment_times=payment_times, accruals=accruals)
+    trade_b = qd.IRSwap(notional=2_500_000.0, fixed_rate=0.015, payment_times=payment_times, accruals=accruals)
+    trade_c = qd.IRSwap(notional=500_000.0, fixed_rate=0.025, payment_times=payment_times, accruals=accruals)
 
     print("--- price_batch (lote homogéneo) ---")
     batch = qeng.price_batch([trade_a, trade_b, trade_c], model, market, ["PV", "UnilateralCVA"])
@@ -37,7 +37,7 @@ def main():
 
     # price_many: lote heterogéneo -- un trade a 3 años intercalado entre los de 5 años. Se
     # agrupan internamente por calendario y el resultado vuelve en el orden de entrada.
-    trade_3y = q.IRSwap(notional=2_000_000.0, fixed_rate=0.018, payment_times=[1.0, 2.0, 3.0], accruals=[1.0] * 3)
+    trade_3y = qd.IRSwap(notional=2_000_000.0, fixed_rate=0.018, payment_times=[1.0, 2.0, 3.0], accruals=[1.0] * 3)
 
     print("--- price_many (lote heterogéneo: 5y, 3y, 5y intercalados) ---")
     many = qeng.price_many([trade_a, trade_3y, trade_b], model, market, ["PV"])

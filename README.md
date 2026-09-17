@@ -38,15 +38,15 @@ dicts. It is the recommended way to use the engine from Python; see
 uses internally, and that Excel and the C ABI also use.
 
 ```python
-from quantdesk import Engine, HullWhite1F, IRSwap, Market
+import quantdesk as qd
 
-model = HullWhite1F(a=0.10, b=0.03, sigma=0.01, r0=0.02)
-trade = IRSwap(notional=1_000_000.0, fixed_rate=0.02,
-                payment_times=[1.0, 2.0, 3.0, 4.0, 5.0], accruals=[1.0] * 5)
-market = Market(pillars=[1.0, 2.0], zero_rates=[0.02, 0.02],
-                 hazard_rate=0.02, recovery_rate=0.40)
+model = qd.HullWhite1F(a=0.10, b=0.03, sigma=0.01, r0=0.02)
+trade = qd.IRSwap(notional=1_000_000.0, fixed_rate=0.02,
+                   payment_times=[1.0, 2.0, 3.0, 4.0, 5.0], accruals=[1.0] * 5)
+market = qd.Market(pillars=[1.0, 2.0], zero_rates=[0.02, 0.02],
+                    hazard_rate=0.02, recovery_rate=0.40)
 
-engine = Engine(backend="auto", n_paths=5_000, n_steps=208, seed=7)
+engine = qd.Engine(backend="auto", n_paths=5_000, n_steps=208, seed=7)
 
 metrics = ["PV", "DV01", "ExpectedExposure", "PFE95", "UnilateralCVA"]
 results = engine.price(trade, model, market, metrics)
@@ -97,16 +97,16 @@ For example, this creates a one-year European call on an observable named
 `EQ.SPOT.AAPL`:
 
 ```python
-import quantdesk as q
+import quantdesk as qd
 
-call = q.when(
+call = qd.when(
     1.0,
-    q.cashflow(
+    qd.cashflow(
         "USD",
-        1_000 * q.maximum(q.fixing("EQ.SPOT.AAPL", 1.0) - 100.0, 0.0),
+        1_000 * qd.maximum(qd.fixing("EQ.SPOT.AAPL", 1.0) - 100.0, 0.0),
     ),
 )
-trade = q.PayoffProduct(id="AAPL_CALL_100", contract=call)
+trade = qd.PayoffProduct(id="AAPL_CALL_100", contract=call)
 
 print(trade.product_type)  # Payoff
 ```
@@ -115,18 +115,18 @@ The same contract nodes can be combined to create path-dependent products. For e
 adds a discrete up-and-in barrier and pays the call only if the barrier is hit:
 
 ```python
-barrier_call = q.trigger(
+barrier_call = qd.trigger(
     id="UP_AND_IN",
     monitoring_times=[0.25, 0.5, 0.75, 1.0],
-    condition=q.greater_equal(q.current("EQ.SPOT.AAPL"), 120.0),
+    condition=qd.greater_equal(qd.current("EQ.SPOT.AAPL"), 120.0),
     monitoring="discrete",
     settlement="at_scheduled_payment",
     priority=0,
     latch=True,
     on_hit=call,
-    on_miss=q.zero(),
+    on_miss=qd.zero(),
 )
-barrier_trade = q.PayoffProduct(id="AAPL_UP_AND_IN", contract=barrier_call)
+barrier_trade = qd.PayoffProduct(id="AAPL_UP_AND_IN", contract=barrier_call)
 ```
 
 For integrations that already produce JSON, the lower-level facade (see
@@ -254,7 +254,7 @@ passed directly to `create_model`:
 
 ```python
 import engine
-import quantdesk as q
+import quantdesk as qd
 
 pillars = [0.5, 1.0, 2.0, 3.0, 5.0, 7.0, 10.0]
 # synthetic_from_hull_white is a native-only helper (no quantdesk equivalent); wrap its
@@ -262,12 +262,12 @@ pillars = [0.5, 1.0, 2.0, 3.0, 5.0, 7.0, 10.0]
 synthetic = engine.MarketSnapshot.synthetic_from_hull_white(
     a=0.15, b=0.025, sigma=0.008, r0=0.02, pillars=pillars,
 )
-market = q.Market(pillars=list(synthetic.pillars), zero_rates=list(synthetic.zero_rates))
+market = qd.Market(pillars=list(synthetic.pillars), zero_rates=list(synthetic.zero_rates))
 
-initial_guess = q.HullWhite1F(a=0.30, b=0.01, sigma=0.008, r0=0.02)
-qeng = q.Engine(backend="auto", n_paths=5_000, n_steps=208, seed=7)
+initial_guess = qd.HullWhite1F(a=0.30, b=0.01, sigma=0.008, r0=0.02)
+qeng = qd.Engine(backend="auto", n_paths=5_000, n_steps=208, seed=7)
 fit = qeng.calibrate("HullWhite1F", market, initial_guess.to_params())
-calibrated_model = q.HullWhite1F(**fit.optimal_params)
+calibrated_model = qd.HullWhite1F(**fit.optimal_params)
 
 print(fit.rmse, fit.iterations, fit.converged)
 ```
@@ -297,12 +297,12 @@ All three return one row per trade (and, for `price_grid`, per model/market too)
 index attached explicitly — never a nested list:
 
 ```python
-import quantdesk as q
+import quantdesk as qd
 
 schedule = {"payment_times": [1.0, 2.0, 3.0, 4.0, 5.0], "accruals": [1.0] * 5}
 trades = [
-    q.IRSwap(notional=1_000_000.0, fixed_rate=0.02, **schedule),
-    q.IRSwap(notional=2_500_000.0, fixed_rate=0.015, **schedule),
+    qd.IRSwap(notional=1_000_000.0, fixed_rate=0.02, **schedule),
+    qd.IRSwap(notional=2_500_000.0, fixed_rate=0.015, **schedule),
 ]
 
 for row in engine.price_batch(trades, model, market, ["PV", "UnilateralCVA"]):

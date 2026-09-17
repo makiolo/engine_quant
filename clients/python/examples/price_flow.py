@@ -1,6 +1,6 @@
 """Flujo completo de ENGINE.PRICE (PLAN.md §7.15) desde Python usando `quantdesk`
 (PLAN_API_REFACTOR.md): `Trade`/`Model`/`Market` construidos como objetos `pydantic`
-(`q.IRSwap`/`q.HullWhite1F`/`q.Market`), y `q.Engine(...)` fija `PricingContext`/
+(`qd.IRSwap`/`qd.HullWhite1F`/`qd.Market`), y `qd.Engine(...)` fija `PricingContext`/
 `ExecutionContext` una sola vez en el constructor -- luego `engine.price(...)` calcula un
 lote de medidas de una sola vez, sin traducir a mano cada objeto tipado a su equivalente
 nativo (`eng.create_product`/`create_model`/`MarketSnapshot`/`PricingContext`/
@@ -22,18 +22,18 @@ if len(sys.argv) > 1:
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import engine  # noqa: E402  -- fachada dinámica cruda, solo para el backend ya resuelto
-import quantdesk as q  # noqa: E402
+import quantdesk as qd  # noqa: E402
 
 
 def main():
-    trade = q.IRSwap(
+    trade = qd.IRSwap(
         notional=1_000_000.0,
         fixed_rate=0.02,
         payment_times=[1.0, 2.0, 3.0, 4.0, 5.0],
         accruals=[1.0, 1.0, 1.0, 1.0, 1.0],
     )
-    model = q.HullWhite1F(a=0.1, b=0.03, sigma=0.01, r0=0.02)
-    market = q.Market(pillars=[1.0], zero_rates=[0.02], hazard_rate=0.02, recovery_rate=0.4)
+    model = qd.HullWhite1F(a=0.1, b=0.03, sigma=0.01, r0=0.02)
+    market = qd.Market(pillars=[1.0], zero_rates=[0.02], hazard_rate=0.02, recovery_rate=0.4)
 
     # "auto" se resuelve una vez, al construir el motor, a "gpu" si este build tiene soporte
     # GPU (engine.is_gpu_backend_available()); quantdesk.Engine no expone el resultado de esa
@@ -41,7 +41,7 @@ def main():
     resolved_backend = engine.ExecutionContext({"backend": "auto", "precision": "FP64"}).backend
     print(f"Backend resuelto: {resolved_backend}")
 
-    qeng = q.Engine(backend="auto", n_paths=5000, n_steps=208, seed=7)
+    qeng = qd.Engine(backend="auto", n_paths=5000, n_steps=208, seed=7)
 
     result = qeng.price(trade, model, market, ["PV", "DV01", "ExpectedExposure", "PFE95", "UnilateralCVA"])
 
@@ -55,7 +55,7 @@ def main():
 
     # Swap "a la par" (PLAN_REAPI.md §3.2, propuesta 2): construcción a mercado explícita vía
     # IRSwap.par(...) -- omitir fixed_rate directamente sería un ValidationError, no PAR.
-    par_trade = q.IRSwap.par(
+    par_trade = qd.IRSwap.par(
         notional=1_000_000.0,
         payment_times=[1.0, 2.0, 3.0, 4.0, 5.0],
         accruals=[1.0, 1.0, 1.0, 1.0, 1.0],

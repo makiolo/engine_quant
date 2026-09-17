@@ -24,11 +24,11 @@ if len(sys.argv) > 1:
     sys.path.insert(0, sys.argv[1])
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-import quantdesk as q  # noqa: E402
+import quantdesk as qd  # noqa: E402
 from quantdesk import greeks  # noqa: E402
 
 
-class Gbm(q.ModelSpec):
+class Gbm(qd.ModelSpec):
     """`ModelSpec` mínimo para `engine::GBM` (movimiento geométrico browniano de un único
     activo) -- ver nota del módulo: `quantdesk.model` no lo tipa todavía."""
 
@@ -47,15 +47,15 @@ class Gbm(q.ModelSpec):
 def main():
     # 1. Autoria programatica (When/Cashflow/Maximum -- PLAN_PRODUCTS.md §7.3): una call europea
     # sobre AAPL, sin plantilla nominal nueva.
-    call = q.when(
+    call = qd.when(
         1.0,
-        q.cashflow("USD", 1_000.0 * q.maximum(q.fixing("EQ.SPOT.AAPL", 1.0) - 100.0, 0)),
+        qd.cashflow("USD", 1_000.0 * qd.maximum(qd.fixing("EQ.SPOT.AAPL", 1.0) - 100.0, 0)),
     )
-    trade = q.PayoffProduct(id="AAPL_CALL_100", contract=call)
+    trade = qd.PayoffProduct(id="AAPL_CALL_100", contract=call)
     model = Gbm(s0=100.0, r=0.05, q=0.0, sigma=0.2, observable="EQ.SPOT.AAPL")
-    market = q.Market(pillars=[1.0], zero_rates=[0.05])
+    market = qd.Market(pillars=[1.0], zero_rates=[0.05])
 
-    qeng = q.Engine(backend="cpu", n_paths=200_000, n_steps=1, seed=7, pricing_date=0.0)
+    qeng = qd.Engine(backend="cpu", n_paths=200_000, n_steps=1, seed=7, pricing_date=0.0)
 
     # 2-3. Valoracion: una o varias metricas en una sola llamada (ya existente).
     result = qeng.price(trade, model, market, ["PayoffPriceQ"])

@@ -5,19 +5,25 @@
 A partir de ahí, una batería de notebooks centrada en valoración de opciones, obtención de
 métricas y visualizaciones financieras — cada uno explota una parte distinta de la librería
 (`engine`/`quantdesk`, PLAN_API_REFACTOR.md Fase 5: `quantdesk` sustituye a `engine_typed` como
-fachada tipada recomendada), siempre con `matplotlib`/`numpy` para las gráficas:
+fachada tipada recomendada), siempre con `numpy` para el cálculo y una combinación de
+`plotly` (curvas/superficies interactivas), `seaborn` (distribuciones/estadística) y
+`mplfinance` (velas OHLC) para las gráficas — cada notebook usa la que mejor encaja con lo que
+dibuja, nunca las tres a la vez porque sí. `matplotlib` ya no es dependencia directa de los
+notebooks (sigue siendo dependencia transitiva de `mplfinance`/`seaborn`).
 
 1. `01_vanilla_options_black_scholes.ipynb` — calls/puts europeas vía `PayoffPriceQ` sobre
    `GBM`, contraste contra Black-Scholes cerrado, paridad put-call, curvas de precio/Greeks
-   frente a strike y spot (`quantdesk.greeks`).
+   frente a strike y spot (`quantdesk.greeks`). Incluye una sección con datos reales de AAPL vía
+   `yfinance` (vela OHLC con `mplfinance`, volatilidad realizada estimada de los retornos diarios)
+   para valorar la misma call con un `sigma` de mercado en vez de sintético.
 2. `02_exotic_and_path_dependent_options.ipynb` — barreras (knock-in/out, corredor double
-   knock-out), digital, asiático aritmético nativo (`q.average`, réplica manual como celda de
-   verificación cruzada), lookback real (`q.running_max`/`q.running_min`), take-profit/stop-loss,
-   straddle/strangle vía `q.call_leg`/`q.put_leg`/`q.custom_strategy`
+   knock-out), digital, asiático aritmético nativo (`qd.average`, réplica manual como celda de
+   verificación cruzada), lookback real (`qd.running_max`/`qd.running_min`), take-profit/stop-loss,
+   straddle/strangle vía `qd.call_leg`/`qd.put_leg`/`qd.custom_strategy`
    (PLAN_IMPROVE_NOTEBOOK2.md Fase 6, réplica manual como celda de verificación cruzada).
 3. `03_bermudan_exercise.ipynb` — ejercicio bermuda vía Longstaff-Schwartz (`PayoffExerciseQ`),
    diagnósticos de ejercicio por fecha, convergencia hacia el límite americano. La pata europea
-   que sirve de rama de continuación (`european_put_contract`) delega en `q.put_leg`
+   que sirve de rama de continuación (`european_put_contract`) delega en `qd.put_leg`
    (PLAN_IMPROVE_NOTEBOOK2.md Fase 6, auditoría de Fase 7) en vez de horneado a mano.
 4. `04_greeks_and_risk_surfaces.ipynb` — barrido automático (`Engine.all_greeks`), Hessiana
    completa y HVP (`Engine.hessian`/`Engine.hvp`: gamma/vanna/volga vía likelihood-ratio,
@@ -27,7 +33,7 @@ fachada tipada recomendada), siempre con `matplotlib`/`numpy` para las gráficas
 6. `06_exposure_cva_portfolio.ipynb` — perfil de exposición EE/PFE y CVA (nativo para IRS,
    integrado a mano desde `PayoffExposureProfileQ` para una opción), portfolio de opciones vía
    `price_grid` bajo escenarios de mercado. Los contratos de call (opción única y cesta de
-   strikes) se construyen con `q.call_leg` (PLAN_IMPROVE_NOTEBOOK2.md Fase 6, auditoría de
+   strikes) se construyen con `qd.call_leg` (PLAN_IMPROVE_NOTEBOOK2.md Fase 6, auditoría de
    Fase 7) en vez de horneado a mano.
 7. `07_montecarlo_paths_q_vs_p.ipynb` — nació de una limitación ya cerrada (el binding Python
    no exponía las trayectorias Monte Carlo, solo medidas agregadas); desde
@@ -55,8 +61,8 @@ fachada tipada recomendada), siempre con `matplotlib`/`numpy` para las gráficas
    volatilidad efectiva (misma lógica que la gamma de Black-Scholes decreciendo con la
    volatilidad).
 9. `09_option_strategies_and_greeks.ipynb` — 14 estrategias custom construidas via
-   `q.call_leg`/`q.put_leg`/`q.custom_strategy` (PLAN_IMPROVE_NOTEBOOK2.md Fase 6, misma fuente
-   que `02`; réplica manual con `q.both` a mano como celda de verificación cruzada)
+   `qd.call_leg`/`qd.put_leg`/`qd.custom_strategy` (PLAN_IMPROVE_NOTEBOOK2.md Fase 6, misma fuente
+   que `02`; réplica manual con `qd.both` a mano como celda de verificación cruzada)
    (buy/sell call/put, straddle, butterfly, condor, calendar spread, ratio spread, cada una
    larga y corta) bajo 6 escenarios de volatilidad: valor hoy vs payoff intrínseco, y las
    griegas delta/gamma/theta/vega más vanna/volga/charm. Delta/vega/theta se piden en una única
@@ -96,7 +102,7 @@ compilado (`engine.cp3XX-....pyd` en Windows, `engine*.so` en Linux/Mac) debe ex
 Para lanzarlos:
 
 ```bash
-pip install jupyterlab matplotlib
+pip install jupyterlab plotly seaborn mplfinance yfinance
 cd clients/python/notebooks
 jupyter lab
 ```
