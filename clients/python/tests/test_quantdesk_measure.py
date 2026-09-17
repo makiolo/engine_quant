@@ -1,4 +1,4 @@
-"""Tests de `engine_typed.Measure` (PLAN_REAPI.md §6 Fase 3): `.to_spec()` produce la tupla
+"""Tests de `quantdesk.Measure` (PLAN_REAPI.md §6 Fase 3): `.to_spec()` produce la tupla
 `(nombre, params)` que consume `Engine.price`, y `DV01(bump=...)` tiene efecto real de punta a
 punta.
 """
@@ -12,7 +12,7 @@ if len(sys.argv) > 1:
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import engine  # noqa: E402
-import engine_typed as q  # noqa: E402
+import quantdesk as q  # noqa: E402
 
 
 def test_pv_to_spec_has_no_params():
@@ -111,4 +111,4 @@ if __name__ == "__main__":
     test_dv01_bump_has_a_real_effect_through_the_engine()
     test_dv01_bucketed_sums_to_the_parallel_dv01_through_the_engine()
     test_price_mixes_typed_measures_and_plain_strings()
-    print("OK: tests de engine_typed.Measure pasaron")
+    print("OK: tests de quantdesk.Measure pasaron")

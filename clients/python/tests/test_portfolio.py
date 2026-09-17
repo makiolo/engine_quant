@@ -1,6 +1,6 @@
 """Tests de `engine.Portfolio` (PLAN_BACKWARD.md §6.4/§9 Fase 6): objeto first-class de
 orquestacion (lista de trades bajo un UNICO IModel/MarketSnapshot). Mismo criterio que
-test_engine_typed_greeks.py -- no repite la verificacion numerica fina de compute_hessian/
+test_quantdesk_greeks.py -- no repite la verificacion numerica fina de compute_hessian/
 compute_hvp (ya cubierta exhaustivamente por PortfolioTest en cpp/engine/tests/
 test_portfolio.cpp), aqui se confirma que el binding nanobind expone la misma
 semantica/identidad exacta que la capa C++, y que el ownership de Product sobrevive a pasar por

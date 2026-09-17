@@ -929,6 +929,200 @@ nombre de fichero) se actualizan a `quantdesk` in-place, sin renombrar el ficher
 
 **Criterio de aceptación.** `ctest`/suite Python en verde; ningún test importa `engine_typed`.
 
+**Estado verificado / decisiones tomadas (sesión de implementación de esta fase).**
+
+- **Renombrados con `git mv`** (historia preservada, 6 `R` en `git status`):
+  `test_engine_typed_{model,payoff,greeks,trade,measure,context}.py` ->
+  `test_quantdesk_{model,payoff,greeks,trade,measure,context}.py` — coinciden EXACTAMENTE con
+  los 4 nombres que `.github/workflows/ci.yml` ya esperaba desde la Fase 3
+  (`test_quantdesk_{trade,context,measure,payoff}.py`), cerrando el desalineamiento que esa
+  fase dejó documentado a propósito. En cada fichero: `import engine_typed as q` ->
+  `import quantdesk as q` (y `from engine_typed.model import GbmBasket` ->
+  `from quantdesk.model import GbmBasket`, `from engine_typed import greeks` ->
+  `from quantdesk import greeks`), más docstring de cabecera, comentarios inline y el `print("OK:
+  ...")` final de cada bloque `if __name__ == "__main__":` — mismos CASOS de test, ningún
+  `assert`/fixture/dato numérico tocado.
+- **`test_portfolio.py`/`test_market_products_realistic.py` editados in-place** (sin `git mv`,
+  igual que pide el plan): `test_portfolio.py` en realidad NO importaba `engine_typed` (solo
+  `import engine`, confirmado leyendo el fichero completo antes de tocarlo) — su única cita era
+  de prosa en el docstring de cabecera ("Mismo criterio que `test_engine_typed_greeks.py`"),
+  actualizada a `test_quantdesk_greeks.py`. `test_market_products_realistic.py` sí importaba
+  `engine_typed as q` de verdad (`import quantdesk as q`), más una cita de comentario
+  ("`engine_typed.payoff`" -> "`quantdesk.payoff`").
+- **Búsqueda exhaustiva más allá de la lista literal del plan** (mismo patrón que ya repitieron
+  Fase 0/3, señalado explícitamente en el encargo de esta fase): `grep -rn engine_typed
+  clients/python/tests/` antes de tocar nada encontró **9** ficheros, dos más de los 8
+  nombrados explícitamente por el plan (6 renombrados + `test_portfolio.py` +
+  `test_market_products_realistic.py`) — el noveno, no listado en ningún inventario de ninguna
+  fase anterior, es `clients/python/tests/test_engine_evaluate_scenario.py`
+  (`import engine_typed.payoff as q`, línea 26). Editado in-place (mismo criterio que
+  `test_market_products_realistic.py`: importa un submódulo del paquete, no el paquete raíz, así
+  que la única línea a tocar era exactamente ese import) -> `import quantdesk.payoff as q`. Este
+  fichero prueba `engine.Engine.evaluate_scenario` (el método NATIVO, no `quantdesk.Engine`) para
+  las 14 estrategias de `09_option_strategies_and_greeks.ipynb` — se mantiene intacto en su
+  alcance (sigue siendo la cobertura exhaustiva del método nativo), solo cambia de dónde importa
+  `call_leg`/`put_leg`/`custom_strategy`. `test_engine_simulate_paths.py` (nombre gemelo, mismo
+  patrón de test de un método nativo sin sufijo `test_engine_typed_`) NO citaba `engine_typed` en
+  ningún punto (confirmado por grep antes de descartarlo) — no requería ningún cambio.
+- **Test nuevo:** `clients/python/tests/test_quantdesk_engine.py` (22 tests), cubriendo lo que
+  Fase 1/2/5 dejaron señalado como hueco de cobertura formal:
+  - `test_price_matches_the_native_flow_bit_for_bit`: mismo caso del bloque "Después" de §1
+    (`IRSwap` 5y, `HullWhite1F`, `Market` con crédito, 5 medidas incluyendo
+    `ExpectedExposure`/`PFE95` vectoriales) — comparado dinámicamente contra un flujo nativo
+    construido a mano en el propio test (no valores hardcodeados como golden data, mismo
+    criterio que el resto del repositorio), bit a bit vía un helper `_assert_measure_result_equal`
+    que compara `has_scalar`/`scalar`/`times`/`primary`/`secondary`/`bump_used`.
+  - `test_price_result_dot_access_matches_bracket_access_and_is_the_same_object`: confirma
+    `results.PV.scalar == results["PV"].scalar` Y `results.PV is results["PV"]` (mismo objeto,
+    no solo valores iguales) para 3 medidas. `test_price_result_dot_access_raises_attribute_error
+    _for_a_measure_not_requested`: cubre la rama de error de `PriceResult.__getattr__` (sin test
+    previo).
+  - `test_price_override_pricing_has_a_real_effect_but_does_not_mutate_the_engine`: usa
+    `ExpectedExposure` (Monte Carlo real, depende de `n_paths`/`seed`) tal como pide
+    explícitamente el encargo de esta fase y la propia nota de Fase 1 — NO `PV`/`DV01` de un IRS
+    vainilla (deterministas: el test pasaría igual con una mutación real, por construcción). Tres
+    aserciones encadenadas: (a) el override puntual SÍ cambia el resultado de esa llamada
+    (perfil `[9625.35, ...]` con `n_paths=5000/seed=7` frente a un perfil distinto con
+    `n_paths=200/seed=123`, confirmando que el override no es un no-op), (b) `qeng._pricing`
+    sigue siendo literalmente `PricingContext(n_paths=5_000, n_steps=208, seed=7)` tras la
+    llamada con override (lectura directa del atributo, no solo inferencia del resultado), (c)
+    una llamada posterior SIN override reproduce el perfil baseline EXACTO (no un valor nuevo
+    ligeramente distinto). `test_price_override_execution_does_not_mutate_the_engine_for_
+    subsequent_calls`: mismo patrón (b) aplicado a `execution=`/`self._execution.backend`.
+  - `test_price_batch_matches_the_native_price_batch` / `test_price_many_matches_the_native_
+    price_many_on_heterogeneous_trades` / `test_price_grid_matches_the_native_price_grid`:
+    comparación fila a fila / celda a celda contra el nativo. **Hallazgo real durante la
+    escritura del test** (no un bug — comportamiento correcto y ya documentado, pero mi primer
+    borrador lo pasó por alto): un primer intento de `price_many` heterogéneo usó
+    `IRSwap.par(...)` para uno de los tres trades y `Engine.price_many` lo rechazó con
+    `ValueError: los trades del lote deben traer fixed_rate explícito (use_par_rate no soportado
+    en lote)` — comportamiento correcto del binding nativo (ya documentado en el propio
+    docstring de `Engine.price_batch` en `quantdesk/engine.py`, "cada IRSwap debe traer
+    fixed_rate explícito... el lote nativo no lo soporta"), no una regresión de `quantdesk`.
+    Corregido el fixture del test (fixed_rate explícito en los tres trades, heterogeneidad real
+    vía calendario distinto en vez de vía `IRSwap.par`), sin tocar ninguna implementación.
+  - `test_all_greeks_matches_the_native_all_greeks` / `test_hessian_matches_the_native_hessian` /
+    `test_hvp_matches_the_native_hvp`: call GBM ATM (mismo caso que
+    `test_quantdesk_greeks.py::_gbm_call_fixture`, ahora construido también con el `Gbm` tipado
+    nuevo de Fase 5 en el lado `quantdesk.Engine`), comparación bit a bit de
+    `risk_factor`/`value`/`measure`/`order` (greeks), `(factor_i, factor_j)` -> `value`
+    (hessian), `factor` -> `value` (hvp), y `skipped` en los tres.
+  - `test_simulate_paths_matches_the_native_simulate_paths`: `times`/`paths` vía
+    `np.array_equal`. `test_simulate_paths_pointwise_pricing_override_does_not_mutate_the_engine`:
+    mismo patrón de no-mutación que `price(...)` pero aplicado a `simulate_paths` (que según
+    Fase 2 también soporta `pricing=` puntual pese a no estar en la firma literal de §3.2) —
+    override con `seed` distinto cambia las rutas simuladas, `self._pricing` no muta, llamada
+    posterior sin override reproduce las rutas baseline exactas (`np.array_equal`).
+  - `test_calibrate_matches_the_native_create_calibrator_and_calibrate`: mismo mercado/estimación
+    inicial por los dos caminos (`quantdesk.Engine.calibrate` vs
+    `eng.create_calibrator(...).calibrate(...)` nativo manual), `converged`/`optimal_params`
+    idénticos. `test_list_methods_match_the_native_engine_registry`: las 4 listas
+    (`list_models`/`list_products`/`list_measures`/`list_calibrators`) idénticas elemento a
+    elemento Y no vacías (evita el falso positivo de "dos listas vacías son iguales").
+    `test_portfolio_is_the_native_portfolio_reexported_directly`: `q.Portfolio is
+    engine.Portfolio` (identidad, no solo mismo comportamiento) — cobertura que faltaba desde
+    `quantdesk` (ya existía indirectamente vía `engine.Portfolio` en `test_portfolio.py`, pero
+    nunca se había confirmado el reexport en sí desde el paquete tipado).
+  - `test_gbm_to_params_matches_the_native_gbm_params_and_feeds_the_real_engine` /
+    `test_gbm_p_to_params_matches_the_native_gbm_p_params_and_feeds_the_real_engine`: `to_params()`
+    exacto más `eng.create_model(model.model_type, model.to_params()).type_name` correcto (`"GBM"`
+    / `"GBM_P"`) — hueco de Fase 5 señalado explícitamente ("`Gbm`/`GbmP`... sin cobertura de test
+    dedicada todavía"). `test_engine_price_with_gbm_matches_the_native_flow_bit_for_bit` /
+    `test_engine_price_with_gbm_p_matches_the_native_flow_bit_for_bit`: además del `to_params()`
+    aislado, confirma que `quantdesk.Engine.price(...)` con un `Gbm`/`GbmP` como `model` produce
+    el mismo resultado que el flujo nativo (`PayoffPriceQ`/`PayoffForecastP` respectivamente),
+    cerrando el ciclo completo trade+modelo+mercado tipados -> `Engine.price`.
+  - `test_engine_evaluate_scenario_matches_the_native_evaluate_scenario` /
+    `test_engine_evaluate_scenario_rejects_a_missing_observable_like_the_native_method`: hueco de
+    Fase 2/5 señalado explícitamente ("`evaluate_scenario` es un hueco de cobertura real de
+    Fase 2"). No repite la verificación exhaustiva de las 14 estrategias del notebook 09 (eso ya
+    lo cubre `test_engine_evaluate_scenario.py` contra el método NATIVO) — aquí solo se confirma
+    que el envoltorio tipado `quantdesk.Engine.evaluate_scenario` traduce `trade -> producto` y
+    delega idénticamente al nativo (una estrategia butterfly, 5 escenarios de spot, ledger
+    idéntico elemento a elemento) y que propaga la misma excepción (`"fixing ausente"`) cuando
+    falta un observable requerido.
+- **Ningún hallazgo de esta fase reveló un bug real** en la implementación de Fase 1/2/5 — el
+  único comportamiento inesperado durante la escritura de tests (`price_many` rechazando
+  `IRSwap.par(...)`) es una restricción ya documentada del binding nativo, no un defecto de
+  `quantdesk`; se corrigió el test, no la implementación.
+- **`abi_dll_path`: dos tests preexistentes rotos, NO causados por esta fase, fuera de alcance.**
+  `test_greeks_fixtures_cross_layer.py::test_all_greeks_matches_between_nanobind_and_c_abi_for_
+  the_call_fixture` y `test_payoff_fixtures_cross_layer.py::test_all_fixtures_match_between_
+  nanobind_and_c_abi` fallan en el paso de `setup` con `fixture 'abi_dll_path' not found` —
+  confirmado que ningún `conftest.py` en el repo (no existe ninguno bajo `clients/python/tests/`)
+  ni ningún `pytest_addoption` en esos dos ficheros provee esa fixture; tampoco hay ningún
+  `--abi-dll-path` cableado en `.github/workflows/ci.yml` (que invoca cada fichero de test como
+  script `python archivo.py`, nunca como colección `pytest` de todo el directorio) ni en ningún
+  `CTestTestfile.cmake`. Confirmado con `git status`/`git log` que ninguno de los dos ficheros
+  fue tocado en esta sesión ni en las dos anteriores (`a90e9256`, 2026-09-15, dos días antes de
+  esta sesión) — son ficheros huérfanos preexistentes, no una regresión de Fase 6. No se han
+  "arreglado" (añadir la fixture/opción que falta es un cambio de infraestructura de test fuera
+  del alcance de "renombrar tests y añadir cobertura de `quantdesk.Engine`") — se documentan aquí
+  para que el orquestador decida si merece un hallazgo/fase propia.
+- **Build C++ (`cmake --build build`): no se pudo re-ejecutar, hallazgo de entorno preexistente,
+  no causado por esta fase.** `build/CMakeCache.txt` referencia un `cmake.exe` dentro de un
+  directorio temporal de aislamiento de build de `pip` de una sesión anterior
+  (`C:\Users\...\Temp\pip-build-env-2o8galto\...\cmake.exe`, usado por la Fase 3 al construir la
+  wheel con `pip wheel . --no-deps`) que ya no existe en el sistema -- cualquier
+  `cmake --build build` que necesite regenerar `build.ninja` falla con `CreateProcess failed: The
+  system cannot find the file specified`. Confirmado que esto es un artefacto de entorno, no de
+  código: `build/CMakeCache.txt` no fue tocado por ninguna fase de este plan, y esta fase no toca
+  `cpp/`/`rust/`/CMake en absoluto. No se ha intentado una reconfiguración completa desde cero
+  (fuera de alcance de una fase puramente Python -- coste/riesgo de una recompilación completa de
+  C++/Rust no está justificado solo para "confirmar" algo que la Fase 3/4/5 ya construyeron y que
+  el propio `.pyd` instalado en `venv` demuestra que sigue íntegro, ver abajo). También se
+  encontró, al intentar este build, que el `ninja` de `/e/dev/sandbox/bin` (primero en `PATH` en
+  este entorno de sesión) es la versión 1.4.0, incompatible con `ninja_required_version` (>= 1.5)
+  del `build.ninja` ya generado por una sesión anterior con un ninja más nuevo -- resuelto
+  anteponiendo al `PATH` el ninja de Visual Studio Build Tools (`.../Common7/IDE/
+  CommonExtensions/Microsoft/CMake/Ninja/ninja.exe`, versión 1.12.1), pero esto no fue suficiente
+  para superar el problema de `CMakeCache.txt` de arriba. Ninguno de los dos hallazgos (ninja
+  desactualizado en `PATH`, `CMakeCache.txt` apuntando a un `cmake.exe` efímero) es una
+  regresión de esta fase -- ambos preexistían a esta sesión.
+- **Confirmación indirecta de que el `.pyd` nativo sigue íntegro**, sin necesidad de recompilar:
+  `venv\Scripts\python.exe -c "import quantdesk, engine"` resuelve ambos módulos sin error
+  (`engine.cp312-win_amd64.pyd` ya compilado en `venv\Lib\site-packages`), y los 212 tests que sí
+  corrieron (ver abajo) ejercitan ese mismo `.pyd` de forma extensiva (`Engine.price`/
+  `price_batch`/`all_greeks`/`hessian`/`hvp`/`simulate_paths`/`calibrate`/Portfolio, todos contra
+  el binding nanobind real) sin ningún fallo atribuible al binding nativo.
+- **`ctest`: confirmado por inspección, no asumido, que los tests Python NO están cableados en
+  ctest en absoluto** -- `build/clients/python/CTestTestfile.cmake` solo referencia el
+  subdirectorio `nanobind-build` (tests internos de la librería `nanobind`, no de este
+  repositorio), sin ningún `add_test` para `pytest`/los scripts de `clients/python/tests/`. Esto
+  confirma la sospecha que el propio encargo de esta fase ya adelantaba ("probablemente `ctest`
+  aquí se refiere a que la suite completa... siga en verde, no que haya tests C++ que citen
+  `engine_typed`") -- no hay ningún `ctest` de Python que ejecutar; el equivalente funcional real
+  de "ctest en verde" para esta fase es la suite `pytest` completa (ver abajo). No se ha
+  ejecutado `cargo test -p engine-core --release` (ningún fichero Rust tocado por esta fase, ni
+  motivo para pensar que esté afectado -- confirmado por `git status` que ningún fichero bajo
+  `rust/` cambió en esta sesión).
+- **Resultado EXACTO de `venv\Scripts\python.exe -m pytest clients/python/tests/` (suite
+  completa, tras limpiar `__pycache__`):** `212 passed, 2 errors in 16.01s` -- los 2 errores son
+  los dos tests huérfanos de `abi_dll_path` documentados arriba, preexistentes y fuera de
+  alcance. **0 fallos** (`FAILED`) en toda la suite. Antes de esta fase (baseline, mismo comando,
+  sobre el árbol tal como lo dejó la Fase 5): `Interrupted: 8 errors during collection` (los 8
+  ficheros que citaban `engine_typed`, confirmado con la traza completa antes de tocar nada).
+- **`grep -rn "engine_typed" clients/python/tests/ --include="*.py"` final: VACÍO** (`exit=1`,
+  sin coincidencias) -- confirmado explícitamente tras todos los cambios de esta fase, incluido
+  el noveno fichero no listado por el plan (`test_engine_evaluate_scenario.py`). No quedó ninguna
+  cita histórica ambigua en `tests/` que decidir caso por caso (a diferencia de `PLAN_*.md`): todo
+  lo encontrado por el grep exhaustivo se cambió 1:1 a `quantdesk`.
+- **Nota para Fase 7 (documentación).** Un grep repo-wide (`grep -rln engine_typed`, excluyendo
+  `PLAN_*.md`) tras esta fase sigue devolviendo, además de los ya conocidos y documentados en
+  Fase 0/3 (`clients/python/src/engine_py_ext.cpp`, 5 citas C++; `.github/workflows/ci.yml`, 2
+  comentarios de prosa citando otros `PLAN_*.md`), exactamente los ficheros que la propia Fase 7
+  ya lista como su alcance (`README.md`, `clients/python/README_PYPI.md`,
+  `docs/schema/engine.payoff/cookbook.md`, `clients/excel/README.md`,
+  `clients/excel/tests/test_xloper.cpp`, `.claude/skills/execute-plan/SKILL.md`,
+  `clients/python/notebooks/README.md`) más UNA cita adicional no nombrada explícitamente por
+  ningún inventario anterior: `clients/python/examples/price_flow.py` línea 7 ("...que es lo que
+  hacía el flujo anterior sobre `engine_typed`"), una nota histórica de una frase con el mismo
+  criterio editorial que ya aplican `notebooks/README.md` línea 7 y los comentarios de `ci.yml`
+  (cita el nombre que tenía el paquete ANTES del refactor, no documentación activa del patrón
+  antiguo) -- no se ha tocado en esta fase (fuera de alcance, `examples/` es Fase 4, ya cerrada) y
+  se deja como dato para que Fase 7 decida si lo incluye explícitamente en su propio inventario o
+  lo trata igual que las demás citas históricas ya aceptadas.
+
 ### Fase 7 — Documentación
 
 - `README.md`: sección "Quick start with Python" reemplazada por el bloque "Después" de §1;

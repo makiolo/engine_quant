@@ -1,4 +1,4 @@
-"""Tests de `engine_typed.greeks`/`Engine.all_greeks` (PLAN_GREEKS.md §8.1/§8.4/§8.5, Fase 9):
+"""Tests de `quantdesk.greeks`/`Engine.all_greeks` (PLAN_GREEKS.md §8.1/§8.4/§8.5, Fase 9):
 `Greek.to_spec()` produce el mismo `(nombre, params)` que consume `Engine.price` (equivalente
 Python de `GreekMeasure`/`compute_greek` en test_greeks.cpp), y `Engine.all_greeks` expone el
 barrido automatico (`compute_all_greeks`) sin que el cliente Python enumere cada factor de
@@ -18,8 +18,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 import pytest  # noqa: E402
 
 import engine  # noqa: E402
-import engine_typed as q  # noqa: E402
-from engine_typed import greeks  # noqa: E402
+import quantdesk as q  # noqa: E402
+from quantdesk import greeks  # noqa: E402
 
 
 def test_delta_to_spec_uses_the_model_prefix():
@@ -539,4 +539,4 @@ if __name__ == "__main__":
     test_delta_per_asset_of_a_basket_call_matches_manual_bump_and_reval()
     test_delta_per_asset_rejects_an_out_of_range_asset_index_explicitly()
     test_cross_gamma_between_two_assets_of_a_basket_matches_manual_four_point_stencil()
-    print("OK: tests de engine_typed.greeks/Engine.all_greeks/Engine.hessian/Engine.hvp pasaron")
+    print("OK: tests de quantdesk.greeks/Engine.all_greeks/Engine.hessian/Engine.hvp pasaron")

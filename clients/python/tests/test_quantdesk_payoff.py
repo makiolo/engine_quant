@@ -1,6 +1,6 @@
-"""Tests de `engine_typed.payoff` (PLAN_PRODUCTS.md §7.3, adelantado de Fase 10): azúcar de
+"""Tests de `quantdesk.payoff` (PLAN_PRODUCTS.md §7.3, adelantado de Fase 10): azúcar de
 operadores, `to_params()`, y round-trip contra el `Engine` real -- mismo caso base que
-`test_engine_typed_trade.py`.
+`test_quantdesk_trade.py`.
 """
 
 import json
@@ -12,7 +12,7 @@ if len(sys.argv) > 1:
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import engine  # noqa: E402
-import engine_typed as q  # noqa: E402
+import quantdesk as q  # noqa: E402
 
 
 def _call_100():
@@ -259,7 +259,7 @@ def test_validate_payoff_spec_reports_errors_without_creating_product():
 
 # -------------------------------------------------------------------------------------------
 # PLAN_IMPROVE_NOTEBOOK.md Fase 2: q.average/q.running_min/q.running_max ya existian como
-# builders de engine_typed.payoff (misma forma que el AST de autoria C++ y
+# builders de quantdesk.payoff (misma forma que el AST de autoria C++ y
 # docs/schema/engine.payoff/v1.schema.json: 'average' es una suma PONDERADA schedule+weights, no
 # una media con divisor implicito; 'running_min'/'running_max' solo llevan 'observable', sin
 # schedule propio -- reducen sobre el instante activo, ver ir.rs::ScalarOp::RunningMin) pero el
@@ -366,4 +366,4 @@ if __name__ == "__main__":
     test_average_native_matches_hand_baked_fixings_sum_exactly()
     test_running_max_native_matches_hand_chained_maximum_exactly()
     test_running_min_native_matches_hand_chained_minimum_exactly()
-    print("OK: tests de engine_typed.payoff pasaron")
+    print("OK: tests de quantdesk.payoff pasaron")

@@ -1,4 +1,4 @@
-"""Tests de `engine_typed.TradeSpec`/`IRSwap` (PLAN_REAPI.md §6 Fase 1): construcción,
+"""Tests de `quantdesk.TradeSpec`/`IRSwap` (PLAN_REAPI.md §6 Fase 1): construcción,
 rechazo de `fixed_rate` ausente, `IRSwap.par(...)`, `to_params()` y round-trip contra el
 `Engine` real -- mismo caso base que `clients/python/tests/test_price.py`.
 """
@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 import pydantic  # noqa: E402
 
 import engine  # noqa: E402
-import engine_typed as q  # noqa: E402
+import quantdesk as q  # noqa: E402
 
 
 def test_irswap_requires_fixed_rate():
@@ -77,4 +77,4 @@ if __name__ == "__main__":
     test_irswap_to_params_includes_explicit_fixed_rate()
     test_irswap_is_immutable()
     test_irswap_to_params_feeds_the_real_engine()
-    print("OK: tests de engine_typed.IRSwap pasaron")
+    print("OK: tests de quantdesk.IRSwap pasaron")

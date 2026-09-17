@@ -1,4 +1,4 @@
-"""Tests de `engine_typed.HullWhite1F/HullWhite2F/Market/PricingContext/ExecutionContext`
+"""Tests de `quantdesk.HullWhite1F/HullWhite2F/Market/PricingContext/ExecutionContext`
 (PLAN_REAPI.md §6 Fase 2): construcción/validación/`to_params()` y round-trip contra el
 `Engine` real, sin dicts crudos.
 """
@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 import pydantic  # noqa: E402
 
 import engine  # noqa: E402
-import engine_typed as q  # noqa: E402
+import quantdesk as q  # noqa: E402
 
 
 def test_hull_white_1f_to_params_feeds_the_real_engine():
@@ -103,4 +103,4 @@ if __name__ == "__main__":
     test_pricing_context_to_params_feeds_the_real_engine()
     test_execution_context_defaults_to_auto()
     test_execution_context_rejects_unknown_backend()
-    print("OK: tests de engine_typed.Model/Market/PricingContext/ExecutionContext pasaron")
+    print("OK: tests de quantdesk.Model/Market/PricingContext/ExecutionContext pasaron")

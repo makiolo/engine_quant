@@ -1,5 +1,5 @@
-"""Tests de `engine_typed.model.GbmBasket` (PLAN_IMPROVE_NOTEBOOK.md Fase 3): validación temprana
-de la matriz de correlación (simetría/PSD, mismo criterio que `engine_typed.market.Market` valida
+"""Tests de `quantdesk.model.GbmBasket` (PLAN_IMPROVE_NOTEBOOK.md Fase 3): validación temprana
+de la matriz de correlación (simetría/PSD, mismo criterio que `quantdesk.market.Market` valida
 pillars crecientes) y round-trip contra el `Engine` real -- un basket call de 2 activos
 correlacionados se precia, y su precio se mueve en la dirección correcta al variar la correlación
 (criterio de aceptación explícito de esta fase, PLAN_IMPROVE_NOTEBOOK.md §2 Fase 3).
@@ -15,8 +15,8 @@ if len(sys.argv) > 1:
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import engine  # noqa: E402
-import engine_typed as q  # noqa: E402
-from engine_typed.model import GbmBasket  # noqa: E402
+import quantdesk as q  # noqa: E402
+from quantdesk.model import GbmBasket  # noqa: E402
 
 
 def _basket_spec(correlation, s0=(100.0, 100.0), r=(0.03, 0.03), sigma=(0.25, 0.25)):

@@ -23,7 +23,7 @@ import numpy as np  # noqa: E402
 import pytest  # noqa: E402
 
 import engine  # noqa: E402
-import engine_typed.payoff as q  # noqa: E402
+import quantdesk.payoff as q  # noqa: E402
 
 OBS = "EQ.SPOT.TEST"
 T = 1.0
