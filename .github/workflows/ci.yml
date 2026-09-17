@@ -147,14 +147,14 @@ jobs:
 
       # PLAN_REAPI.md §6 Fase 1: engine_typed es un paquete Python puro (no pasa por CMake),
       # así que solo necesita su dependencia (pydantic) instalada -- no un rebuild.
-      - name: Install engine_typed runtime dependency (pydantic)
+      - name: Install quantdesk runtime dependency (pydantic)
         run: pip install "pydantic>=2"
 
-      - name: Python engine_typed test (TradeSpec/IRSwap tipados)
-        run: python clients/python/tests/test_engine_typed_trade.py build/clients/python
+      - name: Python quantdesk test (TradeSpec/IRSwap tipados)
+        run: python clients/python/tests/test_quantdesk_trade.py build/clients/python
 
-      - name: Python engine_typed test (Model/Market/PricingContext/ExecutionContext tipados)
-        run: python clients/python/tests/test_engine_typed_context.py build/clients/python
+      - name: Python quantdesk test (Model/Market/PricingContext/ExecutionContext tipados)
+        run: python clients/python/tests/test_quantdesk_context.py build/clients/python
 
       # PLAN_REAPI.md §6 Fase 3: MeasureSpec en price.hpp -- tuplas (nombre, params) desde
       # Python, DV01(bump=...) con efecto real, price() resolviendo nombres directos del
@@ -162,8 +162,8 @@ jobs:
       - name: Python price test (MeasureSpec -- DV01 bump configurable, tuplas (nombre, params))
         run: python clients/python/tests/test_price_measure_spec.py build/clients/python
 
-      - name: Python engine_typed test (Measure tipadas -- PV/DV01/ExposureProfile/UnilateralCVA)
-        run: python clients/python/tests/test_engine_typed_measure.py build/clients/python
+      - name: Python quantdesk test (Measure tipadas -- PV/DV01/ExposureProfile/UnilateralCVA)
+        run: python clients/python/tests/test_quantdesk_measure.py build/clients/python
 
       # PLAN_REAPI.md §6 Fase 4: PV/DV01 descuentan por la curva de MarketSnapshot (ya no por
       # el modelo) -- sanity check sobre una curva multi-pillar NO plana.
@@ -172,8 +172,8 @@ jobs:
 
       # PLAN_PRODUCTS.md SS12 Fase 3 (adelanta engine_typed.payoff de Fase 10): AST tipado
       # (Pydantic discriminado) -> Engine.create_product("Payoff", {"spec": json}) real.
-      - name: Python engine_typed test (payoff.PayoffProduct -- AST tipado -> Engine.create_product)
-        run: python clients/python/tests/test_engine_typed_payoff.py build/clients/python
+      - name: Python quantdesk test (payoff.PayoffProduct -- AST tipado -> Engine.create_product)
+        run: python clients/python/tests/test_quantdesk_payoff.py build/clients/python
 
       # PLAN_PRODUCTS.md SS12 Fase 0 (ADR-P0-09): schema estatico + ejemplos, sin motor
       # compilado -- por eso no recibe build/clients/python como los tests de arriba.

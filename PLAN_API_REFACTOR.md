@@ -540,6 +540,80 @@ dinámica queda solo alcanzable importando `engine` a mano, salvo los casos ya d
 **Criterio de aceptación.** `python -m pip install .` produce una wheel con `quantdesk` (no
 `engine_typed`); CI verde con los nombres nuevos.
 
+**Estado verificado / decisiones tomadas (sesión de implementación de esta fase).**
+
+- `pyproject.toml` usa `scikit-build-core` (`[tool.scikit-build]`), no hatch/setuptools, así
+  que la sintaxis real coincidía con la asumida por el plan: `wheel.packages` es efectivamente
+  una lista de rutas (no una tabla hatch). Cambiado `wheel.packages = ["clients/python/src/
+  engine_typed"]` -> `wheel.packages = ["clients/python/src/quantdesk"]`, y reescrito el
+  comentario explicativo (líneas 28-32, sin desplazamiento -- mismo número de líneas de
+  comentario tras el cambio) para que cite
+  `quantdesk` como nombre actual y `engine_typed` solo como origen histórico ("renombrado desde
+  `engine_typed` en PLAN_API_REFACTOR.md Fase 0"). `[project].name` se deja intacto
+  (`"engine-quant"`, Fase 10 según el propio plan) -- no tocado.
+- `.github/workflows/ci.yml`: renombrados únicamente los `name:` de paso y las rutas `run:` que
+  referenciaban `engine_typed` -- 4 pasos: "Install engine_typed runtime dependency (pydantic)"
+  -> "Install quantdesk runtime dependency (pydantic)"; "Python engine_typed test
+  (TradeSpec/IRSwap tipados)" -> "Python quantdesk test (...)" con
+  `test_engine_typed_trade.py` -> `test_quantdesk_trade.py`; ídem para el par
+  context (`test_engine_typed_context.py` -> `test_quantdesk_context.py`), measure
+  (`test_engine_typed_measure.py` -> `test_quantdesk_measure.py`) y payoff
+  (`test_engine_typed_payoff.py` -> `test_quantdesk_payoff.py`). Cada `name:` y su `run:`
+  correspondiente quedaron consistentes entre sí (ninguno mezcla `quantdesk` con una ruta
+  `engine_typed` o viceversa). Nótese que `ci.yml` no invocaba en ningún paso
+  `test_engine_typed_model.py` ni `test_engine_typed_greeks.py` (esos dos ficheros existen en
+  `clients/python/tests/` pero no estaban -- y siguen sin estar -- cableados en el workflow); no
+  se ha añadido ningún paso nuevo para ellos, fuera de alcance de esta fase.
+  **Deliberadamente NO tocados** (alcance limitado a "nombres de paso y de fichero" según el
+  propio texto de la Fase 3, y siguiendo el mismo criterio editorial que la Fase 7 aplica a citas
+  históricas de otros PLAN_*.md): el comentario de la línea 148 ("PLAN_REAPI.md §6 Fase 1:
+  engine_typed es un paquete Python puro...") y el de la línea 173 ("PLAN_PRODUCTS.md SS12 Fase 3
+  (adelanta engine_typed.payoff de Fase 10)...") -- ambos citan el nombre que tenía el paquete en
+  el momento en que se escribió esa nota histórica de otro PLAN_*.md, no son "nombres de paso ni
+  rutas". `ci.yml` NO queda 100% libre de la cadena `engine_typed` tras esta fase (solo esos dos
+  comentarios prosa); eso es intencional y coherente con el criterio de aceptación de Fase 7
+  (`grep -rn engine_typed` limpio salvo PLAN_*.md históricos y sus citas cruzadas) -- si Fase 7 no
+  cubre explícitamente estos dos comentarios de `ci.yml` en su lista, quedaría un resto marginal
+  a decidir en esa fase (no bloquea el criterio de aceptación de esta Fase 3, que es sobre wheel
+  y sobre los pasos/rutas, no sobre comentarios).
+- Verificación de build/wheel (real, no simulada). El entorno de shell (Git Bash) no trae el
+  entorno MSVC activo por defecto; se usó el script ya presente `build/vcenv.sh` (`source
+  build/vcenv.sh`) más `export CMAKE_GENERATOR=Ninja` (sin esto CMake elegía el generador
+  "Visual Studio 17 2022" en vez de Ninja, con el que el `build/` existente había sido
+  configurado, y fallaba con "Does not match the generator used previously"). El árbol `build/`
+  raíz ya existía de una sesión previa (con `engine.cp312-win_amd64.pyd` ya compilado), así que
+  se reutilizó vía `-C build-dir=build` sobre `pip wheel . --no-deps -w <scratchpad>` (equivalente
+  incremental a `pip install .`, sin tocar nada del módulo nativo C++/Rust -- esta fase es
+  puramente de empaquetado Python). Primeros 3 intentos fallaron por corrupción/obsolescencia de
+  cachés `.ninja_deps`/`.ninja_log` en subbuilds `FetchContent` preexistentes y no relacionados
+  con este cambio (`build/_deps/corrosion-subbuild`, `build/_deps/simdjson-subbuild`,
+  `build/_deps/nanobind-subbuild`, cada uno con un `.ninja_deps.recompact` residual de una
+  recompactación interrumpida en una sesión anterior -- error `ninja: error: failed recompaction:
+  No such file or directory`); se resolvió borrando esos 3 ficheros `.ninja_deps.recompact`
+  sueltos (sin tocar ningún artefacto compilado, sin invalidar el `build/` raíz) y reintentando.
+  El 4º intento completó con éxito sin recompilar Rust/C++/nanobind desde cero (reutilizó los
+  artefactos ya presentes; solo la etapa de empaquetado Python puro se ejecutó de nuevo) y generó
+  `engine_quant-0.0.0-cp312-cp312-win_amd64.whl` (1 542 632 bytes). Inspección completa con
+  `python -m zipfile -l` del `.whl` resultante: contiene `engine.cp312-win_amd64.pyd` +
+  `quantdesk/{__init__,context,engine,greeks,market,measure,model,payoff,trade}.py` +
+  `engine_quant-0.0.0.dist-info/*` -- **cero** ocurrencias de `engine_typed` en el listado
+  completo del wheel. Instalación real de ese wheel en `S:\Projects\engine_quant\venv`
+  (`pip install --force-reinstall --no-deps`, sustituyendo la instalación previa obsoleta
+  `engine-quant 0.10.0` que aún traía el paquete `engine_typed` de antes de la Fase 0) y
+  verificación en caliente: `import quantdesk` funciona (`from quantdesk.engine import Engine,
+  PriceResult` también), `import engine` (extensión nativa) funciona, `import engine_typed`
+  lanza `ModuleNotFoundError` como se espera.
+- Validación de sintaxis YAML: `python -c "import yaml; yaml.safe_load(open('.github/workflows/
+  ci.yml'))"` -> `YAML OK`, sin excepciones.
+- **Advertencia explícita para el orquestador.** Tras esta fase, `.github/workflows/ci.yml`
+  referencia `clients/python/tests/test_quantdesk_{trade,context,measure,payoff}.py`, ficheros
+  que **todavía no existen** en el árbol -- los ficheros reales siguen llamándose
+  `test_engine_typed_{trade,context,measure,payoff}.py` (más `test_engine_typed_{model,greeks}.py`,
+  no referenciados por CI) hasta que corra la Fase 6, que es quien los renombra. Esto es la
+  secuencia que el propio plan ordena (Fase 3 antes que Fase 6) y es esperado -- pero significa
+  que un run real de CI disparado entre esta fase y la Fase 6 fallaría (los `run:` de esos 4
+  pasos apuntarían a rutas inexistentes). No se ha disparado ningún run de CI real en esta sesión.
+
 ### Fase 4 — Ejemplos (`clients/python/examples/`)
 
 `price_flow.py`, `price_flow_typed.py`, `price_batch_flow.py`, `greeks_flow.py`: reescribir cada

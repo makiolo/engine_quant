@@ -26,8 +26,9 @@ build.verbose = true
 cmake.build-type = "Release"
 cmake.define = { ENGINE_QUANT_BUILD_TESTS = "OFF", ENGINE_QUANT_BUILD_EXCEL = "OFF" }
 # El unico artefacto instalado por CMake es engine.pyd (nanobind, OUTPUT_NAME "engine") vía el
-# install(TARGETS engine_py_ext ...) de clients/python/CMakeLists.txt. `engine_typed`
-# (PLAN_REAPI.md §6 Fase 1) es un paquete Python puro aditivo -- no pasa por CMake, se
-# autocopia desde clients/python/src/engine_typed al layout de la wheel.
-wheel.packages = ["clients/python/src/engine_typed"]
+# install(TARGETS engine_py_ext ...) de clients/python/CMakeLists.txt. `quantdesk`
+# (PLAN_REAPI.md §6 Fase 1; renombrado desde `engine_typed` en PLAN_API_REFACTOR.md Fase 0) es
+# un paquete Python puro aditivo -- no pasa por CMake, se autocopia desde
+# clients/python/src/quantdesk al layout de la wheel.
+wheel.packages = ["clients/python/src/quantdesk"]
 wheel.install-dir = "."
