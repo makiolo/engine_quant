@@ -2916,3 +2916,124 @@ TEST(GreeksHvpTest, WorksGenericallyOverLikelihoodRatioHessianForGbmPayoff) {
     EXPECT_NEAR(hvp.components[0].value, expected_spot, 1e-9 * std::max(1.0, std::abs(expected_spot)));
     EXPECT_NEAR(hvp.components[1].value, expected_vol, 1e-9 * std::max(1.0, std::abs(expected_vol)));
 }
+
+// PLAN_IMPROVE_NOTEBOOK2.md Fase 0 (ADR-IN2-01): `try_pathwise`/`try_pathwise2`/`try_pathwise_cross`
+// (y `try_hessian_likelihood_ratio` via `compute_hessian`) nunca recibian `pricing.pricing_date()`
+// -- cualquier Greek pedida sobre GBM/"PayoffPriceQ" con `pricing_date() != 0` devolvia
+// SILENCIOSAMENTE el mismo valor que a `pricing_date=0` (se descubrio porque charm, una diferencia
+// finita de delta entre dos `pricing_date`, salia exactamente 0.0 en
+// `09_option_strategies_and_greeks.ipynb`). Decision tomada (opcion 2 de PLAN_IMPROVE_NOTEBOOK2.md
+// §2 Fase 0, ver el ADR en ese documento): rechazar la especializacion pathwise/likelihood-ratio
+// cuando `pricing_date() != 0` -- `method=Auto` cae al estencil generico de bump-and-reval (que SI
+// reconstruye el `MeasureResult` con `pricing_date` desplazado, via `metric->evaluate` ->
+// `PayoffPriceQMeasure::evaluate`), `method=Pathwise` explicito lanza un error claro en vez de
+// aproximar en silencio.
+TEST(GreeksImproveNotebook2Fase0Test, AutoDeltaOfPayoffPriceQFallsBackToBumpAndRevalAndMatchesBlackScholesUnderNonZeroPricingDate) {
+    Registries registries;
+    register_builtins(registries);
+    const pf::ObservableId spot{"EQ.SPOT.XYZ"};
+    const double s0 = 100.0, strike = 100.0, r = 0.05, q = 0.0, sigma = 0.2, maturity = 1.0;
+    const double bump = 1.0; // default_model_parameter_bump(100.0) = max(1e-2*100, 1e-4)
+
+    pf::PayoffProduct product("CALL", european_call(spot, strike, maturity));
+    engine::GbmModel model = make_gbm_q(s0, r, q, sigma, spot.value);
+
+    PricingContext pricing_at_zero = pricing_context(500'000, 7);
+    PricingContext pricing_shifted(
+        Params{{"pricing_date", 0.4}, {"n_paths", 500'000.0}, {"n_steps", 1.0}, {"seed", 7.0}}
+    );
+
+    engine::greeks::GreekResult at_zero = engine::greeks::compute_greek(
+        registries, payoff_price_q_request("spot"), model, product, flat_market(), pricing_at_zero, cpu_execution()
+    );
+    ASSERT_EQ(at_zero.method_used, GreekMethod::Pathwise) << "baseline: sigue resolviendo pathwise a pricing_date=0";
+
+    engine::greeks::GreekResult shifted = engine::greeks::compute_greek(
+        registries, payoff_price_q_request("spot"), model, product, flat_market(), pricing_shifted, cpu_execution()
+    );
+    EXPECT_EQ(shifted.method_used, GreekMethod::BumpAndReval)
+        << "pricing_date != 0 rechaza la especializacion pathwise -- method=Auto cae al estencil generico";
+    ASSERT_TRUE(shifted.bump_used.has_value());
+    EXPECT_DOUBLE_EQ(*shifted.bump_used, bump);
+
+    const double remaining_maturity = maturity - 0.4;
+    double analytic_delta_shifted =
+        (black_scholes_call(s0 + bump, strike, r, q, sigma, remaining_maturity) -
+         black_scholes_call(s0 - bump, strike, r, q, sigma, remaining_maturity)) /
+        (2.0 * bump);
+
+    EXPECT_NEAR(shifted.value, analytic_delta_shifted, 0.02)
+        << "Greek=" << shifted.value << " analytic=" << analytic_delta_shifted;
+    // El bug real que motiva esta fase: antes de la correccion, `shifted.value` habria salido
+    // identico (dentro del ruido MC) a `at_zero.value`, ignorando el desplazamiento por completo --
+    // aqui deberian diferir de forma economicamente significativa (remaining_maturity 0.6 vs 1.0).
+    EXPECT_GT(std::abs(shifted.value - at_zero.value), 0.02) << "shifted=" << shifted.value << " at_zero=" << at_zero.value;
+}
+
+TEST(GreeksImproveNotebook2Fase0Test, ExplicitPathwiseMethodRejectsANonZeroPricingDateWithAnExplicitError) {
+    Registries registries;
+    register_builtins(registries);
+    const pf::ObservableId spot{"EQ.SPOT.XYZ"};
+    pf::PayoffProduct product("CALL", european_call(spot, 100.0, 1.0));
+    engine::GbmModel model = make_gbm_q(100.0, 0.05, 0.0, 0.2, spot.value);
+
+    GreekRequest request = payoff_price_q_request("spot");
+    request.method = GreekMethod::Pathwise;
+
+    PricingContext pricing_shifted(
+        Params{{"pricing_date", 0.4}, {"n_paths", 200'000.0}, {"n_steps", 1.0}, {"seed", 7.0}}
+    );
+
+    try {
+        engine::greeks::compute_greek(registries, request, model, product, flat_market(), pricing_shifted, cpu_execution());
+        FAIL() << "se esperaba std::invalid_argument";
+    } catch (const std::invalid_argument& e) {
+        EXPECT_NE(std::string(e.what()).find("pricing_date"), std::string::npos) << e.what();
+    }
+}
+
+TEST(GreeksImproveNotebook2Fase0Test, AutoGammaFallsBackToTheGenericBumpAndRevalStencilUnderNonZeroPricingDate) {
+    Registries registries;
+    register_builtins(registries);
+    const pf::ObservableId spot{"EQ.SPOT.XYZ"};
+    const double s0 = 100.0, strike = 100.0, r = 0.05, q = 0.0, sigma = 0.2, maturity = 1.0;
+
+    pf::PayoffProduct product("CALL", european_call(spot, strike, maturity));
+    engine::GbmModel model = make_gbm_q(s0, r, q, sigma, spot.value);
+
+    GreekRequest request = payoff_price_q_request("spot");
+    request.order = GreekOrder{2, std::nullopt};
+
+    PricingContext pricing_shifted(
+        Params{{"pricing_date", 0.4}, {"n_paths", 500'000.0}, {"n_steps", 1.0}, {"seed", 7.0}}
+    );
+
+    engine::greeks::GreekResult shifted = engine::greeks::compute_greek(
+        registries, request, model, product, flat_market(), pricing_shifted, cpu_execution()
+    );
+
+    EXPECT_EQ(shifted.method_used, GreekMethod::BumpAndReval)
+        << "Gamma via likelihood ratio tambien se rechaza bajo pricing_date != 0 (mismo motivo que Delta)";
+    double analytic_gamma = black_scholes_gamma(s0, strike, r, q, sigma, maturity - 0.4);
+    EXPECT_NEAR(shifted.value, analytic_gamma, 0.02) << "Greek=" << shifted.value << " analytic=" << analytic_gamma;
+}
+
+TEST(GreeksImproveNotebook2Fase0Test, ComputeHessianSkipsWithAnExplicitPricingDateReasonInsteadOfAWrongLikelihoodRatioValue) {
+    Registries registries;
+    register_builtins(registries);
+    const pf::ObservableId spot{"EQ.SPOT.XYZ"};
+    pf::PayoffProduct product("CALL", european_call(spot, 100.0, 1.0));
+    engine::GbmModel model = make_gbm_q(100.0, 0.05, 0.0, 0.2, spot.value);
+
+    PricingContext pricing_shifted(
+        Params{{"pricing_date", 0.4}, {"n_paths", 200'000.0}, {"n_steps", 1.0}, {"seed", 7.0}}
+    );
+
+    engine::greeks::HessianReport report = engine::greeks::compute_hessian(
+        registries, "PayoffPriceQ", Params{}, model, product, flat_market(), pricing_shifted, cpu_execution()
+    );
+
+    EXPECT_TRUE(report.entries.empty());
+    ASSERT_EQ(report.skipped.size(), 1u);
+    EXPECT_NE(report.skipped.front().find("pricing_date"), std::string::npos) << report.skipped.front();
+}

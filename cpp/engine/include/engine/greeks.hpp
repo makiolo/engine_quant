@@ -66,6 +66,13 @@ struct GreekOrder {
 // Pathwise/AadReverse explícitamente sobre una combinación no verificada (o sobre `order=2`/
 // `cross_factor`, que ninguna especialización cubre todavía) lanza std::invalid_argument
 // nombrando la razón exacta -- nunca degrada en silencio.
+// PLAN_IMPROVE_NOTEBOOK2.md Fase 0 (ADR-IN2-01): las tres especializaciones pathwise/likelihood
+// ratio de GBM/GBM_P (`try_pathwise`/`try_pathwise2`/`try_pathwise_cross`, más
+// `try_hessian_likelihood_ratio` de `compute_hessian`) tampoco aplican si
+// `PricingContext::pricing_date() != 0` -- ninguna de esas rutas Rust recibe `pricing_date`, así
+// que honrarlo en silencio daría un resultado incorrecto (el bug real que motivó esta fase: charm,
+// una diferencia finita de delta entre dos `pricing_date`, salía exactamente 0.0). `Auto` cae a
+// BumpAndReval (que SÍ reconstruye el `PricingContext` desplazado); `Pathwise` explícito lanza.
 // `LikelihoodRatioHessian` (PLAN_BACKWARD.md §9 Fase 1: Hessiano local del motor de payoff via
 // likelihood ratio, sin AD -- ver `compute_hessian`/`try_hessian_likelihood_ratio` en greeks.cpp)
 // y `AadForwardOverForward` (PLAN_BACKWARD.md §5, Fase 2/3: Hessiano cerrado de Hull-White vía

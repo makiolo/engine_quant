@@ -38,8 +38,11 @@ métricas y visualizaciones financieras — cada uno explota una parte distinta 
    (buy/sell call/put, straddle, butterfly, condor, calendar spread, ratio spread, cada una
    larga y corta) bajo 6 escenarios de volatilidad: valor hoy vs payoff intrínseco, y las
    griegas delta/gamma/theta/vega más vanna/volga/charm (`Engine.all_greeks`/`Engine.hessian`,
-   más una diferencia finita entre dos `PricingContext` para charm porque el método pathwise de
-   `Greek` no usa `pricing_date`). Análisis escrito antes y después de cada bloque de gráficos.
+   más una diferencia finita entre dos `PricingContext` con `method="bump_and_reval"` explícito
+   para charm — por diseño, no como workaround: ninguna especialización pathwise/likelihood-ratio
+   cubre `RiskFactorKind::TimeShift`, y desde PLAN_IMPROVE_NOTEBOOK2.md Fase 0 el motor además
+   rechaza explícitamente la especialización pathwise de spot/vega/rho bajo `pricing_date != 0` en
+   vez de ignorarlo en silencio). Análisis escrito antes y después de cada bloque de gráficos.
 
 Varios notebooks documentan, en la celda donde aparece, un workaround motivado por una
 limitación concreta del motor (no del binding Python) — cada uno enlaza a la fase

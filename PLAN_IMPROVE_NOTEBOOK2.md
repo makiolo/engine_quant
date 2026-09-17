@@ -93,6 +93,163 @@ con `pricing_date > 0` y verifique que el resultado NO coincide con el mismo cal
 `pricing_date=0` (para un contrato/modelo donde de verdad deberian diferir) -- hoy ese test fallaria
 (ambos saldrian iguales). Documentado en `method_used`/error explicito segun la opcion elegida.
 
+**Estado verificado / decisiones tomadas (sesión de implementación de esta fase).** El enunciado se
+verificó leyendo el código real antes de tocar nada (instrucción 1 de ejecución) — con dos matices
+que cambian el alcance real del bug frente a como lo describe el enunciado:
+
+1. **El bug es más amplio que solo `try_pathwise` (línea ~527)**: exactamente el mismo patrón —
+   reenviar únicamente `pricing.n_paths()`/`pricing.seed()` a Rust, nunca `pricing.pricing_date()`
+   — aparece también en `try_pathwise2` (Gamma vía likelihood ratio, `payoff_sensitivity2_gbm[_p]`),
+   `try_pathwise_cross` (Vanna vía likelihood ratio, `payoff_sensitivity_cross_gbm[_p]`) y
+   `try_hessian_likelihood_ratio` (el Hessiano local de `Engine.hessian`,
+   `payoff_local_hessian_gbm[_p]`) — las cuatro funciones de `greeks.cpp` que delegan en una ruta
+   Rust de likelihood-ratio/pathwise para GBM. Las cuatro se corrigieron con el mismo criterio, no
+   solo `try_pathwise`.
+2. **El bug NO afecta por igual a GBM (Q) y GBM_P (P)**, al contrario de lo que sugiere el
+   enunciado ("Para GBM/GBM_P + `PayoffPriceQ`..."): se verificó que el *fallback* bump-and-reval
+   (`compute_greek`, estencil genérico que llama a `metric->evaluate(..., pricing, ...)`) SÍ
+   reconstruye correctamente el resultado bajo `pricing_date` desplazado para GBM+`"PayoffPriceQ"`,
+   porque `PayoffPriceQMeasure::evaluate` (`measure.cpp`) ya reenvía explícitamente
+   `pricing.pricing_date()` a `risk_neutral_price_gbm` (cableado desde PLAN_GREEKS.md §7.2/Fase 5,
+   el mismo mecanismo que ya usa Theta). Para GBM_P+`"PayoffForecastP"`, en cambio,
+   `PayoffForecastPMeasure::evaluate` **nunca** usa `pricing.pricing_date()` — ni el bump-and-reval
+   genérico corrige nada ahí, porque el propio `forecast_gbm_p` (Rust, `api_p.rs`) no tiene ningún
+   parámetro de `valuation_time` ni concepto de "hoy" desplazable (el módulo documenta
+   explícitamente que P nunca descuenta y reporta cashflows en su fecha de pago tal cual). Esto ya
+   estaba señalado, aunque de forma indirecta, por `metric_supports_time_shift()` en `greeks.cpp`
+   (excluye `"PayoffForecastP"` de Theta con el comentario "cualquier otra metrica lo ignora
+   todavia"). **Se deja fuera de alcance de esta fase**: arreglar `pricing_date` para GBM_P
+   requeriría rediseñar qué significa "hoy" bajo la medida física P (el propio doc-comment de
+   `api_p.rs` dice que P se reserva para forecast/stress, no para valorar en una fecha desplazada) —
+   un cambio de otro tamaño y de otro documento, no un bug de correción silenciosa aislado como el
+   de GBM/Q.
+
+**Decisión de diseño (ADR-IN2-01): Opción 2 — rechazar la especialización pathwise/likelihood-ratio
+cuando `pricing.pricing_date() != 0`, en vez de propagar `valuation_time` a Rust (Opción 1).**
+Justificación, con el código real ya verificado:
+
+- El fallback correcto **ya existe y ya es correcto** para la combinación donde el bug importa
+  (GBM+`"PayoffPriceQ"`): `PayoffPriceQMeasure::evaluate` ya reenvía `pricing.pricing_date()`, así
+  que rechazar la especialización pathwise bajo `method="auto"` cae, sin ningún código nuevo en
+  Rust/bridge cxx, en un cálculo YA verificado como correcto (el mismo estencil genérico de
+  bump-and-reval que ya pasa `GreeksFase1Test`/`GreeksFase6Test`). La Opción 1 habría duplicado esa
+  corrección en Rust (`sensitivity.rs`/`api.rs`, cuatro funciones: `payoff_sensitivity_pathwise_on`,
+  la de Gamma, la de Vanna, la del Hessiano local) para llegar exactamente al mismo resultado
+  numérico que el fallback ya da hoy.
+- La Opción 1 no habría cerrado el caso GBM_P de todas formas (punto 2 de arriba: el problema ahí
+  no es que pathwise ignore `pricing_date`, es que **ninguna** ruta lo soporta bajo la medida física
+  P) — el ahorro de "cerrar la limitación de raíz" que prometía la Opción 1 en el enunciado no
+  aplica a GBM_P sin un rediseño más grande, así que el argumento a favor de la Opción 1 pierde peso
+  frente a lo que realmente se ganaría.
+- Coste de la Opción 2: pathwise deja de aplicarse (más lento, más ruido Monte Carlo a igual
+  `n_paths`) para cualquier Greek pedida desde una fecha de valoración futura sobre GBM/Q — aceptado
+  explícitamente como el trade-off correcto dado que el criterio de máxima prioridad de esta fase es
+  "nunca un resultado incorrecto sin aviso", no rendimiento.
+
+**Trabajo realizado, por capa:**
+
+- **C++ únicamente — sin cambios en Rust ni en el bridge cxx** (consistente con la Opción 2):
+  `cpp/engine/src/greeks.cpp`:
+  - `try_pathwise`, `try_pathwise2`, `try_pathwise_cross`, `try_hessian_likelihood_ratio`: cada una
+    gana un `if (pricing.pricing_date() != 0.0) return std::nullopt;` (documentado inline con la
+    razón exacta y referencia a esta fase), colocado tras los chequeos estructurales existentes
+    (capacidad listada, `Exercise`/soporte LRM) para no cambiar el orden de los mensajes de error ya
+    verificados por tests previos.
+  - `pathwise_unsupported_reason`, `pathwise2_unsupported_reason`, `pathwise_cross_unsupported_reason`:
+    ganan un parámetro `const PricingContext& pricing` y una rama nueva que nombra explícitamente
+    `pricing_date` (valor incluido) cuando esa es la causa — así `method="pathwise"`/`"aad"`
+    explícito sobre un `pricing_date != 0` lanza `std::invalid_argument` con el motivo exacto en vez
+    de aproximar en silencio (satisface la segunda tarea de motor del enunciado).
+  - `compute_hessian`: cuando la especialización LRM no aplica y la causa es específicamente
+    `pricing_date != 0` sobre una combinación por lo demás cubierta (`hessian_capabilities()`), el
+    mensaje en `HessianReport::skipped` lo nombra explícitamente en vez de caer en el mensaje
+    genérico de "combinación no cubierta" — ya existía el campo `skipped` desde Fase 1 de
+    PLAN_BACKWARD.md, no hizo falta añadirlo.
+  - `cpp/engine/include/engine/greeks.hpp`: doc-comment de `GreekMethod` ampliado con la nueva
+    exclusión de `pricing_date != 0` para las cuatro especializaciones, mismo criterio editorial que
+    el resto del archivo.
+  - `GreekResult::method_used`/`MeasureResult` ya reflejaban correctamente el método real aplicado
+    sin cambios adicionales: al caer al fallback genérico, el código existente ya fija
+    `method_used = GreekMethod::BumpAndReval` (y `bump_used`) — la tarea "que `GreekResult` refleje
+    siempre el método real" ya estaba satisfecha por el propio mecanismo de fallback, no hizo falta
+    tocar `GreekResult`/`MeasureResult` en sí.
+- **Rust**: sin cambios (Opción 2 no los requiere). `cargo test -p engine-core --release` no se
+  ejecutó porque no se tocó ningún archivo de `rust/` — mismo criterio que las instrucciones de
+  ejecución piden ("solo si tocaste Rust").
+- **Tests nuevos** en `cpp/engine/tests/test_greeks.cpp` (suite `GreeksImproveNotebook2Fase0Test`,
+  4 tests): (1) `AutoDeltaOfPayoffPriceQFallsBackToBumpAndRevalAndMatchesBlackScholesUnderNonZeroPricingDate`
+  — verifica que a `pricing_date=0` la ruta sigue siendo `Pathwise` (baseline sin regresión), que a
+  `pricing_date=0.4` cae a `BumpAndReval`, que el valor coincide con Black-Scholes usando la
+  madurez remanente correcta (`T - pricing_date`), y que difiere de forma económicamente
+  significativa del valor a `pricing_date=0` (el criterio de aceptación exacto del enunciado); (2)
+  `ExplicitPathwiseMethodRejectsANonZeroPricingDateWithAnExplicitError` — `method="pathwise"`
+  explícito lanza `std::invalid_argument` mencionando `pricing_date`; (3)
+  `AutoGammaFallsBackToTheGenericBumpAndRevalStencilUnderNonZeroPricingDate` — mismo criterio que
+  (1) pero para Gamma (`try_pathwise2`); (4)
+  `ComputeHessianSkipsWithAnExplicitPricingDateReasonInsteadOfAWrongLikelihoodRatioValue` — verifica
+  que `Engine.hessian` no devuelve un Hessiano LRM incorrecto bajo `pricing_date != 0`, sino que cae
+  a `skipped` nombrando `pricing_date` explícitamente.
+- **Verificación en capas** (todas en verde antes de continuar a la siguiente, ninguna se saltó):
+  - C++: `cmd.exe /C "vcvars64.bat && cmake --build build --config Release"` compiló limpio
+    (incremental: solo recompilaron `greeks.cpp`, `test_greeks.cpp` y sus dependientes). `ctest
+    --test-dir build -C Release`: **480/480** (476 previos + 4 nuevos de esta fase), incluyendo los
+    4 tests nuevos ejecutados de forma aislada con `-R ImproveNotebook2Fase0` para confirmar que
+    corren y pasan (no solo que no rompen nada).
+  - Python: `pytest clients/python/tests`: **155 passed** + los mismos 2 errores preexistentes de
+    fixture `abi_dll_path` (no relacionados, no tocados) — sin cambios frente a la línea base, como
+    se esperaba (esta fase no tocó ningún binding Python; se copió el `.pyd`/`.py` recién
+    compilados al `venv` solo para que la verificación reflejara el binario nuevo, no como cambio
+    de producto).
+  - Notebook: `jupyter nbconvert --to notebook --execute --inplace
+    --ExecutePreprocessor.record_timing=False clients/python/notebooks/09_option_strategies_and_greeks.ipynb`
+    ejecutó de punta a punta sin errores (0 celdas con `output_type == "error"`); los valores
+    observados de charm/delta/etc. en las celdas de resumen no cambiaron frente a la versión previa
+    del notebook (el camino que el notebook ya usaba para charm, `method="bump_and_reval"`
+    explícito, no cambió de comportamiento con esta fase — solo cambió qué pasa bajo `method="auto"`,
+    que el notebook no usaba para charm).
+
+**Cambios de notebook (Opción 2 — "el notebook ya está bien tal cual").** Como predecía el propio
+enunciado para la Opción 2, no hizo falta cambiar ninguna llamada de
+`09_option_strategies_and_greeks.ipynb::compute_greeks_grid` — seguía siendo necesario pedir charm
+con `method="bump_and_reval"` explícito, no por el bug (ya cerrado) sino porque
+`RiskFactorKind::TimeShift` nunca estuvo cubierto por ninguna especialización pathwise/
+likelihood-ratio (razón estructural distinta, no relacionada con esta fase). Se reescribió el
+párrafo markdown ("**Detalle importante, no anticipado...**" → "**Nota (cerrado en
+PLAN_IMPROVE_NOTEBOOK2.md Fase 0)**") y el comentario de código inmediatamente anterior a las dos
+llamadas de charm, ambos para dejar explícito que `method="bump_and_reval"` es una elección de
+diseño confirmada, no un workaround pendiente de que el motor se arregle.
+`clients/python/notebooks/README.md` (entrada de `09`) actualizado con el mismo criterio.
+
+**Limitaciones/decisiones que las fases siguientes deben conocer:**
+
+- **Para la Fase 3** (informe de riesgo de una sola pasada, que también toca `try_pathwise`/
+  `compute_greek`): el orquestador especuló que la Opción 1 "cerraría la limitación de raíz" y
+  beneficiaría a la Fase 3 dejando que pathwise siguiera aplicando incluso con `pricing_date`
+  desplazado. Con la Opción 2 elegida, **pathwise NO aplica bajo `pricing_date != 0`** — cualquier
+  diseño de Fase 3 que quiera compartir una única pasada Monte Carlo para precio+Greeks debe asumir
+  que, si el informe de riesgo se pide con `pricing_date != 0` (p.ej. para un charm/theta futuro
+  integrado ahí), la ruta compartida tendrá que ser bump-and-reval (o LRM solo cuando
+  `pricing_date == 0`), no pathwise incondicionalmente. Esto es un dato de diseño, no un bloqueo.
+- **Para la Fase 2** (Hessiano con fallback bump-and-reval para contratos multi-fecha): esta fase
+  reutilizó el campo `HessianReport::skipped` ya existente (no lo creó) para nombrar la causa
+  `pricing_date != 0` de forma explícita cuando aplica. Fase 2 seguirá necesitando su propio
+  fallback bump-and-reval de segundo orden para el caso multi-fecha (sin relación con
+  `pricing_date`) — **no** existe todavía un fallback bump-and-reval de segundo orden genérico que
+  Fase 0 pudiera reutilizar para el caso `pricing_date != 0` del Hessiano LRM (por eso ese caso cae
+  a `skipped`, no a un número calculado); si Fase 2 construye ese fallback genérico, valdría la pena
+  revisar si también puede cubrir `pricing_date != 0` para el Hessiano, cerrando esa entrada de
+  `skipped` con un número real en vez de con una excusa.
+- **GBM_P (`PayoffForecastP`) sigue ignorando `pricing_date` bajo cualquier método**, no solo
+  pathwise — limitación preexistente y ya parcialmente documentada (`metric_supports_time_shift()`),
+  confirmada pero **no cerrada** por esta fase (ver el punto 2 de "Estado verificado" arriba). Si
+  algún notebook/fase futura necesita desplazar `pricing_date` bajo P, hace falta una fase propia
+  que decida qué significa "hoy" para GBM_P antes de tocar código.
+- Los mensajes de error nuevos (`pathwise_unsupported_reason` y compañía) verifican `pricing_date`
+  DESPUÉS de los chequeos estructurales existentes (capacidad, `Exercise`, soporte LRM) — si dos
+  condiciones fallan a la vez (p.ej. un contrato con `Exercise` Y `pricing_date != 0`), el mensaje
+  reportado es el estructural, no el de `pricing_date`. Se documenta como comportamiento esperado
+  (mismo orden que ya usaban las funciones `try_*` correspondientes), no un bug.
+
 ### Fase 1 — Evaluacion determinista de un contrato expuesta a Python (`Engine.evaluate_scenario`)
 
 **Problema.** `cpp/engine/include/engine/payoff/scenario_evaluator.hpp::ScenarioEvaluator` (y el
