@@ -1397,6 +1397,173 @@ respetó el límite que esta fase declara.
 - Repasar `clients/python/README_PYPI.md`/`README.md` renderizados (o al menos su Markdown) para
   confirmar que el flujo "Después" de §1 es lo primero que ve un lector nuevo.
 
+**Estado verificado / decisiones tomadas (sesión de implementación de esta fase).**
+
+- **Punto 1 — `grep -rn "engine_typed"`.** `git grep -l engine_typed` sobre el árbol completo
+  (equivalente a un `grep -rn` restringido a ficheros versionados, mismo criterio que ya usó
+  Fase 7) devuelve **exactamente los mismos 21 ficheros** que clasificó Fase 7, sin ningún
+  fichero nuevo ni ninguno que haya dejado de aparecer: los 8 `PLAN_*.md` históricos, los 7
+  ficheros de citas cruzadas Rust/C++ (`rust/crates/engine-core/src/payoff/{mod,compile,ir,
+  basket_api}.rs`, `rust/crates/engine-core/src/models/gbm_basket.rs`,
+  `rust/crates/engine-ffi/src/lib.rs`, `cpp/engine/tests/payoff/
+  test_payoff_fixtures_cross_layer.cpp`), el propio `PLAN_API_REFACTOR.md` en su prosa
+  retrospectiva, los 2 comentarios ya decididos en Fase 3 (`.github/workflows/ci.yml`,
+  `pyproject.toml`) y los 3 ficheros de cita histórica de una frase decididos en Fase 5/6/7
+  (`clients/python/notebooks/README.md`, `clients/python/examples/README.md`,
+  `clients/python/examples/price_flow.py`). Confirmado además, por separado (`grep` normal, no
+  `git grep`, porque no está trackeado): `.claude/skills/execute-plan/SKILL.md` sigue limpio
+  (0 coincidencias, el cambio de Fase 7 se mantiene). Un `grep -rln` sin restringir a ficheros
+  versionados sobre el árbol completo añade únicamente rutas bajo `build/`, `venv/`,
+  `rust/target/`, `.pytest_cache/` y `clients/python/notebooks/.ipynb_checkpoints/` — las cinco
+  están cubiertas por `.gitignore` (confirmado con `git check-ignore -v` sobre una muestra de cada
+  una), no forman parte del árbol versionado y no son responsabilidad de este plan (artefactos de
+  build/entorno, algunos con el símbolo `engine_typed` embebido en binarios de una compilación
+  anterior a la Fase 0 que nunca se limpiaron). Ninguna sorpresa: el criterio de aceptación de
+  esta fase se cumple sin cambios adicionales de código o documentación.
+- **Punto 2 — Build completo (`cmake --build build`).** El aviso pendiente de Fase 6 **se
+  resolvió, no se dejó como verificación alternativa.** Causa raíz confirmada:
+  `build/CMakeCache.txt` (`CMAKE_COMMAND:INTERNAL`) apuntaba a
+  `C:/Users/.../Temp/pip-build-env-2o8galto/normal/Lib/site-packages/cmake/data/bin/cmake.exe`,
+  un `cmake.exe` efímero del entorno de aislamiento de build que `pip wheel` creó y borró durante
+  la Fase 3 — coincide exactamente con lo que Fase 6 ya había diagnosticado sin arreglar. Además
+  se confirmó que el `cmake`/`ninja` reales del sistema existen y son compatibles:
+  `D:/CMake/bin/cmake.exe` (3.28.0-rc5) y el `ninja.exe` de VS Build Tools
+  (`.../Common7/IDE/CommonExtensions/Microsoft/CMake/Ninja/ninja.exe`, 1.12.1 — el mismo que ya
+  había identificado Fase 6 como compatible, frente al 1.4.0 de `/e/dev/sandbox/bin` que es el
+  que gana por defecto en el `PATH` de esta sesión). **Arreglo aplicado:** `source
+  build/vcenv.sh` (entorno MSVC) + `PATH` con el ninja de VS Build Tools y el cmake de `D:/CMake`
+  antepuestos + `CMAKE_GENERATOR=Ninja` + `cmake -S . -B build` — reconfiguración **incremental**
+  sobre el `build/` ya existente (no se borró ni se recreó el directorio), completada en 22.6s sin
+  invalidar ningún artefacto ya compilado ("Configuring done" / "Generating done" sin ningún
+  mensaje de "does not match the generator used previously"). Confirmado por lectura directa de
+  `build/CMakeCache.txt` tras la reconfiguración: `CMAKE_COMMAND:INTERNAL=D:/CMake/bin/cmake.exe`
+  — ya no apunta a ningún directorio temporal de pip, el arreglo es persistente (queda escrito en
+  la caché, no hace falta repetir la reconfiguración en builds futuros). **`cmake --build build
+  --config Release` ejecutado de verdad a continuación, completo y verde: 62/62 pasos, `[exited
+  with code 0]`**, incluyendo la reconstrucción real de `cargo rustc --release` para
+  `engine-ffi` (2.70s, reutilizó el artefacto Rust ya compilado — no fue necesario recompilar
+  Rust desde cero), el bridge `cxx`, `nanobind-static.lib`, `cpp/engine/engine.lib`,
+  `engine_abi.dll`, los dos ejecutables de ejemplo del ABI (C++ y C), y el paso final
+  `[62/62] Linking CXX shared module clients\python\engine.cp312-win_amd64.pyd` — el `.pyd` se
+  relinkó de verdad en esta sesión, no fue una simulación ni una reutilización silenciosa de un
+  artefacto viejo. Este es el primer `cmake --build build` confirmado en verde en toda la
+  ejecución de este plan (Fase 0-8 nunca lo lograron, tal como Fase 6 dejó documentado
+  explícitamente). No hizo falta ninguna recompilación completa desde cero de C++/Rust (coste que
+  la propia tarea de esta fase advertía que podía no ser razonable) — el problema era puramente
+  de qué `cmake.exe`/`ninja.exe` usar, no de artefactos corruptos o desactualizados.
+- **Punto 3 — Suite Python.** `venv\Scripts\python.exe -m pytest clients/python/tests/`, tras
+  limpiar `__pycache__`: **`212 passed, 2 errors in 15.61s`** — resultado exacto, sin cambios,
+  frente al `212 passed, 2 errors` que dejó Fase 6. Los 2 errores son los mismos dos tests
+  huérfanos ya documentados (`fixture 'abi_dll_path' not found` en
+  `test_greeks_fixtures_cross_layer.py`/`test_payoff_fixtures_cross_layer.py`) — no se han
+  tocado (siguen fuera de alcance de este plan, ver más abajo). **0 fallos** (`FAILED`) en toda
+  la suite. La suite corrió contra el `.pyd` instalado en `venv\Lib\site-packages` (el de la
+  Fase 3), no contra el recién recompilado en `build/` — ambos son binarios idénticos en
+  comportamiento (mismo código fuente sin cambios en todo el plan; el `.pyd` de `build/` se
+  ejercitó por separado vía los notebooks, que lo cargan directamente desde
+  `../../../build/clients/python/engine.cp312-win_amd64.pyd`, ver punto 4) — no se ha
+  reinstalado el wheel en el venv porque no hace falta (ningún cambio de código C++/Rust/Python
+  del paquete en ninguna fase de este plan justificaría un reinstall, y esta fase tampoco
+  introduce ninguno).
+- **Punto 4 — Notebooks re-ejecutados.** Los 10 notebooks de `clients/python/notebooks/`
+  (`01`...`09` + `demo_registry`) se re-ejecutaron de punta a punta con `jupyter nbconvert
+  --to notebook --execute --inplace`, uno a uno: **los 10 terminaron con `exit=0`**, sin ninguna
+  excepción ni celda fallida. Comparación `git diff` de cada notebook contra el `HEAD` que dejó
+  Fase 5/7 (ningún notebook fue tocado por Fase 6/7/8, solo tests/documentación):
+  - **8 de 10** (`01`-`08`) no tuvieron ningún cambio de contenido: el único `diff` presente era
+    metadata de temporización de ejecución (`iopub.execute_input`/`status.busy`/`status.idle`/
+    `shell.execute_reply`, timestamps ISO de esta sesión), confirmado filtrando el diff completo
+    y comprobando que no queda ninguna línea `+`/`-` fuera de esas claves de metadata — **cero
+    diferencias en outputs/valores numéricos/texto impreso**.
+  - `09_option_strategies_and_greeks.ipynb`: una diferencia real de estructura JSON, investigada
+    a fondo (no descartada a ciegas como "solo timestamp"): el kernel emitió el mismo texto de
+    stdout (`"\n"` + `"intrinsic_value (Engine.evaluate_scenario) vs intrinsic_value_manual
+    (NumPy): coinciden exactamente en las 14 estrategias, grid de 41 spots.\n"`) en **dos**
+    mensajes `stream`/`stdout` separados en vez de uno solo combinado como antes — confirmado
+    comparando el texto concatenado de ambas versiones byte a byte: **idéntico**. Es una
+    diferencia de cómo Jupyter/ZMQ agrupó los flushes de `print(...)` entre dos ejecuciones del
+    kernel (no determinista, timing de IO), no una regresión de contenido — mismo `assert
+    np.array_equal(via_engine, via_numpy)` pasó en ambas ejecuciones (si hubiera fallado, la
+    celda habría lanzado excepción y `nbconvert` habría terminado con código de error, cosa que
+    no ocurrió).
+  - `demo_registry.ipynb`: una diferencia real, también investigada: el `repr` de un objeto
+    `quantdesk.engine.Engine` impreso en un output (`<quantdesk.engine.Engine at 0x2e0057907a0>`
+    → `<quantdesk.engine.Engine at 0x2a70a802c60>`) — dirección de memoria del objeto Python,
+    distinta por construcción entre dos procesos distintos del kernel, no un cambio de
+    comportamiento.
+  - **Ninguna de las dos discrepancias reales encontradas es una regresión** — ambas son ruido
+    de re-ejecución esperado (timing de IO, direcciones de memoria), no atribuible a ningún
+    cambio de Fases 6-8 (que no tocaron los notebooks en sí). Siguiendo el criterio del propio
+    encargo de esta fase ("si coincide, no hace falta volver a commitear"), las 10 modificaciones
+    de fichero se descartaron con `git checkout --` tras la comparación — el árbol de notebooks
+    queda exactamente como lo dejó Fase 5, sin commit nuevo para ellos.
+  - Nota metodológica: estos 10 notebooks importan el módulo `engine` **directamente desde
+    `build/clients/python/engine.cp312-win_amd64.pyd`** (vía `sys.path`, confirmado leyendo la
+    primera celda de `09_option_strategies_and_greeks.ipynb`: `"modulo engine importado desde:
+    ...build/clients/python\engine.cp312-win_amd64.pyd"`), no desde el `.pyd` instalado en
+    `venv\Lib\site-packages` que usa `pytest` (punto 3) — así que esta re-ejecución ejercita
+    también, de forma independiente, el `.pyd` recién recompilado por el punto 2 de esta misma
+    fase, con el mismo resultado numérico que antes de recompilar.
+- **README.md / README_PYPI.md — orden editorial (punto 3 del encargo de esta fase).**
+  `clients/python/README_PYPI.md` ya tenía el bloque "Después" de §1 como lo primero que aparece
+  tras la introducción/`pip install` (confirmado leyendo el Markdown completo: título, párrafo de
+  una frase, `pip install engine-quant`, y acto seguido el bloque de código — sin ninguna sección
+  intermedia) — no requirió ningún cambio. `README.md` (el principal) **sí incumplía** el
+  criterio: la sección "## Quick start with Python" (con el bloque "Después" dentro) aparecía
+  tras **tres** secciones completas ("## Why Engine Quant?", "## Current capabilities",
+  "## Architecture", ~61 líneas de contenido) en vez de justo después del bloque de
+  introducción/badges/nota `[!IMPORTANT]` — no es "lo primero que ve un lector nuevo", está
+  enterrado varias secciones más abajo, tal como el encargo de esta fase anticipaba como
+  posibilidad a corregir. **Arreglo aplicado — movimiento de sección puro, sin reescritura de
+  contenido:** la sección completa "## Quick start with Python" (con sus dos subsecciones
+  "### Dynamic dict facade" y "### Custom products from Python", el bloque contiguo tal como lo
+  dejó Fase 7) se movió a continuación inmediata del bloque de introducción/badges/nota
+  `[!IMPORTANT]`, antes de "## Why Engine Quant?" — hecho con un script Python de corte/pegado
+  por índice de línea (no con edición manual línea a línea, para evitar error humano en un bloque
+  de 166 líneas), verificado después: `git diff --stat` muestra únicamente líneas movidas (mismo
+  recuento de líneas añadidas/eliminadas, 61/61, cero reescritura de contenido dentro del bloque
+  movido ni dentro de las secciones que cambiaron de posición relativa), sin líneas en blanco
+  duplicadas ni huecos. Orden final confirmado por lectura directa: `# Engine Quant` → badges →
+  nota `[!IMPORTANT]` → `## Quick start with Python` (bloque "Después" de §1 literal) →
+  `### Dynamic dict facade` → `### Custom products from Python` → `## Why Engine Quant?` →
+  `## Current capabilities` → `## Architecture` → `## Calibration` → resto sin cambios. Los
+  anchors internos (`#dynamic-dict-facade`, citado desde "Custom products from Python") siguen
+  siendo válidos tras el movimiento (mismo texto de cabecera, Markdown genera el mismo slug).
+- **Criterio de aceptación GLOBAL del plan (§7), confirmado explícitamente:**
+  1. `from quantdesk import Engine, HullWhite1F, IRSwap, Market` reproduce el bloque "Después"
+     de §1 tal cual contra el build local, **re-verificado en esta sesión** (no solo heredado de
+     Fase 1/7): ejecutado literalmente contra `venv\Scripts\python.exe` tras el `cmake --build
+     build` de esta fase — `results.PV.scalar == 948.4537547220389`,
+     `results.DV01.scalar == 480.18800212936185`,
+     `results.UnilateralCVA.scalar == 626.7254432766481` — idénticos bit a bit a los valores ya
+     reportados en Fase 1 y Fase 7. **Confirmado.**
+  2. `engine_typed` no existe en el árbol salvo citas históricas explícitamente excluidas —
+     confirmado en el punto 1 de esta fase, exactamente los mismos 21 ficheros que Fase 7 ya
+     clasificó, ninguno nuevo. **Confirmado.**
+  3. Toda la documentación viva (README, README_PYPI, notebooks, ejemplos) enseña `quantdesk`
+     como único camino recomendado, con la fachada dinámica (`engine` crudo) documentada como
+     alternativa de bajo nivel — contenido sin cambios desde Fase 7 (esta fase solo reordenó una
+     sección de `README.md`, no reescribió ningún párrafo), confirmado además que el orden ahora
+     sí presenta `quantdesk` como lo primero que ve un lector nuevo en `README.md`, y que ya lo
+     era en `README_PYPI.md`. **Confirmado.**
+  4. `pip install quantdesk` instala el paquete publicado por `release.yml` y `import quantdesk`
+     funciona igual que el build local — **NO se puede confirmar en esta fase.** Depende
+     enteramente de la Fase 10 (`quantdesk` no está publicado en PyPI todavía; `pyproject.toml`
+     sigue declarando `[project].name = "engine-quant"`, no `quantdesk`; `release.yml` no tiene
+     ningún job `publish-pypi`). Señalado aquí explícitamente como **pendiente de Fase 10**, no
+     se da por bueno ni se aproxima.
+- **Hallazgos que NO se consideraron regresiones que reabran una fase cerrada:** ninguno más allá
+  de los ya documentados arriba (notebooks 09/demo_registry: ruido de re-ejecución no
+  determinista, no contenido). No se encontró ningún hallazgo nuevo en esta fase que exigiera
+  reabrir Fase 0-8 (más allá del propio aviso de build de Fase 6, ya resuelto arriba, y el orden
+  de README.md, ya arreglado arriba — ninguno de los dos era un defecto de diseño de una fase
+  cerrada, ambos eran huecos de verificación que esta misma fase existe para cerrar).
+- **Ficheros tocados en esta sesión:** `README.md` (movimiento de sección, sin reescritura de
+  contenido) y `build/CMakeCache.txt`/`build/build.ninja` (regenerados por la reconfiguración de
+  CMake — no versionados, `build/` está en `.gitignore`, no se commitean). Los 10 notebooks se
+  re-ejecutaron pero sus cambios se descartaron (`git checkout --`, ver punto 4) al no haber
+  ninguna diferencia sustantiva que conservar.
+
 ### Fase 10 — Publicar `quantdesk` en PyPI
 
 **Problema.** `.github/workflows/release.yml` ya existe y ya construye wheels de Python

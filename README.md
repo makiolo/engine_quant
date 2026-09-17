@@ -19,67 +19,6 @@ single registry-driven domain model.
 > current scope is deliberately narrow: short-rate models, vanilla interest-rate swaps,
 > exposure profiles, and unilateral CVA.
 
-## Why Engine Quant?
-
-Quant engines often grow into separate implementations for notebooks, spreadsheets, and
-production services. Engine Quant keeps the business semantics in one place:
-
-- models, products, measures, and calibrators are registered centrally;
-- Python, Excel, C++, and the public C ABI consume the same C++ orchestration layer;
-- compute-intensive pricing and Monte Carlo kernels live in Rust;
-- related measures can be calculated together and share the same simulation.
-
-The result is one vocabulary and one calculation path across every client.
-
-## Current capabilities
-
-| Area | Implemented |
-| --- | --- |
-| Models | `HullWhite1F`; `HullWhite2F` / G2++ |
-| Products | Vanilla interest-rate swap (`IRSwap`); generic composable payoff (`Payoff`) — vanilla, barrier, Asian, take-profit/stop-loss, and American/Bermuda-exercise contracts, plus `IRSwap`/`FXForward` templates that compile to the same AST |
-| Measures | `PV`, `DV01`, `ExpectedExposure`, `PFE95`, `UnilateralCVA` (via `Engine.price(...)`) |
-| Payoff valuation | Deterministic ledger PV and bump-and-reval Greeks for any `Payoff`; Monte Carlo GBM under the risk-neutral measure Q (price, barrier hit probability, exposure profile, Longstaff-Schwartz American/Bermuda exercise) and under a physical measure P (forecast, hit probability, P&L distribution/expected shortfall) — implemented and tested end-to-end in C++/Rust, not yet reachable from `Engine.price(...)` or any client (see [Scope and known limitations](#scope-and-known-limitations)) |
-| Payoff authoring | `quantdesk.payoff` builders, versioned JSON schema (`engine.payoff/v1`) with fixtures, and cross-layer `validate`/`explain` (Python, Excel, C ABI) that agree on the same canonical hash |
-| Calibration | Registry-based calibrators for both short-rate models, using damped Gauss-Newton and AAD Jacobians |
-| Compute | Burn tensor backend; CPU by default; opt-in WGPU backend |
-| Clients | Python extension, Excel XLL, native C++ API, and versioned C ABI |
-| Distribution | Windows wheels, Excel add-in package, and all-in-one Inno Setup installer produced by the release workflow |
-
-`Engine.price(...)` accepts a batch of measure names. `ExpectedExposure` and `PFE95`, for
-example, reuse one exposure simulation rather than running Monte Carlo twice. `price_batch`/
-`price_many`/`price_grid` extend that batching across trades, and across models and markets.
-Within a batch, they also deduplicate `Payoff` trades that share the same canonical AST hash
-(same id, same contract byte-for-byte): the measure is evaluated once and the result is shared
-rather than recomputed per duplicate trade. The Rust payoff compiler performs
-common-subexpression elimination on the AST before evaluation, and the Monte Carlo GBM pricer
-is generic over the Burn CPU/GPU backend (opt-in `gpu` feature) — though today the
-C++/Python/Excel/C ABI surface only ever requests the CPU backend for it.
-
-## Architecture
-
-```text
-┌────────────────────┐  ┌────────────────────┐  ┌────────────────────┐
-│ Python / Jupyter   │  │ Excel XLL          │  │ C ABI consumers    │
-│ nanobind module    │  │ worksheet UDFs     │  │ C/Rust/Python/...  │
-└─────────┬──────────┘  └─────────┬──────────┘  └─────────┬──────────┘
-          └───────────────────────┼───────────────────────┘
-                                  ▼
-              ┌───────────────────────────────────────┐
-              │ C++17 domain and orchestration layer │
-              │ registries · contexts · batched price │
-              └───────────────────┬───────────────────┘
-                                  │ cxx bridge
-                                  ▼
-              ┌───────────────────────────────────────┐
-              │ Rust numerical core                   │
-              │ pricing · Monte Carlo · AAD · Burn   │
-              └───────────────────────────────────────┘
-```
-
-The public C ABI is intentionally separate from the internal Rust/C++ `cxx` bridge. It
-exposes flat, versioned types and opaque handles so other languages can consume the engine
-without depending on C++ classes or nanobind.
-
 ## Quick start with Python
 
 Building the Python extension from source requires Git, CMake 3.24+, Ninja, a C++17
@@ -246,6 +185,67 @@ cap, and residual Greeks) crosses the same Rust bridge but is exposed as a plain
 a measure — it needs a target *and* a universe of N instruments at once, which doesn't fit
 `IMeasure`'s single-product shape — and isn't yet exposed to Python/Excel/the C ABI. See
 [PLAN_PRODUCTS.md](PLAN_PRODUCTS.md) for the full design and phased roadmap of the payoff engine.
+
+## Why Engine Quant?
+
+Quant engines often grow into separate implementations for notebooks, spreadsheets, and
+production services. Engine Quant keeps the business semantics in one place:
+
+- models, products, measures, and calibrators are registered centrally;
+- Python, Excel, C++, and the public C ABI consume the same C++ orchestration layer;
+- compute-intensive pricing and Monte Carlo kernels live in Rust;
+- related measures can be calculated together and share the same simulation.
+
+The result is one vocabulary and one calculation path across every client.
+
+## Current capabilities
+
+| Area | Implemented |
+| --- | --- |
+| Models | `HullWhite1F`; `HullWhite2F` / G2++ |
+| Products | Vanilla interest-rate swap (`IRSwap`); generic composable payoff (`Payoff`) — vanilla, barrier, Asian, take-profit/stop-loss, and American/Bermuda-exercise contracts, plus `IRSwap`/`FXForward` templates that compile to the same AST |
+| Measures | `PV`, `DV01`, `ExpectedExposure`, `PFE95`, `UnilateralCVA` (via `Engine.price(...)`) |
+| Payoff valuation | Deterministic ledger PV and bump-and-reval Greeks for any `Payoff`; Monte Carlo GBM under the risk-neutral measure Q (price, barrier hit probability, exposure profile, Longstaff-Schwartz American/Bermuda exercise) and under a physical measure P (forecast, hit probability, P&L distribution/expected shortfall) — implemented and tested end-to-end in C++/Rust, not yet reachable from `Engine.price(...)` or any client (see [Scope and known limitations](#scope-and-known-limitations)) |
+| Payoff authoring | `quantdesk.payoff` builders, versioned JSON schema (`engine.payoff/v1`) with fixtures, and cross-layer `validate`/`explain` (Python, Excel, C ABI) that agree on the same canonical hash |
+| Calibration | Registry-based calibrators for both short-rate models, using damped Gauss-Newton and AAD Jacobians |
+| Compute | Burn tensor backend; CPU by default; opt-in WGPU backend |
+| Clients | Python extension, Excel XLL, native C++ API, and versioned C ABI |
+| Distribution | Windows wheels, Excel add-in package, and all-in-one Inno Setup installer produced by the release workflow |
+
+`Engine.price(...)` accepts a batch of measure names. `ExpectedExposure` and `PFE95`, for
+example, reuse one exposure simulation rather than running Monte Carlo twice. `price_batch`/
+`price_many`/`price_grid` extend that batching across trades, and across models and markets.
+Within a batch, they also deduplicate `Payoff` trades that share the same canonical AST hash
+(same id, same contract byte-for-byte): the measure is evaluated once and the result is shared
+rather than recomputed per duplicate trade. The Rust payoff compiler performs
+common-subexpression elimination on the AST before evaluation, and the Monte Carlo GBM pricer
+is generic over the Burn CPU/GPU backend (opt-in `gpu` feature) — though today the
+C++/Python/Excel/C ABI surface only ever requests the CPU backend for it.
+
+## Architecture
+
+```text
+┌────────────────────┐  ┌────────────────────┐  ┌────────────────────┐
+│ Python / Jupyter   │  │ Excel XLL          │  │ C ABI consumers    │
+│ nanobind module    │  │ worksheet UDFs     │  │ C/Rust/Python/...  │
+└─────────┬──────────┘  └─────────┬──────────┘  └─────────┬──────────┘
+          └───────────────────────┼───────────────────────┘
+                                  ▼
+              ┌───────────────────────────────────────┐
+              │ C++17 domain and orchestration layer │
+              │ registries · contexts · batched price │
+              └───────────────────┬───────────────────┘
+                                  │ cxx bridge
+                                  ▼
+              ┌───────────────────────────────────────┐
+              │ Rust numerical core                   │
+              │ pricing · Monte Carlo · AAD · Burn   │
+              └───────────────────────────────────────┘
+```
+
+The public C ABI is intentionally separate from the internal Rust/C++ `cxx` bridge. It
+exposes flat, versioned types and opaque handles so other languages can consume the engine
+without depending on C++ classes or nanobind.
 
 ## Calibration
 
