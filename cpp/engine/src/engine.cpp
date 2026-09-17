@@ -374,4 +374,40 @@ std::vector<double> unilateral_cva_from_exposure_2f_batch(
     return std::vector<double>(result.begin(), result.end());
 }
 
+PathMatrix simulate_paths_gbm_q(
+    const std::string& backend,
+    double s0, double r, double q, double sigma, double maturity,
+    std::uint64_t n_steps, std::uint64_t n_paths, std::uint64_t seed
+) {
+    try {
+        ffi::PathMatrixResult result = ffi::simulate_paths_gbm_q(backend, s0, r, q, sigma, maturity, n_steps, n_paths, seed);
+        return PathMatrix{
+            std::vector<double>(result.times.begin(), result.times.end()),
+            std::vector<double>(result.paths_flat.begin(), result.paths_flat.end()),
+            result.n_paths,
+            result.n_steps
+        };
+    } catch (const std::exception& e) {
+        throw std::invalid_argument(std::string("simulate_paths_gbm_q: ") + e.what());
+    }
+}
+
+PathMatrix simulate_paths_gbm_p(
+    const std::string& backend,
+    double s0, double mu, double sigma, double maturity,
+    std::uint64_t n_steps, std::uint64_t n_paths, std::uint64_t seed
+) {
+    try {
+        ffi::PathMatrixResult result = ffi::simulate_paths_gbm_p(backend, s0, mu, sigma, maturity, n_steps, n_paths, seed);
+        return PathMatrix{
+            std::vector<double>(result.times.begin(), result.times.end()),
+            std::vector<double>(result.paths_flat.begin(), result.paths_flat.end()),
+            result.n_paths,
+            result.n_steps
+        };
+    } catch (const std::exception& e) {
+        throw std::invalid_argument(std::string("simulate_paths_gbm_p: ") + e.what());
+    }
+}
+
 } // namespace engine

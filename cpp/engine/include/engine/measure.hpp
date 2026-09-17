@@ -256,6 +256,49 @@ private:
     std::vector<double> exposure_times_;
 };
 
+// CVA unilateral (PLAN_IMPROVE_NOTEBOOK.md Fase 5) de un `PayoffProduct` bajo `GbmModel`:
+// reutiliza `PayoffExposureProfileQMeasure` internamente para el perfil EE (misma composición
+// que `UnilateralCvaMeasure` con `ExposureProfileMeasure` arriba, mismo parámetro obligatorio
+// `exposure_times`, `Params{{"exposure_times", std::vector<double>{...}}}`) y aplica la MISMA
+// fórmula de integración de supervivencia hazard-rate-constante/recovery-rate-constante --
+// `(1-R) * Σ EE_i · ΔPD_i · DF_i` -- que ya implementa `UnilateralCvaMeasure` para IRS.
+//
+// Deliberadamente NO llama a la función libre `compute_cva_from_exposure` de arriba: esa
+// función descuenta con la dinámica ANALÍTICA propia de HullWhite1F/2F
+// (`model.zero_coupon_bond(a,b,sigma,r0,t)`, vía el bridge Rust `unilateral_cva_from_exposure`)
+// -- no existe (ni tiene sentido pedir) un equivalente de esa dinámica para `GbmModel`. En su
+// lugar el descuento sale de `MarketSnapshot::discount_factor` (la curva OBSERVADA) -- mismo
+// criterio que `PresentValueMeasure`/`Dv01Measure` ya usan para cualquier `PayoffProduct`
+// (PLAN_REAPI.md §6 Fase 4): un `PayoffProduct` nunca descuenta con la dinámica propia de un
+// modelo, GBM incluido, solo con la curva de mercado. La agregación en sí (`compute_cva_from_
+// exposure_market`, measure.cpp) SÍ es una segunda implementación de la misma fórmula
+// matemática que `unilateral_cva_with_discount` (Rust) -- deliberada y documentada, no un
+// descuido: no hay Rust bridge genérico (independiente de HullWhite) que exponer aquí sin
+// ampliar el alcance de esta fase a `rust/crates/engine-core` (fuera de los archivos tocados
+// por PLAN_IMPROVE_NOTEBOOK.md Fase 5).
+//
+// `hazard_rate`/`recovery_rate` se leen de `market` (`market.hazard_rate()`/
+// `market.recovery_rate()`), NO de un `Params` propio de esta medida -- mismo origen que ya usa
+// `UnilateralCvaMeasure` (PLAN.md §7.15: son datos de crédito observables desde fuera del
+// contrato, no parámetros de la medida ni del producto). Quien quiera explorar una curva de
+// hazard rate (como hace hoy `06_exposure_cva_portfolio.ipynb` con un grid en Python) construye
+// un `MarketSnapshot` distinto por punto del grid, igual que ya hace para el IRS con
+// `UnilateralCVA`.
+class PayoffUnilateralCvaQMeasure : public IMeasure {
+public:
+    explicit PayoffUnilateralCvaQMeasure(const Params& params) : exposure_times_(get_vector(params, "exposure_times")) {}
+
+    std::string type_name() const override { return "PayoffUnilateralCvaQ"; }
+
+    MeasureResult evaluate(
+        const IModel& model, const IProduct& product, const MarketSnapshot& market,
+        const PricingContext& pricing, const ExecutionContext& execution
+    ) const override;
+
+private:
+    std::vector<double> exposure_times_;
+};
+
 // "Forecast" bajo P de un `PayoffProduct` (PLAN_PRODUCTS.md §12 Fase 7): NUNCA descontado --
 // `model` debe ser `GbmPModel` (un `GbmModel` de Fase 5 se rechaza, "el motor rechaza
 // combinaciones Q/P inválidas", ver el preflight de `forecast_gbm_p`).

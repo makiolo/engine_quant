@@ -291,4 +291,58 @@ std::vector<double> unilateral_cva_from_exposure_2f_batch(
     double hazard_rate, double recovery_rate
 );
 
+// --- Diagnostico de trayectorias Monte Carlo (PLAN_IMPROVE_NOTEBOOK.md Fase 0) --------------
+//
+// `simulate_paths_gbm_q`/`simulate_paths_gbm_p` NO son una `IMeasure` (nunca pasan por
+// `Registry<IMeasure>`, no se llaman desde `engine::price`) -- son una herramienta de
+// diagnostico/notebook que expone la matriz completa de trayectorias que
+// `engine_core::models::gbm::Gbm`/`GbmP::simulate_at_times` ya calculan por dentro para las
+// medidas `Payoff*Q`/`Payoff*P`, en vez de solo el agregado final que esas medidas consumen.
+// Deliberadamente fuera de alcance de Excel/C ABI en esta fase (mismo criterio que
+// PLAN_GREEKS.md §15 deja fuera el AAD reverse-mode de Excel): el dispatch por tipo de modelo
+// (GBM/GBM_P) vive en `Engine::simulate_paths` (Python, `clients/python/src/engine_py_ext.cpp`),
+// NO aqui -- estas dos funciones libres toman los parametros ya extraidos del modelo, mismo
+// patron que el resto de este fichero (p.ej. `irs_hull_white_exposure_profile` toma
+// `a`/`b`/`sigma`/`r0`, no un `HullWhite1FModel`).
+//
+// Tope duro (documentado tambien en `engine_core::api::SIMULATE_PATHS_MAX_PATHS`/
+// `SIMULATE_PATHS_MAX_STEPS`, rust/crates/engine-core/src/api.rs -- la validacion REAL ocurre
+// alli, antes de simular una sola ruta; estas constantes son la misma cifra repetida aqui solo
+// para que quien lea engine.hpp no tenga que saltar a Rust para conocer el limite):
+// 50 000 paths x 500 pasos (~200 MB para la matriz aplanada) -- generoso para un notebook
+// interactivo, acotado para no agotar memoria de un proceso normal si alguien pide una malla
+// desproporcionada sin darse cuenta.
+inline constexpr std::uint64_t kSimulatePathsMaxPaths = 50'000;
+inline constexpr std::uint64_t kSimulatePathsMaxSteps = 500;
+
+// Matriz cruda de trayectorias simuladas: `times.size() == n_steps + 1` (incluye `t=0`, `S0`
+// repetido sin simular) x `n_paths` rutas. **Orden de aplanado: ROW-MAJOR POR PATH** --
+// `paths_flat[path * (n_steps + 1) + step]` es el valor de la ruta `path` en `times[step]` --
+// MISMA convencion que `ffi::PathMatrixResult` (Rust, `engine-ffi/src/lib.rs`) y que el
+// docstring de `Engine.simulate_paths` (Python): ninguna capa reordena.
+struct PathMatrix {
+    std::vector<double> times;
+    std::vector<double> paths_flat;
+    std::uint64_t n_paths = 0;
+    std::uint64_t n_steps = 0;
+};
+
+// Trayectorias crudas de GBM bajo Q en una malla uniforme [0, maturity] de n_steps intervalos
+// (times = [0, dt, 2*dt, ..., maturity], dt = maturity/n_steps) -- lanza std::invalid_argument
+// si n_paths/n_steps es 0, si excede el tope duro de arriba, o si maturity no es finito y > 0
+// (preflight, ANTES de simular una sola ruta, ver engine_core::api::simulate_paths_gbm_q).
+PathMatrix simulate_paths_gbm_q(
+    const std::string& backend,
+    double s0, double r, double q, double sigma, double maturity,
+    std::uint64_t n_steps, std::uint64_t n_paths, std::uint64_t seed
+);
+
+// Equivalente bajo P (drift fisico `mu`, sin `r`/`q`) de simulate_paths_gbm_q -- ver
+// engine_core::api::simulate_paths_gbm_p.
+PathMatrix simulate_paths_gbm_p(
+    const std::string& backend,
+    double s0, double mu, double sigma, double maturity,
+    std::uint64_t n_steps, std::uint64_t n_paths, std::uint64_t seed
+);
+
 } // namespace engine

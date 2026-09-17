@@ -1,7 +1,9 @@
 #pragma once
 
+#include <cstddef>
 #include <optional>
 #include <string>
+#include <vector>
 
 #include "engine/params.hpp"
 #include "engine/payoff/model_capabilities.hpp"
@@ -142,6 +144,50 @@ private:
     double mu_;
     double sigma_;
     payoff::ObservableId observable_;
+};
+
+// Movimiento geometrico browniano MULTI-ACTIVO correlacionado bajo Q (PLAN_IMPROVE_NOTEBOOK.md
+// Fase 3, §2 "Modelo multi-activo correlacionado"): generaliza GbmModel (un unico observable) a
+// N observables que comparten el mismo browniano bajo una matriz de correlacion instantanea
+// constante -- primer modelo del motor para baskets/spreads/worst-of/best-of/quanto (Fase 3,
+// friccion 3 de PLAN_IMPROVE_NOTEBOOK.md §1). Clase SEPARADA de GbmModel (no una generalizacion
+// in-place): GbmModel::observable()/s0()/r()/q()/sigma() son escalares y ya los consume
+// risk_neutral_price_gbm/greeks/hedge/etc. para N=1 -- cambiar esa forma rompe ese contrato.
+// `PayoffPriceQMeasure` (measure.cpp) dispatch-ea a esta clase O a GbmModel segun cual acepte el
+// dynamic_cast (Fase 3 §2 punto 3 de PLAN_IMPROVE_NOTEBOOK.md: misma medida "PayoffPriceQ" para
+// ambos, no una medida separada).
+//
+// Params requeridos (PLAN_IMPROVE_NOTEBOOK.md Fase 3 §2 punto 4, decision de diseno tomada:
+// Opcion A -- un unico string delimitado, ParamValue NO gana un variante vector<string>):
+// - "observables": string con los ObservableId separados por comas, p.ej.
+//   "EQ.SPOT.A,EQ.SPOT.B,EQ.SPOT.C" (uno por activo, define n_assets = numero de elementos).
+// - "s0"/"r"/"q"/"sigma": vector<double>, uno por activo, MISMO ORDEN que "observables".
+// - "correlation": vector<double> aplanado FILA A FILA, tamano n_assets*n_assets
+//   (correlation[i*n_assets+j] es la correlacion entre el activo i y el activo j).
+class GbmBasketModel : public IModel {
+public:
+    explicit GbmBasketModel(const Params& params);
+
+    std::string type_name() const override { return "GbmBasket"; }
+    std::optional<payoff::ModelCapabilities> capabilities() const override;
+    Params to_params() const override;
+
+    std::size_t n_assets() const { return observables_.size(); }
+    const std::vector<payoff::ObservableId>& observables() const { return observables_; }
+    const std::vector<double>& s0() const { return s0_; }
+    const std::vector<double>& r() const { return r_; }
+    const std::vector<double>& q() const { return q_; }
+    const std::vector<double>& sigma() const { return sigma_; }
+    // Aplanada fila a fila, n_assets*n_assets -- ver el doc-comment de la clase.
+    const std::vector<double>& correlation() const { return correlation_; }
+
+private:
+    std::vector<payoff::ObservableId> observables_;
+    std::vector<double> s0_;
+    std::vector<double> r_;
+    std::vector<double> q_;
+    std::vector<double> sigma_;
+    std::vector<double> correlation_;
 };
 
 } // namespace engine

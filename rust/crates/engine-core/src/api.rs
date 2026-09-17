@@ -1073,6 +1073,205 @@ pub fn calibrate_hull_white_2f(
     crate::calibration::calibrate_hull_white_2f(&curve, initial_a, initial_b, sigma, eta, rho, r0)
 }
 
+// --- Diagnóstico de trayectorias Monte Carlo (PLAN_IMPROVE_NOTEBOOK.md Fase 0) --------------
+//
+// `Engine.simulate_paths` (Python) es una herramienta de notebook/diagnóstico, NO una medida de
+// producción (nunca pasa por `Registry<IMeasure>`, ver el doc-comment de `engine::PathMatrix` en
+// `cpp/engine/include/engine/engine.hpp`) -- expone la matriz completa de trayectorias que
+// `Gbm::simulate_at_times`/`GbmP::simulate_at_times` ya calculan por dentro para las medidas
+// `Payoff*Q`/`Payoff*P`, en vez de solo el agregado final que consumen esas medidas.
+
+/// Tope duro de `n_paths`/`n_steps` para `simulate_paths_gbm_q`/`simulate_paths_gbm_p`
+/// (PLAN_IMPROVE_NOTEBOOK.md Fase 0, línea 56-57: "no reventar memoria si alguien lo llama desde
+/// Excel/C ABI sin darse cuenta" -- aunque esta fase NO expone estas dos funciones a Excel/C ABI,
+/// el límite vive aquí, en el core Rust, para proteger a CUALQUIER llamante presente o futuro,
+/// no solo al binding Python de hoy). `SIMULATE_PATHS_MAX_PATHS * (SIMULATE_PATHS_MAX_STEPS + 1)
+/// * 8 bytes` = 50_000 * 501 * 8 ≈ 200 MB para la matriz aplanada -- generoso para explorar un
+/// fan chart interactivo en un notebook, acotado para no agotar memoria de un proceso normal.
+pub const SIMULATE_PATHS_MAX_PATHS: u64 = 50_000;
+pub const SIMULATE_PATHS_MAX_STEPS: u64 = 500;
+
+fn check_simulate_paths_limits(n_paths: u64, n_steps: u64, maturity: f64) -> Result<(), String> {
+    if n_paths == 0 {
+        return Err("simulate_paths: n_paths debe ser > 0".to_string());
+    }
+    if n_steps == 0 {
+        return Err("simulate_paths: n_steps debe ser > 0".to_string());
+    }
+    if !maturity.is_finite() || maturity <= 0.0 {
+        return Err(format!("simulate_paths: maturity ({maturity}) debe ser finito y > 0"));
+    }
+    if n_paths > SIMULATE_PATHS_MAX_PATHS || n_steps > SIMULATE_PATHS_MAX_STEPS {
+        return Err(format!(
+            "simulate_paths: n_paths ({n_paths}) x n_steps ({n_steps}) excede el tope duro de \
+             diagnostico ({SIMULATE_PATHS_MAX_PATHS} x {SIMULATE_PATHS_MAX_STEPS}, \
+             PLAN_IMPROVE_NOTEBOOK.md Fase 0) -- reduce n_paths/n_steps, esta funcion es una \
+             herramienta de inspeccion de trayectorias para notebooks, no un pricer de produccion"
+        ));
+    }
+    Ok(())
+}
+
+/// Matriz cruda de trayectorias simuladas, `times.len() == n_steps + 1` (incluye `t=0`, `S0`
+/// repetido sin simular) x `n_paths` rutas. **Orden de aplanado: ROW-MAJOR POR PATH** --
+/// `paths_flat[path * (n_steps + 1) + step]` es el valor de la ruta `path` en `times[step]` --
+/// mismo criterio documentado en el struct `ffi::PathMatrixResult` (`engine-ffi/src/lib.rs`) y en
+/// `engine::PathMatrix` (C++) y en el docstring de `Engine.simulate_paths` (Python): ninguna capa
+/// reordena, todas asumen esta misma convención.
+#[derive(Debug, Clone)]
+pub struct PathMatrix {
+    pub times: Vec<f64>,
+    pub paths_flat: Vec<f64>,
+    pub n_paths: u64,
+    pub n_steps: u64,
+}
+
+/// Trayectorias crudas de `Gbm` (medida Q) en una malla uniforme `[0, maturity]` de `n_steps`
+/// intervalos (PLAN_IMPROVE_NOTEBOOK.md Fase 0): `times = [0, dt, 2*dt, ..., maturity]` con
+/// `dt = maturity / n_steps`. `t=0` se antepone a mano (`S0` conocido, no simulado) porque
+/// `Gbm::simulate_at_times` exige `times[0] > 0`; el resto de la malla (`dt..=maturity`) se pasa
+/// tal cual a esa función -- la MISMA discretización lognormal exacta que usan
+/// `payoff::api::simulate_gbm_columns`/las medidas `Payoff*Q`, no una reimplementación paralela.
+#[allow(clippy::too_many_arguments)]
+pub fn simulate_paths_gbm_q(
+    backend: &str,
+    s0: f64,
+    r: f64,
+    q: f64,
+    sigma: f64,
+    maturity: f64,
+    n_steps: u64,
+    n_paths: u64,
+    seed: u64,
+) -> Result<PathMatrix, String> {
+    check_simulate_paths_limits(n_paths, n_steps, maturity)?;
+    Ok(match resolve_backend(backend) {
+        ComputeBackend::Cpu => {
+            let device = burn::tensor::Device::<CpuBackend>::default();
+            simulate_paths_gbm_q_on::<CpuBackend>(&device, s0, r, q, sigma, maturity, n_steps, n_paths, seed)
+        }
+        ComputeBackend::Gpu => {
+            #[cfg(feature = "gpu")]
+            {
+                let device = burn::tensor::Device::<crate::backend::GpuBackend>::default();
+                simulate_paths_gbm_q_on::<crate::backend::GpuBackend>(
+                    &device, s0, r, q, sigma, maturity, n_steps, n_paths, seed,
+                )
+            }
+            #[cfg(not(feature = "gpu"))]
+            {
+                let device = burn::tensor::Device::<CpuBackend>::default();
+                simulate_paths_gbm_q_on::<CpuBackend>(&device, s0, r, q, sigma, maturity, n_steps, n_paths, seed)
+            }
+        }
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn simulate_paths_gbm_q_on<B: Backend<FloatElem = f64>>(
+    device: &burn::tensor::Device<B>,
+    s0: f64,
+    r: f64,
+    q: f64,
+    sigma: f64,
+    maturity: f64,
+    n_steps: u64,
+    n_paths: u64,
+    seed: u64,
+) -> PathMatrix {
+    B::seed(device, seed);
+    let dt = maturity / n_steps as f64;
+    let times: Vec<f64> = (1..=n_steps).map(|i| i as f64 * dt).collect();
+    let model = crate::models::gbm::Gbm::<B>::new(scalar(s0, device), scalar(r, device), scalar(q, device), scalar(sigma, device));
+    let simulated = model.simulate_at_times(&times, n_paths as usize, device);
+    flatten_paths(s0, &times, simulated, n_paths, n_steps)
+}
+
+/// Trayectorias crudas de `GbmP` (medida física P, drift `mu`) -- equivalente de
+/// `simulate_paths_gbm_q` bajo P, ver su doc-comment para la construcción de la malla y el
+/// porqué de anteponer `t=0` a mano.
+#[allow(clippy::too_many_arguments)]
+pub fn simulate_paths_gbm_p(
+    backend: &str,
+    s0: f64,
+    mu: f64,
+    sigma: f64,
+    maturity: f64,
+    n_steps: u64,
+    n_paths: u64,
+    seed: u64,
+) -> Result<PathMatrix, String> {
+    check_simulate_paths_limits(n_paths, n_steps, maturity)?;
+    Ok(match resolve_backend(backend) {
+        ComputeBackend::Cpu => {
+            let device = burn::tensor::Device::<CpuBackend>::default();
+            simulate_paths_gbm_p_on::<CpuBackend>(&device, s0, mu, sigma, maturity, n_steps, n_paths, seed)
+        }
+        ComputeBackend::Gpu => {
+            #[cfg(feature = "gpu")]
+            {
+                let device = burn::tensor::Device::<crate::backend::GpuBackend>::default();
+                simulate_paths_gbm_p_on::<crate::backend::GpuBackend>(&device, s0, mu, sigma, maturity, n_steps, n_paths, seed)
+            }
+            #[cfg(not(feature = "gpu"))]
+            {
+                let device = burn::tensor::Device::<CpuBackend>::default();
+                simulate_paths_gbm_p_on::<CpuBackend>(&device, s0, mu, sigma, maturity, n_steps, n_paths, seed)
+            }
+        }
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn simulate_paths_gbm_p_on<B: Backend<FloatElem = f64>>(
+    device: &burn::tensor::Device<B>,
+    s0: f64,
+    mu: f64,
+    sigma: f64,
+    maturity: f64,
+    n_steps: u64,
+    n_paths: u64,
+    seed: u64,
+) -> PathMatrix {
+    B::seed(device, seed);
+    let dt = maturity / n_steps as f64;
+    let times: Vec<f64> = (1..=n_steps).map(|i| i as f64 * dt).collect();
+    let model = crate::models::gbm_p::GbmP::<B>::new(scalar(s0, device), scalar(mu, device), scalar(sigma, device));
+    let simulated = model.simulate_at_times(&times, n_paths as usize, device);
+    flatten_paths(s0, &times, simulated, n_paths, n_steps)
+}
+
+/// Comparte la materialización final (tensor -> `Vec<f64>` -> matriz aplanada row-major-por-path)
+/// entre `simulate_paths_gbm_q_on`/`simulate_paths_gbm_p_on` -- `simulated[step]` es un tensor
+/// `[n_paths]` (uno por cada instante de `times`, SIN `t=0`, ver el doc-comment de
+/// `Gbm::simulate_at_times`); esta función antepone `t=0`/`s0` y transpone a la convención
+/// documentada en `PathMatrix`.
+fn flatten_paths<B: Backend<FloatElem = f64>>(
+    s0: f64,
+    times: &[f64],
+    simulated: Vec<Tensor<B, 1>>,
+    n_paths: u64,
+    n_steps: u64,
+) -> PathMatrix {
+    let columns: Vec<Vec<f64>> = simulated.into_iter().map(|t| t.into_data().to_vec::<f64>().unwrap()).collect();
+    let cols = n_steps as usize + 1;
+    let n_paths_usize = n_paths as usize;
+
+    let mut full_times = Vec::with_capacity(cols);
+    full_times.push(0.0);
+    full_times.extend_from_slice(times);
+
+    let mut paths_flat = vec![0.0_f64; n_paths_usize * cols];
+    for path in 0..n_paths_usize {
+        paths_flat[path * cols] = s0;
+        for (step, column) in columns.iter().enumerate() {
+            paths_flat[path * cols + step + 1] = column[path];
+        }
+    }
+
+    PathMatrix { times: full_times, paths_flat, n_paths, n_steps }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1661,5 +1860,103 @@ mod tests {
         assert!(result.converged, "no convergió: rmse={}", result.rmse);
         assert!((result.a - true_a).abs() < 1e-4);
         assert!((result.b - true_b).abs() < 1e-4);
+    }
+
+    // --- simulate_paths_gbm_q/_p (PLAN_IMPROVE_NOTEBOOK.md Fase 0) --------------------------
+
+    #[test]
+    fn simulate_paths_gbm_q_shape_and_t0_column_equal_s0() {
+        let _guard = crate::rng_test_lock::LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (s0, r, q, sigma, maturity) = (100.0, 0.05, 0.0, 0.2, 1.0);
+        let (n_steps, n_paths) = (10_u64, 1_000_u64);
+        let pm = simulate_paths_gbm_q("cpu", s0, r, q, sigma, maturity, n_steps, n_paths, 42).unwrap();
+
+        assert_eq!(pm.times.len(), (n_steps + 1) as usize);
+        assert_eq!(pm.times[0], 0.0);
+        assert!((pm.times.last().unwrap() - maturity).abs() < 1e-12);
+        assert_eq!(pm.paths_flat.len(), (n_paths * (n_steps + 1)) as usize);
+        assert_eq!(pm.n_paths, n_paths);
+        assert_eq!(pm.n_steps, n_steps);
+
+        // Convencion row-major por path: paths_flat[path*(n_steps+1)] es la columna t=0 de esa
+        // ruta -- S0 conocido, identico para todas las rutas (no simulado).
+        let cols = (n_steps + 1) as usize;
+        for path in 0..n_paths as usize {
+            assert_eq!(pm.paths_flat[path * cols], s0);
+        }
+    }
+
+    #[test]
+    fn simulate_paths_gbm_q_terminal_moments_match_lognormal_gbm_formula() {
+        // PLAN_IMPROVE_NOTEBOOK.md Fase 0, criterio de aceptacion: media/varianza de la matriz
+        // simulada en t=T deben coincidir con la formula analitica del GBM lognormal, mismo
+        // criterio de tolerancia que models::gbm::tests::simulate_at_times_starts_from_s0_in_expectation.
+        let _guard = crate::rng_test_lock::LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (s0, r, q, sigma, maturity) = (100.0, 0.05, 0.01, 0.25, 2.0);
+        let (n_steps, n_paths) = (20_u64, 20_000_u64);
+        let pm = simulate_paths_gbm_q("cpu", s0, r, q, sigma, maturity, n_steps, n_paths, 7).unwrap();
+
+        let cols = (n_steps + 1) as usize;
+        let terminal: Vec<f64> = (0..n_paths as usize).map(|path| pm.paths_flat[path * cols + n_steps as usize]).collect();
+        let n = n_paths as f64;
+        let mean: f64 = terminal.iter().sum::<f64>() / n;
+        let variance: f64 = terminal.iter().map(|s| (s - mean).powi(2)).sum::<f64>() / (n - 1.0);
+        let std_error = (variance / n).sqrt();
+
+        // E_Q[S_T] = S0 * exp((r-q)*T) -- invariante de martingala bajo Q, formula cerrada del
+        // GBM lognormal (mismo oraculo que crate::models::gbm).
+        let expected_mean = s0 * ((r - q) * maturity).exp();
+        assert!(
+            (mean - expected_mean).abs() < 6.0 * std_error,
+            "mean={mean} expected={expected_mean} se={std_error}"
+        );
+
+        // Var_Q[S_T] = S0^2 * exp(2*(r-q)*T) * (exp(sigma^2*T) - 1) -- varianza cerrada de una
+        // lognormal con esos parametros de GBM.
+        let expected_variance = s0 * s0 * (2.0 * (r - q) * maturity).exp() * ((sigma * sigma * maturity).exp() - 1.0);
+        let relative_error = (variance - expected_variance).abs() / expected_variance;
+        assert!(relative_error < 0.1, "variance={variance} expected={expected_variance} rel_err={relative_error}");
+    }
+
+    #[test]
+    fn simulate_paths_gbm_p_terminal_mean_matches_e_p_s_t_equals_s0_exp_mu_t() {
+        let _guard = crate::rng_test_lock::LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (s0, mu, sigma, maturity) = (100.0, 0.08, 0.2, 1.5);
+        let (n_steps, n_paths) = (15_u64, 20_000_u64);
+        let pm = simulate_paths_gbm_p("cpu", s0, mu, sigma, maturity, n_steps, n_paths, 99).unwrap();
+
+        let cols = (n_steps + 1) as usize;
+        let terminal: Vec<f64> = (0..n_paths as usize).map(|path| pm.paths_flat[path * cols + n_steps as usize]).collect();
+        let n = n_paths as f64;
+        let mean: f64 = terminal.iter().sum::<f64>() / n;
+        let variance: f64 = terminal.iter().map(|s| (s - mean).powi(2)).sum::<f64>() / (n - 1.0);
+        let std_error = (variance / n).sqrt();
+
+        let expected_mean = s0 * (mu * maturity).exp();
+        assert!(
+            (mean - expected_mean).abs() < 6.0 * std_error,
+            "mean={mean} expected={expected_mean} se={std_error}"
+        );
+    }
+
+    #[test]
+    fn simulate_paths_rejects_n_paths_or_n_steps_over_the_hard_cap() {
+        let over_paths = simulate_paths_gbm_q(
+            "cpu", 100.0, 0.05, 0.0, 0.2, 1.0, 10, SIMULATE_PATHS_MAX_PATHS + 1, 1,
+        );
+        assert!(over_paths.is_err(), "n_paths por encima del tope debe rechazarse");
+
+        let over_steps = simulate_paths_gbm_q(
+            "cpu", 100.0, 0.05, 0.0, 0.2, 1.0, SIMULATE_PATHS_MAX_STEPS + 1, 10, 1,
+        );
+        assert!(over_steps.is_err(), "n_steps por encima del tope debe rechazarse");
+    }
+
+    #[test]
+    fn simulate_paths_rejects_zero_n_paths_zero_n_steps_or_non_positive_maturity() {
+        assert!(simulate_paths_gbm_q("cpu", 100.0, 0.05, 0.0, 0.2, 1.0, 10, 0, 1).is_err());
+        assert!(simulate_paths_gbm_q("cpu", 100.0, 0.05, 0.0, 0.2, 1.0, 0, 10, 1).is_err());
+        assert!(simulate_paths_gbm_q("cpu", 100.0, 0.05, 0.0, 0.2, 0.0, 10, 10, 1).is_err());
+        assert!(simulate_paths_gbm_q("cpu", 100.0, 0.05, 0.0, 0.2, -1.0, 10, 10, 1).is_err());
     }
 }

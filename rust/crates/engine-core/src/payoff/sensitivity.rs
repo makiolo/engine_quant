@@ -284,6 +284,34 @@ pub(crate) fn eval_scalar<T: DualNumber>(
             // de `(observable, time)` -- ninguna captura adicional que mantener aparte.
             path.value_at(*observable, t)
         }
+        // Average/RunningMin/RunningMax (PLAN_IMPROVE_NOTEBOOK.md Fase 2): espejo exacto del
+        // interprete f64 de `eval::eval_scalar`, generico sobre `T: DualNumber` (mismo criterio
+        // que el resto de este modulo, ver el doc-comment de ese modulo y de `ScalarOp::Average`/
+        // `RunningMin` en ir.rs para la forma exacta -- suma ponderada, y RunningMin/RunningMax
+        // reduciendo sobre `payoff.required_times()` filtrado por cursor).
+        ScalarOp::Average { observable, schedule, weights } => schedule
+            .iter()
+            .zip(weights.iter())
+            .map(|(t, w)| T::constant(*w) * path.value_at(*observable, *t))
+            .fold(T::constant(0.0), |acc, v| acc + v),
+        ScalarOp::RunningMin { observable } => {
+            let t = cursor.expect("payoff: 'running_min' sin cursor de tiempo activo (falta un 'when' envolvente)");
+            let mut times = payoff.required_times().into_iter().filter(|rt| *rt <= t + 1e-9);
+            let first_time = times
+                .next()
+                .unwrap_or_else(|| panic!("payoff: 'running_min': ningun instante de required_times() es <= cursor={t}"));
+            let first = path.value_at(*observable, first_time);
+            times.fold(first, |acc, rt| acc.min(path.value_at(*observable, rt)))
+        }
+        ScalarOp::RunningMax { observable } => {
+            let t = cursor.expect("payoff: 'running_max' sin cursor de tiempo activo (falta un 'when' envolvente)");
+            let mut times = payoff.required_times().into_iter().filter(|rt| *rt <= t + 1e-9);
+            let first_time = times
+                .next()
+                .unwrap_or_else(|| panic!("payoff: 'running_max': ningun instante de required_times() es <= cursor={t}"));
+            let first = path.value_at(*observable, first_time);
+            times.fold(first, |acc, rt| acc.max(path.value_at(*observable, rt)))
+        }
     }
 }
 

@@ -94,6 +94,81 @@ def test_delta_of_a_call_through_price_matches_black_scholes():
     assert math.isclose(delta, expected, rel_tol=0.05)
 
 
+def test_theta_annualized_divides_the_raw_bump_delta_by_the_bump_used():
+    # PLAN_IMPROVE_NOTEBOOK.md Fase 4 (ADR-IN-01): annualized=False (default) devuelve el
+    # DeltaV crudo del bump (convencion historica, sin cambios); annualized=True devuelve
+    # DeltaV/bump (derivada anualizada dV/dt), aplicado en Python via ThetaGreek.annualize()
+    # DESPUES de leer el escalar que ya devolvio el motor -- el motor nunca ve `annualized`.
+    eng, product, model, market, pricing, execution = _gbm_call_fixture()
+
+    raw_greek = greeks.theta("PayoffPriceQ")
+    raw_theta = eng.price(product, [raw_greek.to_spec()], model, market, pricing, execution)["Greek"].scalar
+    assert raw_greek.annualize(raw_theta) == raw_theta  # annualized=False: paso-through
+
+    annualized_greek = greeks.theta("PayoffPriceQ", annualized=True)
+    spec = annualized_greek.to_spec()
+    assert spec[1]["bump"] == greeks.DEFAULT_THETA_BUMP  # bump resuelto explicito, no None
+    annualized_raw = eng.price(product, [spec], model, market, pricing, execution)["Greek"].scalar
+    annualized_theta = annualized_greek.annualize(annualized_raw)
+
+    # Mismo bump (1/365) en ambas llamadas => ambos escalares crudos deben coincidir (mismo
+    # bump-and-reval), y el anualizado debe ser exactamente ese crudo dividido por el bump.
+    assert math.isclose(annualized_raw, raw_theta, rel_tol=0.0, abs_tol=1e-9)
+    assert math.isclose(annualized_theta, raw_theta / greeks.DEFAULT_THETA_BUMP, rel_tol=0.0, abs_tol=1e-9)
+
+
+def test_payoff_sensitivity_q_is_a_pathwise_alias_of_greek():
+    # PLAN_IMPROVE_NOTEBOOK.md Fase 1: decision de diseno -- para las 4 sensibilidades que cubre
+    # PayoffSensitivityQMeasure ("spot"/"rate"/"dividend_yield"/"volatility", solo GBM),
+    # `PayoffSensitivityQ` y `Greek(metric="PayoffPriceQ", method="pathwise")` llaman
+    # literalmente a la misma funcion Rust `payoff_sensitivity_gbm` (ver `try_pathwise` en
+    # cpp/engine/src/greeks.cpp): mismo model/product/n_paths/seed en las dos rutas produce el
+    # mismo resultado hasta precision numerica, no solo dentro de ruido Monte Carlo -- de ahi la
+    # tolerancia mucho mas ajustada que el resto de este archivo (que compara contra
+    # Black-Scholes, dos fuentes genuinamente distintas). Mismo par de rutas y mismas 4
+    # sensibilidades que GreeksFase1Test.*MatchesPayoffSensitivityQ en test_greeks.cpp.
+    eng, product, model, market, pricing, execution = _gbm_call_fixture()
+
+    for greek_name, spec in (
+        ("spot", greeks.delta("PayoffPriceQ", "spot").to_spec()),
+        ("volatility", greeks.vega("PayoffPriceQ").to_spec()),
+        ("rate", greeks.rho("PayoffPriceQ").to_spec()),
+        ("dividend_yield", greeks.delta("PayoffPriceQ", "dividend_yield").to_spec()),
+    ):
+        via_greek = eng.price(product, [spec], model, market, pricing, execution)["Greek"].scalar
+        via_registry = eng.price(
+            product, [("PayoffSensitivityQ", {"greek": greek_name})], model, market, pricing, execution
+        )["PayoffSensitivityQ"].scalar
+        assert math.isclose(via_greek, via_registry, rel_tol=1e-6, abs_tol=1e-6), (
+            f"{greek_name}: Greek(pathwise)={via_greek} PayoffSensitivityQ={via_registry}"
+        )
+
+
+def test_payoff_sensitivity_q_rejects_a_product_that_is_not_a_payoff_product():
+    # Mismo chequeo defensivo que el test C++
+    # PayoffSensitivityQRejectsAProductThatIsNotPayoffProduct (test_registry_wiring_payoff_
+    # measures.cpp) -- confirma que el binding Python propaga el std::invalid_argument como
+    # excepcion, no como un resultado silenciosamente vacio.
+    eng = engine.Engine()
+    model = eng.create_model("GBM", {"s0": 100.0, "r": 0.05, "q": 0.0, "sigma": 0.2, "observable": "EQ.SPOT.AAPL"})
+    irs_product = eng.create_product(
+        "IRSwap",
+        {
+            "notional": 1_000_000.0,
+            "payment_times": [1.0, 2.0, 3.0, 4.0, 5.0],
+            "accruals": [1.0, 1.0, 1.0, 1.0, 1.0],
+        },
+    )
+    market = engine.MarketSnapshot(pillars=[1.0], zero_rates=[0.05])
+    pricing = engine.PricingContext({"pricing_date": 0.0, "n_paths": 1000.0, "n_steps": 1.0, "seed": 7.0})
+    execution = engine.ExecutionContext({"backend": "cpu"})
+    try:
+        eng.price(irs_product, [("PayoffSensitivityQ", {"greek": "spot"})], model, market, pricing, execution)
+    except Exception:
+        return
+    raise AssertionError("se esperaba una excepcion: PayoffSensitivityQ sobre un producto que no es PayoffProduct")
+
+
 def test_all_greeks_on_gbm_returns_the_four_model_parameters_plus_curve_credit_and_theta():
     eng, product, model, market, pricing, execution = _gbm_call_fixture()
     report = eng.all_greeks(product, "PayoffPriceQ", model, market, pricing, execution)
@@ -253,6 +328,9 @@ if __name__ == "__main__":
     test_greek_forwards_an_explicit_bump_and_method()
     test_builders_forward_an_explicit_bump_and_method_too()
     test_delta_of_a_call_through_price_matches_black_scholes()
+    test_theta_annualized_divides_the_raw_bump_delta_by_the_bump_used()
+    test_payoff_sensitivity_q_is_a_pathwise_alias_of_greek()
+    test_payoff_sensitivity_q_rejects_a_product_that_is_not_a_payoff_product()
     test_all_greeks_on_gbm_returns_the_four_model_parameters_plus_curve_credit_and_theta()
     test_all_greeks_include_second_order_adds_gamma_for_each_model_parameter()
     test_hessian_on_gbm_call_returns_gamma_volga_vanna_via_likelihood_ratio()

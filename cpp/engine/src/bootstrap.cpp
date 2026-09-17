@@ -12,6 +12,7 @@ void register_builtins(Registries& registries) {
     registries.models.register_type<HullWhite2FModel>("HullWhite2F");
     registries.models.register_type<GbmModel>("GBM");
     registries.models.register_type<GbmPModel>("GBM_P");
+    registries.models.register_type<GbmBasketModel>("GbmBasket");
     registries.products.register_type<IrSwapProduct>("IRSwap");
     registries.products.register_type<payoff::PayoffProduct>("Payoff");
     registries.measures.register_type<ExposureProfileMeasure>("ExposureProfile");
@@ -23,6 +24,7 @@ void register_builtins(Registries& registries) {
     registries.measures.register_type<PayoffExerciseQMeasure>("PayoffExerciseQ");
     registries.measures.register_type<PayoffHitProbabilityQMeasure>("PayoffHitProbabilityQ");
     registries.measures.register_type<PayoffExposureProfileQMeasure>("PayoffExposureProfileQ");
+    registries.measures.register_type<PayoffUnilateralCvaQMeasure>("PayoffUnilateralCvaQ");
     registries.measures.register_type<PayoffForecastPMeasure>("PayoffForecastP");
     registries.measures.register_type<PayoffHitProbabilityPMeasure>("PayoffHitProbabilityP");
     registries.measures.register_type<PayoffPnlDistributionPMeasure>("PayoffPnlDistributionP");

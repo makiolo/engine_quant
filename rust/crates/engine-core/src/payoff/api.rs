@@ -73,7 +73,10 @@ impl ObservablePath for SinglePath<'_> {
 /// es una fuente de aleatoriedad DELIBERADAMENTE independiente del RNG de Burn que genera la
 /// propia trayectoria (ver el doc-comment de `payoff::eval`) -- mezclar `seed`/`path_idx` con la
 /// constante de Weyl (splitmix64) evita que ambos flujos compartan estado o se correlacionen.
-fn bridge_seed_for_path(seed: u64, path_idx: usize) -> u64 {
+/// `pub(crate)` desde PLAN_IMPROVE_NOTEBOOK.md Fase 3: `payoff::basket_api` reutiliza esta MISMA
+/// derivacion de semilla por ruta para el mismo proposito (independencia del RNG de Brownian
+/// bridge respecto del RNG de Burn que genera la trayectoria), en vez de duplicarla.
+pub(crate) fn bridge_seed_for_path(seed: u64, path_idx: usize) -> u64 {
     seed.wrapping_add((path_idx as u64).wrapping_add(1).wrapping_mul(0x9E37_79B9_7F4A_7C15))
 }
 

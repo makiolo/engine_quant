@@ -144,6 +144,24 @@ QValuationResult risk_neutral_price_gbm(
     double valuation_time = 0.0
 );
 
+// Precio bajo Q (Monte Carlo, `GbmBasket`) de un `PayoffProgram` multi-activo correlacionado
+// (PLAN_IMPROVE_NOTEBOOK.md Fase 3). Sobrecarga de `risk_neutral_price_gbm` por tipo de modelo --
+// mismo patron que `hit_probability_gbm(..., const GbmModel&, ...)` /
+// `hit_probability_gbm(..., const GbmPModel&, ...)` ya distinguen Q/P por el tipo del parametro,
+// aqui distingue N=1 (GbmModel) de N=arbitrario (GbmBasketModel). Delegado sobre
+// `engine::ffi::price_payoff_basket_gbm_q`, que compila/evalua el `CompiledPayoff` enteramente en
+// Rust igual que la ruta de un unico activo -- el AST/compilador Rust ya soporta multiples
+// observables sin cambios (ver `engine_core::payoff::basket_api`), lo unico nuevo es la capa de
+// simulacion multi-activo. Mismo preflight de capacidades que `risk_neutral_price_gbm` (via
+// `GbmBasketModel::capabilities()`); `Err` adicional si el contrato referencia un observable no
+// declarado en el basket, o si `r` no es homogenea entre activos (alcance minimo de esta fase, ver
+// el doc-comment de `engine_core::payoff::basket_api::validate_common_discount_rate`). **Fuera de
+// alcance de esta fase**: sin `valuation_time`/Theta para el basket (a diferencia de la sobrecarga
+// de `GbmModel`, que si lo soporta desde PLAN_GREEKS.md).
+QValuationResult risk_neutral_price_gbm(
+    const PayoffProgram& program, const GbmBasketModel& model, std::uint64_t n_paths, std::uint64_t seed
+);
+
 // Resultado de HitProbability bajo Q (PLAN_PRODUCTS.md §12 Fase 6: "hit probability Q como
 // medida separada del PV"). Misma forma que `QValuationResult` (espejo de
 // `engine_core::mc::McEstimate` en Rust) pero `probability` es una probabilidad en `[0,1]`, no un

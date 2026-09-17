@@ -216,6 +216,38 @@ pub(crate) fn eval_scalar(
                 )
             })
         }
+        // Average (PLAN_IMPROVE_NOTEBOOK.md Fase 2, ver el doc-comment de ScalarOp::Average en
+        // ir.rs): suma PONDERADA (no media con divisor implicito), acceso aleatorio sobre
+        // `schedule`, ya no vacio y de la misma longitud que `weights` (compile::compile lo
+        // garantiza en preflight).
+        ScalarOp::Average { observable, schedule, weights } => schedule
+            .iter()
+            .zip(weights.iter())
+            .map(|(t, w)| w * path.value_at(*observable, *t))
+            .sum(),
+        // RunningMin/RunningMax (ver el doc-comment de ScalarOp::RunningMin en ir.rs): reducen
+        // sobre TODOS los instantes de `payoff.required_times()` que sean <= el cursor activo --
+        // el unico conjunto de instantes que el motor Monte Carlo Rust conoce en preflight, a
+        // falta de una `MarketPath` poblada libremente como en el evaluador deterministico C++.
+        // Requiere cursor activo, igual que `Current` (panica si no lo hay).
+        ScalarOp::RunningMin { observable } => {
+            let t = cursor.expect("payoff: 'running_min' sin cursor de tiempo activo (falta un 'when' envolvente)");
+            let mut values = payoff.required_times().into_iter().filter(|rt| *rt <= t + 1e-9);
+            let first = values.next().unwrap_or_else(|| {
+                panic!("payoff: 'running_min': ningun instante de required_times() es <= cursor={t}")
+            });
+            let first_value = path.value_at(*observable, first);
+            values.fold(first_value, |acc, rt| acc.min(path.value_at(*observable, rt)))
+        }
+        ScalarOp::RunningMax { observable } => {
+            let t = cursor.expect("payoff: 'running_max' sin cursor de tiempo activo (falta un 'when' envolvente)");
+            let mut values = payoff.required_times().into_iter().filter(|rt| *rt <= t + 1e-9);
+            let first = values.next().unwrap_or_else(|| {
+                panic!("payoff: 'running_max': ningun instante de required_times() es <= cursor={t}")
+            });
+            let first_value = path.value_at(*observable, first);
+            values.fold(first_value, |acc, rt| acc.max(path.value_at(*observable, rt)))
+        }
     }
 }
 
@@ -920,6 +952,130 @@ mod tests {
         // Ejercido en t=0.5 (spot=60): paga max(100-60,0)=40 en t=0.5, nunca llega a evaluar
         // 'continuation' (que en t=1.0, spot=95, pagaria 5 -- valor claramente distinto).
         assert_eq!(ledger, vec![PathCashflow { payment_time: 0.5, amount: 40.0 }]);
+    }
+
+    // Average/RunningMin/RunningMax (PLAN_IMPROVE_NOTEBOOK.md Fase 2): paridad EXACTA (no solo
+    // "compila") entre el nodo nativo y la replica manual -- mismo criterio que el resto del
+    // modulo, sobre la MISMA ruta ya simulada (StepPath), sin ningun ruido Monte Carlo de por
+    // medio, asi que la comparacion es con igualdad de punto flotante, no con tolerancia.
+    // Nombres de campo ('schedule'/'weights', sin 'times' en running_min/max) replican
+    // exactamente el AST de autoria ya existente (C++/Python/schema), ver el doc-comment de
+    // ScalarOp::Average/RunningMin en ir.rs.
+    const AVERAGE_JSON: &str = r#"{
+        "schema": "engine.payoff/v1", "id": "ASIAN",
+        "contract": {"type": "when", "time": 1.0, "child": {"type": "cashflow", "currency": "USD",
+            "amount": {"type": "average", "observable": "EQ.SPOT.AAPL",
+                "schedule": [0.25, 0.5, 0.75, 1.0],
+                "weights": [0.25, 0.25, 0.25, 0.25]}}}
+    }"#;
+
+    #[test]
+    fn average_matches_the_hand_baked_weighted_sum_exactly() {
+        let payoff = compile(AVERAGE_JSON).unwrap();
+        let path = StepPath(vec![(0.25, 100.0), (0.5, 110.0), (0.75, 90.0), (1.0, 120.0)]);
+        let ledger = evaluate(&payoff, &path);
+        // Equiponderado (weights=1/4 cada uno): equivalente al asiatico horneado a mano del
+        // notebook 02 (suma de fixings entre n).
+        let hand_baked = 0.25 * 100.0 + 0.25 * 110.0 + 0.25 * 90.0 + 0.25 * 120.0;
+        assert_eq!(hand_baked, (100.0 + 110.0 + 90.0 + 120.0) / 4.0);
+        assert_eq!(ledger, vec![PathCashflow { payment_time: 1.0, amount: hand_baked }]);
+    }
+
+    #[test]
+    fn required_times_of_average_includes_its_own_schedule() {
+        let payoff = compile(AVERAGE_JSON).unwrap();
+        assert_eq!(payoff.required_times(), vec![0.25, 0.5, 0.75, 1.0]);
+    }
+
+    // RunningMin/RunningMax no llevan 'schedule' propio: consultan required_times() filtrado por
+    // cursor. Para que el lookback tenga mas de un punto de monitorizacion hace falta que ESOS
+    // instantes entren en required_times() por otro camino -- aqui, un 'average' con weights a
+    // cero que actua como "ancla" de monitorizacion sin contribuir ningun importe (mismo patron
+    // documentado en el doc-comment de ScalarOp::RunningMin, usado tambien en el notebook 02).
+    const RUNNING_MAX_JSON: &str = r#"{
+        "schema": "engine.payoff/v1", "id": "LOOKBACK_CALL",
+        "contract": {"type": "when", "time": 1.0, "child": {"type": "cashflow", "currency": "USD",
+            "amount": {"type": "add",
+                "left": {"type": "running_max", "observable": "EQ.SPOT.AAPL"},
+                "right": {"type": "mul",
+                    "left": {"type": "constant", "value": 0.0},
+                    "right": {"type": "average", "observable": "EQ.SPOT.AAPL",
+                        "schedule": [0.25, 0.5, 0.75, 1.0],
+                        "weights": [0.0, 0.0, 0.0, 0.0]}}}}}
+    }"#;
+
+    const RUNNING_MIN_JSON: &str = r#"{
+        "schema": "engine.payoff/v1", "id": "LOOKBACK_PUT",
+        "contract": {"type": "when", "time": 1.0, "child": {"type": "cashflow", "currency": "USD",
+            "amount": {"type": "add",
+                "left": {"type": "running_min", "observable": "EQ.SPOT.AAPL"},
+                "right": {"type": "mul",
+                    "left": {"type": "constant", "value": 0.0},
+                    "right": {"type": "average", "observable": "EQ.SPOT.AAPL",
+                        "schedule": [0.25, 0.5, 0.75, 1.0],
+                        "weights": [0.0, 0.0, 0.0, 0.0]}}}}}
+    }"#;
+
+    #[test]
+    fn running_max_picks_the_evident_maximum_of_the_monitored_path() {
+        let payoff = compile(RUNNING_MAX_JSON).unwrap();
+        assert_eq!(payoff.required_times(), vec![0.25, 0.5, 0.75, 1.0]);
+        // Maximo a ojo: 135.0 en t=0.5, evidente entre los otros tres valores mas bajos.
+        let path = StepPath(vec![(0.25, 100.0), (0.5, 135.0), (0.75, 90.0), (1.0, 120.0)]);
+        let ledger = evaluate(&payoff, &path);
+        assert_eq!(ledger, vec![PathCashflow { payment_time: 1.0, amount: 135.0 }]);
+    }
+
+    #[test]
+    fn running_min_picks_the_evident_minimum_of_the_monitored_path() {
+        let payoff = compile(RUNNING_MIN_JSON).unwrap();
+        // Minimo a ojo: 70.0 en t=0.75, evidente entre los otros tres valores mas altos.
+        let path = StepPath(vec![(0.25, 100.0), (0.5, 135.0), (0.75, 70.0), (1.0, 120.0)]);
+        let ledger = evaluate(&payoff, &path);
+        assert_eq!(ledger, vec![PathCashflow { payment_time: 1.0, amount: 70.0 }]);
+    }
+
+    #[test]
+    fn running_max_only_considers_required_times_up_to_the_cursor() {
+        // Mismo RUNNING_MAX_JSON pero con el pico (135.0) DESPUES del cursor (t=1.0 es el 'when'
+        // envolvente, asi que el cursor en el momento de evaluar running_max es 1.0) -- para
+        // ejercitar "<= cursor" de verdad hace falta un 'when' mas temprano. Se construye un
+        // contrato ad-hoc con el cashflow en t=0.5 (cursor=0.5): el running_max NO debe ver el
+        // pico de t=0.75/1.0, que son posteriores al cursor.
+        let json = r#"{
+            "schema": "engine.payoff/v1", "id": "LOOKBACK_MID",
+            "contract": {"type": "when", "time": 0.5, "child": {"type": "cashflow", "currency": "USD",
+                "amount": {"type": "add",
+                    "left": {"type": "running_max", "observable": "EQ.SPOT.AAPL"},
+                    "right": {"type": "mul",
+                        "left": {"type": "constant", "value": 0.0},
+                        "right": {"type": "average", "observable": "EQ.SPOT.AAPL",
+                            "schedule": [0.25, 0.5, 0.75, 1.0],
+                            "weights": [0.0, 0.0, 0.0, 0.0]}}}}}
+        }"#;
+        let payoff = compile(json).unwrap();
+        // Pico real (200.0) en t=0.75, posterior al cursor (0.5): running_max en t=0.5 solo debe
+        // ver 0.25 y 0.5 (100.0 y 150.0), maximo evidente 150.0.
+        let path = StepPath(vec![(0.25, 100.0), (0.5, 150.0), (0.75, 200.0), (1.0, 120.0)]);
+        let ledger = evaluate(&payoff, &path);
+        assert_eq!(ledger, vec![PathCashflow { payment_time: 0.5, amount: 150.0 }]);
+    }
+
+    #[test]
+    #[should_panic(expected = "cursor de tiempo activo")]
+    fn running_min_without_an_active_cursor_panics() {
+        // 'factor' de 'scale' se evalua con el cursor vigente en ESE punto del arbol (None en la
+        // raiz, antes de entrar en el 'when' de 'child'): confirma que running_min exige cursor
+        // activo igual que 'current', y no uno "heredado" del cashflow que viene despues.
+        let json = r#"{
+            "schema": "engine.payoff/v1", "id": "x",
+            "contract": {"type": "scale",
+                "factor": {"type": "running_min", "observable": "EQ.SPOT.AAPL"},
+                "child": {"type": "when", "time": 1.0, "child": {"type": "cashflow", "currency": "USD",
+                    "amount": {"type": "constant", "value": 1.0}}}}
+        }"#;
+        let payoff = compile(json).unwrap();
+        evaluate(&payoff, &ConstantSpot(0.0));
     }
 
     #[test]

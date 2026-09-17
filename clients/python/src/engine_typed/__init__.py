@@ -30,7 +30,7 @@ from engine_typed.context import ExecutionContext, PricingContext
 from engine_typed.greeks import Greek
 from engine_typed.market import Market
 from engine_typed.measure import PV, DV01, ExposureProfile, Measure, UnilateralCVA
-from engine_typed.model import HullWhite1F, HullWhite2F, ModelSpec
+from engine_typed.model import GbmBasket, HullWhite1F, HullWhite2F, ModelSpec
 from engine_typed.payoff import (
     Contract,
     PayoffProduct,
@@ -94,6 +94,7 @@ __all__ = [
     "ModelSpec",
     "HullWhite1F",
     "HullWhite2F",
+    "GbmBasket",
     "Market",
     "PricingContext",
     "ExecutionContext",

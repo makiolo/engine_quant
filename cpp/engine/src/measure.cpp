@@ -1,5 +1,6 @@
 #include "engine/measure.hpp"
 
+#include <cmath>
 #include <stdexcept>
 #include <utility>
 
@@ -83,6 +84,32 @@ double compute_cva_from_exposure(
         );
     }
     throw std::invalid_argument("UnilateralCvaMeasure: modelo no soportado: " + model.type_name());
+}
+
+// CVA unilateral a partir de un perfil de exposición ya calculado, descontando por la curva
+// OBSERVADA de `market` (`MarketSnapshot::discount_factor`) en vez de la dinámica analítica de
+// un modelo de tipo corto -- MISMA fórmula que `unilateral_cva_with_discount` (Rust,
+// exposure.rs): `(1-R) * Σ_i EE_i · (S(t_{i-1})-S(t_i)) · DF(t_i)`, supervivencia `S(t) =
+// exp(-hazard_rate*t)`. Usada por `PayoffUnilateralCvaQMeasure::evaluate` (measure.hpp tiene el
+// razonamiento completo de por qué esta medida NO reutiliza `compute_cva_from_exposure` de
+// arriba: esa función necesita un modelo Hull-White para su propio descuento analítico, que no
+// tiene sentido para `GbmModel`/`PayoffProduct` -- que ya descuentan por la curva de mercado en
+// `PresentValueMeasure`/`Dv01Measure`). Segunda implementación deliberada de la misma
+// agregación matemática que la de Rust, documentada explícitamente como tal.
+double compute_cva_from_exposure_market(
+    const MarketSnapshot& market,
+    const std::vector<double>& times, const std::vector<double>& ee,
+    double hazard_rate, double recovery_rate
+) {
+    double cva = 0.0;
+    double prev_survival = 1.0;
+    for (std::size_t i = 0; i < times.size(); ++i) {
+        double survival = std::exp(-hazard_rate * times[i]);
+        double default_prob = prev_survival - survival;
+        cva += (1.0 - recovery_rate) * ee[i] * default_prob * market.discount_factor(times[i]);
+        prev_survival = survival;
+    }
+    return cva;
 }
 
 // --- PV/DV01 por curva de mercado (PLAN_REAPI.md §6 Fase 4) --------------------------------
@@ -444,19 +471,32 @@ MeasureResult PayoffPriceQMeasure::evaluate(
     if (!payoff_product) {
         throw std::invalid_argument("PayoffPriceQMeasure: producto no soportado: " + product.type_name());
     }
-    const auto* gbm_model = dynamic_cast<const GbmModel*>(&model);
-    if (!gbm_model) {
-        throw std::invalid_argument("PayoffPriceQMeasure: modelo no soportado: " + model.type_name());
+    // PLAN_IMPROVE_NOTEBOOK.md Fase 3 §2 punto 3 (decision de diseno documentada): se generaliza
+    // ESTA MISMA medida "PayoffPriceQ" (mismo nombre, mismo registro en bootstrap.cpp) para
+    // aceptar tambien GbmBasketModel, en vez de registrar una medida separada
+    // "PayoffBasketPriceQ" -- el AST/compilador Rust ya es agnostico al numero de observables
+    // (`CompiledPayoff::observable_slots`), asi que "que modelo dio el precio" es un detalle de
+    // QUIEN evalua, no de QUE se pide: un caller no deberia tener que saber de antemano si un
+    // contrato se va a precisar contra un unico activo o un basket para elegir el nombre de la
+    // medida correcta.
+    if (const auto* gbm_model = dynamic_cast<const GbmModel*>(&model)) {
+        payoff::QValuationResult out = payoff::risk_neutral_price_gbm(
+            *payoff_product->payoff_program(), *gbm_model, pricing.n_paths(), pricing.seed(), pricing.pricing_date()
+        );
+        MeasureResult result;
+        result.has_scalar = true;
+        result.scalar = out.mean;
+        return result;
     }
-
-    payoff::QValuationResult out = payoff::risk_neutral_price_gbm(
-        *payoff_product->payoff_program(), *gbm_model, pricing.n_paths(), pricing.seed(), pricing.pricing_date()
-    );
-
-    MeasureResult result;
-    result.has_scalar = true;
-    result.scalar = out.mean;
-    return result;
+    if (const auto* basket_model = dynamic_cast<const GbmBasketModel*>(&model)) {
+        payoff::QValuationResult out =
+            payoff::risk_neutral_price_gbm(*payoff_product->payoff_program(), *basket_model, pricing.n_paths(), pricing.seed());
+        MeasureResult result;
+        result.has_scalar = true;
+        result.scalar = out.mean;
+        return result;
+    }
+    throw std::invalid_argument("PayoffPriceQMeasure: modelo no soportado: " + model.type_name());
 }
 
 MeasureResult PayoffExerciseQMeasure::evaluate(
@@ -538,6 +578,24 @@ MeasureResult PayoffExposureProfileQMeasure::evaluate(
     result.primary = std::move(profile.ee);
     result.secondary = std::move(profile.pfe_95);
     result.has_scalar = false;
+    return result;
+}
+
+MeasureResult PayoffUnilateralCvaQMeasure::evaluate(
+    const IModel& model, const IProduct& product, const MarketSnapshot& market,
+    const PricingContext& pricing, const ExecutionContext& execution
+) const {
+    // Composición (no duplica la llamada a payoff_exposure_profile_gbm): el tipo de
+    // producto/modelo se valida dentro de PayoffExposureProfileQMeasure::evaluate.
+    PayoffExposureProfileQMeasure exposure_measure(Params{{"exposure_times", exposure_times_}});
+    MeasureResult result = exposure_measure.evaluate(model, product, market, pricing, execution);
+
+    double cva = compute_cva_from_exposure_market(
+        market, result.times, result.primary, market.hazard_rate(), market.recovery_rate()
+    );
+
+    result.has_scalar = true;
+    result.scalar = cva;
     return result;
 }
 

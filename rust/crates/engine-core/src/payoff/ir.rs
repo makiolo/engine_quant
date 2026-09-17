@@ -73,6 +73,52 @@ pub enum ScalarOp {
     /// compilacion) si el evento no ha ocurrido en la ruta o no capturo ese observable -- ver
     /// `eval::eval_scalar`.
     EventValue { event: usize, observable: usize },
+    /// Media PONDERADA de `observable` sobre `schedule` (PLAN_IMPROVE_NOTEBOOK.md Fase 2). **Los
+    /// nombres de campo y la forma replican EXACTAMENTE el AST de autoria ya existente** --
+    /// `Average::schedule()`/`weights()` en `cpp/engine/include/engine/payoff/expression.hpp`,
+    /// `docs/schema/engine.payoff/v1.schema.json` (`ScalarAverage`: campos `type`/`observable`/
+    /// `schedule`/`weights`) y `engine_typed.payoff.average(observable, schedule, weights)` en
+    /// Python -- las tres implementaciones ya de acuerdo entre si ANTES de que este compilador
+    /// Rust soportara el nodo. Importante: **no es una media aritmetica simple con un divisor
+    /// implicito** -- es `sum(weights[i] * fixing(observable, schedule[i]))`, exactamente como
+    /// `ScalarEvalVisitor::visit(Average)` en `cpp/engine/src/payoff/scenario_evaluator.cpp`; un
+    /// asiatico aritmetico equiponderado se expresa pasando `weights = [1/n; n]`. `schedule` es un
+    /// schedule de monitorizacion FIJO y conocido en preflight (misma forma que
+    /// `ContractOp::Trigger::monitoring_times`/`ContractOp::Exercise::dates`): entra en la union
+    /// de `required_times()`, el modelo simula esos instantes de una vez para todas las rutas
+    /// ANTES de interpretar el contrato, y `eval::eval_scalar` reduce con acceso aleatorio
+    /// (`ObservablePath::value_at`) sobre esa ruta ya materializada -- NO hay estado mutable
+    /// acumulado "durante" la simulacion, ver el doc-comment de `crate::payoff`. `compile::compile`
+    /// exige `schedule.len() == weights.len()`, ambos no vacios, y `schedule` estrictamente
+    /// ascendente (mismo criterio que `ValidationVisitor::check_schedule_ascending_and_finite` en
+    /// C++, que valida el mismo campo del mismo AST).
+    Average { observable: usize, schedule: Vec<f64>, weights: Vec<f64> },
+    /// Minimo observado de `observable`, evaluado en el "instante activo" (cursor de ADR-P0-08).
+    /// **Campo unico `observable`, sin schedule propio** -- misma forma que el AST de autoria ya
+    /// existente (`RunningMin::observable()` en `expression.hpp`,
+    /// `docs/schema/engine.payoff/v1.schema.json` `ScalarRunningMin`,
+    /// `engine_typed.payoff.running_min(observable)`). Replica la semantica de
+    /// `ScenarioEvaluator::visit(RunningMin)` en C++ (`context_.path.fixings_up_to(observable,
+    /// *cursor_)`: "minimo de TODOS los fixings registrados para ese observable con tiempo <=
+    /// cursor, sin acumulador incremental") de la unica forma compatible con la arquitectura de
+    /// Rust: en el motor Monte Carlo Rust no existe una `MarketPath` poblada libremente por quien
+    /// llama (concepto exclusivo del evaluador deterministico C++) -- el conjunto de instantes que
+    /// SI se conoce en preflight es `CompiledPayoff::required_times()` (la union completa que YA
+    /// necesita el resto del programa), asi que `eval::eval_scalar` reduce sobre ESE conjunto
+    /// filtrado a `<= cursor`. Requiere cursor activo -- panica si no lo hay, igual que
+    /// `ValidationVisitor::visit(RunningMin)` en C++ rechaza en preflight su ausencia (aqui es un
+    /// error de evaluacion, no de preflight, porque el cursor es dinamico segun donde se anide el
+    /// nodo -- mismo criterio que `ScalarOp::Current`). **Implicacion practica para quien autora un
+    /// contrato**: si ningun otro nodo del programa (`Fixing`/`Average`/`Trigger`/`Exercise`/
+    /// `When`) referencia instantes intermedios de este observable, `required_times()` no tiene
+    /// mas puntos que los ya usados en otra parte del arbol -- un lookback con monitorizacion fina
+    /// (p.ej. diaria) necesita que esos instantes entren en `required_times()` por otro camino
+    /// (p.ej. un `Average` con `weights` a cero que actua como "ancla" de monitorizacion sin
+    /// contribuir ningun importe -- ver el notebook 02, seccion de lookback, para el patron
+    /// completo). Documentado explicitamente, no oculto (PLAN_PRODUCTS.md §16).
+    RunningMin { observable: usize },
+    /// Maximo observado -- ver `RunningMin` (misma forma y misma decision de diseno, con `max`).
+    RunningMax { observable: usize },
 }
 
 /// Predicado compilado (PLAN_PRODUCTS.md §3.3).
@@ -221,14 +267,20 @@ impl CompiledPayoff {
     /// rejilla propia: asi `eval::ObservablePath::value_at` siempre encuentra el tiempo exacto
     /// que le pida el interprete.
     pub fn required_times(&self) -> Vec<f64> {
-        let mut times: Vec<f64> = self
-            .scalar_ops
-            .iter()
-            .filter_map(|op| match op {
-                ScalarOp::Fixing { time, .. } => Some(*time),
-                _ => None,
-            })
-            .collect();
+        let mut times: Vec<f64> = Vec::new();
+        for op in &self.scalar_ops {
+            match op {
+                ScalarOp::Fixing { time, .. } => times.push(*time),
+                // 'schedule' de Average entra en la union igual que 'Trigger::monitoring_times'
+                // (PLAN_IMPROVE_NOTEBOOK.md Fase 2). RunningMin/RunningMax NO tienen schedule
+                // propio (mismo AST de autoria que C++/Python, ver el doc-comment de
+                // ScalarOp::RunningMin): no anaden nada aqui por si mismos -- consultan en
+                // evaluacion los instantes que YA esten en esta union por otro camino, filtrados
+                // por cursor.
+                ScalarOp::Average { schedule, .. } => times.extend(schedule.iter().copied()),
+                _ => {}
+            }
+        }
         for op in &self.contract_ops {
             match op {
                 ContractOp::When { time, .. } => times.push(*time),

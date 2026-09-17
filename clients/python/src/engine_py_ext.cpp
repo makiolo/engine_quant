@@ -14,6 +14,7 @@
 #include "engine/calibrator.hpp"
 #include "engine/engine.hpp"
 #include "engine/greeks.hpp"
+#include "engine/model.hpp"
 #include "engine/payoff/payoff_product.hpp"
 #include "engine/portfolio.hpp"
 
@@ -39,7 +40,31 @@ engine::Params dict_to_params(const nb::dict& params) {
         } else if (nb::isinstance<nb::str>(value)) {
             result.emplace(std::move(key), nb::cast<std::string>(value));
         } else if (nb::isinstance<nb::list>(value) || nb::isinstance<nb::tuple>(value)) {
-            result.emplace(std::move(key), nb::cast<std::vector<double>>(value));
+            // PLAN_IMPROVE_NOTEBOOK.md Fase 3 §2 punto 4 (decision de diseno: Opcion A -- un
+            // unico string delimitado por comas, ParamValue NO gana un variante vector<string>,
+            // ver el doc-comment de engine::GbmBasketModel en model.hpp). list[str]/tuple[str]
+            // (p.ej. {"observables": ["EQ.SPOT.A", "EQ.SPOT.B"]} de GbmBasket en Python) se
+            // traduce aqui a "EQ.SPOT.A,EQ.SPOT.B" -- el unico punto del binding que sabe de esta
+            // convencion, para que engine_typed no tenga que reimplementar el join. Solo el
+            // PRIMER elemento decide la rama (mismo criterio que bool antes que double: una lista
+            // mixta str/numero no es un caso valido de ningun Params existente).
+            nb::sequence seq = nb::borrow<nb::sequence>(value);
+            bool is_string_list = false;
+            for (nb::handle elem : seq) {
+                is_string_list = nb::isinstance<nb::str>(elem);
+                break;
+            }
+            if (is_string_list) {
+                std::vector<std::string> items = nb::cast<std::vector<std::string>>(value);
+                std::string joined;
+                for (std::size_t i = 0; i < items.size(); ++i) {
+                    if (i > 0) joined += ",";
+                    joined += items[i];
+                }
+                result.emplace(std::move(key), std::move(joined));
+            } else {
+                result.emplace(std::move(key), nb::cast<std::vector<double>>(value));
+            }
         } else {
             result.emplace(std::move(key), nb::cast<double>(value));
         }
@@ -294,6 +319,61 @@ public:
             registries_, metric_name, dict_to_params(metric_params), model, product, market, pricing, execution,
             factors, weights
         );
+    }
+
+    // Diagnostico de trayectorias Monte Carlo (PLAN_IMPROVE_NOTEBOOK.md Fase 0): matriz cruda
+    // de trayectorias simuladas, NO una medida de Engine.price (nunca pasa por
+    // Registry<IMeasure>) -- devuelve (times, paths) ya como np.ndarray, paths.shape ==
+    // (n_paths, n_steps+1). `T` (horizonte de simulacion) es SIEMPRE market.pillars().back()
+    // (el ultimo pillar de la curva) -- mismo criterio que el notebook 07 ya usaba a mano
+    // (market = MarketSnapshot(pillars=[T], ...)); n_steps/n_paths/seed vienen de `pricing`.
+    // Dispatch por tipo de modelo: GBM (medida Q, r/q) o GBM_P (medida fisica P, mu) -- ver
+    // engine::GbmModel/engine::GbmPModel. Cualquier otro modelo (p.ej. HullWhite1F, que no
+    // genera un spot observable) lanza std::invalid_argument explicito, mismo criterio que
+    // PayoffExposureProfileQMeasure/PayoffSensitivityQMeasure en measure.cpp. Backend siempre
+    // "cpu" (herramienta de notebook/diagnostico, sin parametro ExecutionContext -- misma firma
+    // de tres argumentos (model, market, pricing) que pide PLAN_IMPROVE_NOTEBOOK.md Fase 0).
+    nb::tuple simulate_paths(
+        const engine::IModel& model,
+        const engine::MarketSnapshot& market,
+        const engine::PricingContext& pricing
+    ) const {
+        const auto& pillars = market.pillars();
+        if (pillars.empty()) {
+            throw std::invalid_argument(
+                "Engine.simulate_paths: market.pillars() esta vacio -- se necesita al menos un "
+                "pillar para deducir el horizonte de simulacion T (market.pillars().back())"
+            );
+        }
+        double maturity = pillars.back();
+
+        engine::PathMatrix result;
+        if (const auto* gbm = dynamic_cast<const engine::GbmModel*>(&model)) {
+            result = engine::simulate_paths_gbm_q(
+                "cpu", gbm->s0(), gbm->r(), gbm->q(), gbm->sigma(), maturity,
+                pricing.n_steps(), pricing.n_paths(), pricing.seed()
+            );
+        } else if (const auto* gbm_p = dynamic_cast<const engine::GbmPModel*>(&model)) {
+            result = engine::simulate_paths_gbm_p(
+                "cpu", gbm_p->s0(), gbm_p->mu(), gbm_p->sigma(), maturity,
+                pricing.n_steps(), pricing.n_paths(), pricing.seed()
+            );
+        } else {
+            throw std::invalid_argument(
+                "Engine.simulate_paths: modelo no soportado: " + model.type_name() +
+                " (solo GBM/GBM_P generan un observable simulable -- diagnostico fuera de "
+                "alcance para modelos de curva de tipos como HullWhite1F/2F)"
+            );
+        }
+
+        nb::module_ np = nb::module_::import_("numpy");
+        nb::object times_arr = np.attr("array")(result.times);
+        nb::object paths_arr = np.attr("array")(result.paths_flat)
+                                    .attr("reshape")(
+                                        static_cast<std::size_t>(result.n_paths),
+                                        static_cast<std::size_t>(result.n_steps + 1)
+                                    );
+        return nb::make_tuple(times_arr, paths_arr);
     }
 
 private:
@@ -878,5 +958,27 @@ NB_MODULE(engine, m) {
             ">>> report = eng.hvp(trade, 'HullWhiteModelNpv', model, market, pricing, execution, "
             "{'model.a': 1.0, 'model.sigma': 0.5})\n"
             ">>> for c in report.components: print(c.factor, c.value, c.method_used)"
+        )
+        .def(
+            "simulate_paths",
+            &Engine::simulate_paths,
+            nb::arg("model"),
+            nb::arg("market"),
+            nb::arg("pricing"),
+            "Diagnostico de trayectorias Monte Carlo (PLAN_IMPROVE_NOTEBOOK.md Fase 0) -- NO es "
+            "una medida de Engine.price, es una herramienta de notebook/diagnostico que expone "
+            "la matriz completa de trayectorias que el simulador ya calcula por dentro para las "
+            "medidas Payoff*Q/Payoff*P. Devuelve (times, paths): times es np.ndarray 1D de "
+            "longitud n_steps+1 (times[0] == 0.0, S0 conocido sin simular); paths es np.ndarray "
+            "de forma (n_paths, n_steps+1), paths[:, 0] == model.s0() para todas las rutas. El "
+            "horizonte T es SIEMPRE market.pillars()[-1] (el ultimo pillar de la curva); "
+            "n_steps/n_paths/seed vienen de pricing. Solo modelos GBM (medida Q) y GBM_P (medida "
+            "fisica P) generan un observable simulable -- cualquier otro modelo (p.ej. "
+            "HullWhite1F/2F) lanza ValueError. Tope duro de n_paths x n_steps (50000 x 500, "
+            "PLAN_IMPROVE_NOTEBOOK.md Fase 0) para no agotar memoria -- herramienta de "
+            "diagnostico, no un pricer de produccion; excede el tope y lanza ValueError.\n\n"
+            ">>> times, paths = eng.simulate_paths(model_q, market, pricing)\n"
+            ">>> paths.shape\n"
+            "(pricing.n_paths, pricing.n_steps + 1)"
         );
 }
