@@ -33,6 +33,51 @@ class HullWhite1F(ModelSpec):
         return {"a": self.a, "b": self.b, "sigma": self.sigma, "r0": self.r0}
 
 
+class Gbm(ModelSpec):
+    """Movimiento geométrico browniano de UN solo activo, medida riesgo-neutral Q
+    (`engine::GbmModel`, nombre nativo `"GBM"`). Añadido en PLAN_API_REFACTOR.md Fase 5: hasta
+    entonces `quantdesk.model` tipaba `HullWhite1F`/`HullWhite2F`/`GbmBasket` pero no el `GBM`
+    univariante -- un hueco que Fase 4 (`clients/python/examples/greeks_flow.py`) ya había
+    resuelto con un `ModelSpec` mínimo definido LOCALMENTE en el propio script porque en ese
+    momento solo un fichero lo necesitaba. Fase 5 encontró el mismo patrón repetido en 8 de los
+    10 notebooks (`01`, `02`, `03`, `04`, `05`, `06`, `07`, `09` -- todos menos `08`, que usa
+    `GbmBasket`, y `demo_registry`, que solo calibra Hull-White) -- suficientemente extendido
+    para que la solución local (copiar la misma clase 8 veces) dejara de ser la opción más
+    limpia; se promueve aquí, en el paquete, en vez de en cada notebook.
+    """
+
+    model_type: ClassVar[str] = "GBM"
+
+    s0: float
+    r: float
+    q: float
+    sigma: float
+    observable: str
+
+    def to_params(self) -> dict:
+        return {"s0": self.s0, "r": self.r, "q": self.q, "sigma": self.sigma, "observable": self.observable}
+
+
+class GbmP(ModelSpec):
+    """Movimiento geométrico browniano de UN solo activo, medida física P (`engine::GbmModel`,
+    nombre nativo `"GBM_P"`) -- misma dinámica que `Gbm`, pero con deriva `mu` (esperanza real de
+    mercado) en vez de la tasa libre de riesgo `r` menos dividendo `q` (deriva neutral al riesgo).
+    Añadido junto a `Gbm` en PLAN_API_REFACTOR.md Fase 5: usado por `05_physical_measure_
+    forecasting.ipynb` y `07_montecarlo_paths_q_vs_p.ipynb` (los dos notebooks que contrastan
+    medida Q vs P explícitamente).
+    """
+
+    model_type: ClassVar[str] = "GBM_P"
+
+    s0: float
+    mu: float
+    sigma: float
+    observable: str
+
+    def to_params(self) -> dict:
+        return {"s0": self.s0, "mu": self.mu, "sigma": self.sigma, "observable": self.observable}
+
+
 class HullWhite2F(ModelSpec):
     """Hull-White de 2 factores / G2++ (`engine::HullWhite2FModel`, PLAN.md §7.16)."""
 

@@ -4,11 +4,12 @@
 
 A partir de ahí, una batería de notebooks centrada en valoración de opciones, obtención de
 métricas y visualizaciones financieras — cada uno explota una parte distinta de la librería
-(`engine`/`engine_typed`), siempre con `matplotlib`/`numpy` para las gráficas:
+(`engine`/`quantdesk`, PLAN_API_REFACTOR.md Fase 5: `quantdesk` sustituye a `engine_typed` como
+fachada tipada recomendada), siempre con `matplotlib`/`numpy` para las gráficas:
 
 1. `01_vanilla_options_black_scholes.ipynb` — calls/puts europeas vía `PayoffPriceQ` sobre
    `GBM`, contraste contra Black-Scholes cerrado, paridad put-call, curvas de precio/Greeks
-   frente a strike y spot (`engine_typed.greeks`).
+   frente a strike y spot (`quantdesk.greeks`).
 2. `02_exotic_and_path_dependent_options.ipynb` — barreras (knock-in/out, corredor double
    knock-out), digital, asiático aritmético nativo (`q.average`, réplica manual como celda de
    verificación cruzada), lookback real (`q.running_max`/`q.running_min`), take-profit/stop-loss,

@@ -33,7 +33,7 @@ from quantdesk.engine import BatchRow, Engine, GridRow, PriceResult
 from quantdesk.greeks import Greek
 from quantdesk.market import Market
 from quantdesk.measure import PV, DV01, ExposureProfile, Measure, UnilateralCVA
-from quantdesk.model import GbmBasket, HullWhite1F, HullWhite2F, ModelSpec
+from quantdesk.model import Gbm, GbmBasket, GbmP, HullWhite1F, HullWhite2F, ModelSpec
 from quantdesk.payoff import (
     Contract,
     PayoffProduct,
@@ -113,6 +113,8 @@ __all__ = [
     "ModelSpec",
     "HullWhite1F",
     "HullWhite2F",
+    "Gbm",
+    "GbmP",
     "GbmBasket",
     "Market",
     "PricingContext",

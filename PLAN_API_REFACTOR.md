@@ -761,6 +761,161 @@ actual en el repositorio (memoria de este mismo proyecto en `.claude/.../memory/
 ya se verificaron "de verdad" contra el `.pyd` compilado — este refactor no puede bajar ese
 listón).
 
+**Estado verificado / decisiones tomadas (sesión de implementación de esta fase).**
+
+- **Contexto de la sesión.** Esta fase se retomó tras un corte de sesión previo (límite de rate
+  limit, sin commit ni reporte): al empezar, `01`...`09` ya estaban migrados a `import quantdesk
+  as q` y ya re-ejecutados (`execution_count` secuencial 1..N, cero celdas `error`), y
+  `quantdesk/model.py`/`__init__.py`/`engine.py` ya tenían `Gbm`/`GbmP`/`evaluate_scenario`
+  añadidos — pero sin ningún reporte que confirmara que las CIFRAS numéricas (no solo "no lanza
+  excepción") coincidían con el comportamiento pre-refactor. Esta sesión no confió en eso a
+  ciegas: repitió la verificación numérica completa de `01`...`09` desde cero (comparación
+  antes/después contra `dff8735`, el commit previo a esta fase) antes de dar nada por bueno, y
+  completó lo que faltaba (`demo_registry.ipynb`, `notebooks/README.md`, esta misma sección).
+- **Verificación numérica de `01`...`09` (script ad-hoc, no solo inspección visual).** Para cada
+  notebook: `git show dff8735:clients/python/notebooks/<nombre>.ipynb` extraído a un fichero
+  aparte, comparado celda a celda contra el árbol de trabajo actual con un extractor Python
+  propio (`outputs` de cada celda de código: `stream`/`execute_result`/`display_data` con
+  `text/plain`, más hash SHA-256 de cada `image/png` para comparar las figuras `matplotlib` byte
+  a byte, no solo su presencia) — sin margen de tolerancia numérica, comparación de texto exacta:
+
+  | Notebook | Cifras (`text/plain`) | Imágenes (`image/png`, hash) | Nota |
+  | --- | --- | --- | --- |
+  | `01_vanilla_options_black_scholes` | idénticas (`diff` vacío) | 4/4 idénticas bit a bit | — |
+  | `02_exotic_and_path_dependent_options` | idénticas (`diff` vacío) | 8/8 idénticas bit a bit | — |
+  | `03_bermudan_exercise` | idénticas (`diff` vacío) | 4/4 idénticas bit a bit | — |
+  | `04_greeks_and_risk_surfaces` | idénticas | 5/5 idénticas bit a bit | único `diff`: un chunk de `stream stdout` vacío insertado en distinto punto (ver abajo) |
+  | `05_physical_measure_forecasting` | idénticas (`diff` vacío) | 4/4 idénticas bit a bit | — |
+  | `06_exposure_cva_portfolio` | idénticas (`diff` vacío) | 3/3 idénticas bit a bit | — |
+  | `07_montecarlo_paths_q_vs_p` | idénticas | 2/2 idénticas bit a bit | mismo tipo de `diff` cosmético que `04` |
+  | `08_multi_asset_options` | idénticas (`diff` vacío) | 6/6 idénticas bit a bit | — |
+  | `09_option_strategies_and_greeks` | idénticas | 28/28 idénticas bit a bit | mismo tipo de `diff` cosmético que `04` |
+  | `demo_registry` | idénticas (ver detalle abajo) | 1/1 idéntica bit a bit | migrado en esta sesión, ver más abajo |
+
+  Los únicos tres `diff` no vacíos (`04`, `07`, `09`) se investigaron uno a uno, no se
+  descartaron por presunción: en los tres casos el contenido impreso es exactamente el mismo
+  (mismos números, mismas cifras, mismo orden) — lo único que cambia es dónde Jupyter corta un
+  `print()` en un objeto `stream stdout` independiente frente a fusionarlo con el chunk
+  siguiente/anterior (p.ej. en `04`, `[STREAM stdout] volatility ...` seguido de un
+  `[STREAM stdout]` vacío antes de `rate ... dividend_yield ...`, frente a la versión "antes" que
+  fusiona esa misma línea vacía dentro del chunk de `rho`/`dividend_yield`). Es una diferencia de
+  cómo `ipykernel` trocea/empaqueta `stdout` entre ejecuciones (timing de flush), no una
+  regresión de la migración — no hay ninguna cifra distinta en ningún punto de los tres notebooks
+  afectados, confirmado leyendo el contexto completo de cada `diff`, no solo el recuento de
+  líneas.
+- **Migración de `demo_registry.ipynb` (única pieza que faltaba de verdad).** Este notebook NO
+  es "solo calibración Hull-White" (una caracterización que quedó flotando de la sesión cortada,
+  sin reporte que la respaldara, y que esta sesión no dio por buena sin comprobarlo): es la demo
+  completa del registry (PLAN.md §5.4/§7.6) — 9 secciones que cubren `list_models`/
+  `list_products`/`list_measures`, construcción de un `Model`/`Product` desde su nombre
+  registrado, `Market`/`PricingContext`/`ExecutionContext`, perfil de exposición EE/PFE, CVA
+  unilateral, calibración de **dos** modelos (`HullWhite1F` y `HullWhite2F`, contra mercados
+  sintéticos `MarketSnapshot.synthetic_from_hull_white[_2f]`) y los tres niveles de lote
+  (`price_batch`/`price_many`/`price_grid`) — y termina volviendo a listar el registry para
+  demostrar que un modelo/medida nuevo aparecería sin tocar el notebook (§9, el propio punto
+  central de PLAN.md §5.4).
+  - **Decisión de diseño explícita, no cubierta literalmente por "mismo patrón que los otros
+    9".** Las secciones 1-3 (listar el registry, construir un modelo/producto individual desde
+    su nombre) se dejan deliberadamente sobre la fachada dinámica cruda (`eng =
+    engine.Engine()`, `eng.create_model(...)`, `eng.create_product(...)`) en vez de
+    `quantdesk.Engine`: es literalmente el objeto de esta demo concreta (a diferencia de los
+    otros 9 notebooks, que usan la API para *valorar*, no para enseñar cómo se construye un
+    `Model`/`Product` desde el registry) — documentado inline en una nota nueva en la celda
+    markdown de la sección 2. A partir de la sección 4 (`Market`/pricing), el notebook migra a
+    `quantdesk.Engine` como los otros 9: un único `qeng = q.Engine(backend="auto",
+    n_paths=5_000, n_steps=208, seed=7)` sustituye la traducción manual de `Market`/
+    `PricingContext`/`ExecutionContext` que antes se repetía; `qeng.price(...)` (perfil de
+    exposición, CVA), `qeng.price_batch`/`price_many`/`price_grid` (sección 8) sustituyen las
+    llamadas nativas con `pricing`/`execution` repetidos a mano en cada una.
+  - **Hueco real encontrado, análogo al de `GBM` en `greeks_flow.py` (Fase 4).** La calibración
+    (sección 7, celdas 18/19) sigue sobre la fachada nativa (`eng.create_calibrator(...)`,
+    `.calibrate(market_nativo, ...)`) porque `market_1f`/`market_2f` se fabrican con
+    `engine.MarketSnapshot.synthetic_from_hull_white[_2f](...)` -- un `@staticmethod` nativo sin
+    equivalente tipado en `quantdesk.market.Market` (que solo modela pillars/zero_rates/hazard/
+    recovery explícitos, no "deriva una curva desde HullWhite1F cerrado"). `Engine.calibrate`
+    (§3.2) exige `market: Market` tipado y llama a `_to_native_market` (`market.to_params()`)
+    por dentro -- pasarle un `engine.MarketSnapshot` ya nativo fallaría (no tiene
+    `.to_params()`). No se ha tocado `quantdesk/market.py` para añadir este hueco (fuera de
+    alcance de Fase 5, que es solo notebooks) -- documentado aquí y en el docstring de la celda
+    para que quien revise Fase 6/7 no lo redescubra a ciegas.
+  - **Verificación numérica exacta** (mismo método que `01`...`09`, comparado contra
+    `git show dff8735:clients/python/notebooks/demo_registry.ipynb`): EE=`[0.0, 12862.617942...,
+    13673.529752..., 11957.816098..., 7124.106240...]`, PFE(95%) y CVA=`503.64194077997536`
+    idénticos bit a bit; `optimal_params` de ambas calibraciones (`HullWhite1F`: `a≈0.15`,
+    `b≈0.025`; `HullWhite2F`: `a≈0.15`, `b≈0.25`, `eta=0.01`, `rho=-0.6`) idénticos bit a bit;
+    las 8 celdas de `price_grid` y las 3 filas de `price_batch`/`price_many` (PV/CVA) idénticas
+    bit a bit -- incluyendo `PV=948.4537...`/`CVA=626.7254...` del `trade_index=0`, mismos
+    valores ya verificados de forma independiente en la Fase 1/2 de este plan para el mismo
+    `IRSwap`/`HullWhite1F`/`Market`. La única figura (`matplotlib`, perfil EE/PFE) es idéntica
+    bit a bit por hash SHA-256.
+  - **Diferencias esperadas, no regresiones (documentadas, no silenciadas).** (1) La versión
+    "antes" en `dff8735` tenía `execution_count` fuera de secuencia (`[12, 3, 4, 5, 6, 7, 8, 13,
+    14, ..., 20]`) -- este notebook llevaba tiempo sin re-ejecutarse de punta a punta antes de
+    esta fase (a diferencia de `01`...`09`, mantenidos al día por `PLAN_IMPROVE_NOTEBOOK2.md`);
+    tras esta fase, `execution_count` es secuencial `1..15` sin huecos. (2) `list_models()`/
+    `list_measures()` muestran un modelo (`GbmBasket`) y una medida (`PayoffUnilateralCvaQ`) que
+    NO aparecían en la captura "antes" -- confirmado que esto es 100% independiente de
+    `quantdesk` (`engine.Engine()` nativo puro, sin pasar por `quantdesk`, ya devuelve
+    `GbmBasket`/`PayoffUnilateralCvaQ` hoy): son características añadidas al motor en fases de
+    OTROS planes (`PLAN_IMPROVE_NOTEBOOK.md` Fase 3, etc.) posteriores a la última vez que
+    `demo_registry.ipynb` se había ejecutado de verdad, no un efecto de esta migración -- de
+    hecho es la propia sección 9 del notebook demostrándose a sí misma ("si alguien añade un
+    modelo/medida nuevo, aparece aquí sin tocar el notebook"). (3) La celda de `!pip install
+    pydantic matplotlib` imprime "already satisfied" en vez del log de descarga/instalación real
+    -- differencia esperada de tener ya el entorno preparado de sesiones anteriores, no
+    relacionada con el código del notebook. (4) La celda que antes mostraba el `repr` de
+    `(MarketSnapshot, PricingContext, ExecutionContext)` nativos ahora muestra `(Market(...),
+    <quantdesk.engine.Engine at 0x...>)` -- cambio de contenido esperado y deliberado (ya no se
+    construyen esos tres objetos nativos a mano en esa celda), no una regresión.
+- **`clients/python/notebooks/README.md`.** Tenía 2 referencias a `engine_typed` (línea 7,
+  descripción general de la batería; línea 11, `engine_typed.greeks` en la entrada de `01`).
+  Ambas actualizadas a `quantdesk`/`quantdesk.greeks` -- mismo criterio editorial que ya aplicó
+  Fase 4 a `clients/python/examples/README.md`. La línea 7 conserva una mención explícita a
+  `engine_typed` como el nombre que `quantdesk` sustituye (cita histórica de una frase, no
+  documentación activa del patrón antiguo) -- coherente con el criterio de exclusión que fijará
+  Fase 7 para citas históricas.
+- **Revisión de coherencia de `01`...`09` (sin repetir la migración, ya hecha antes del corte de
+  sesión -- solo auditoría).** Verificado con `grep`/introspección del código fuente de cada
+  notebook, no solo relectura:
+  - **Orden de argumentos.** Los 60 usos de `.price(` en los 9 notebooks respetan
+    `price(trade, model, market, metrics)` (nunca el orden nativo) sin excepción -- confirmado
+    listando cada llamada con su primer argumento.
+  - **`pricing=`/`execution=`.** Ninguno de los 9 notebooks usaba `ExecutionContext` más de una
+    vez en su versión pre-refactor (`grep` sobre `dff8735`: `ExecutionContext(` aparece
+    exactamente 1 vez en cada uno) -- ningún notebook comparaba backends dentro de sí mismo, así
+    que no hace falta `execution=` en ninguno tras la migración (confirmado: 0 usos), sin pérdida
+    de capacidad. `pricing=` sí se usa donde el notebook pre-refactor variaba `PricingContext`
+    más de una vez dentro del mismo script (`01`, `04`, `06`, `07`, `08`, `09` -- construyen un
+    único `Engine`/`q.Engine` y pasan `PricingContext` puntuales por llamada en vez de
+    reinstanciar el motor), verificado comparando el recuento de `PricingContext(` "antes" contra
+    el recuento de `pricing=`/`q.PricingContext(` "después" notebook a notebook: ninguno perdió
+    la capacidad de comparar dentro del mismo notebook (p.ej. `07` sigue comparando Q vs P con
+    `pricing_p`/`pricing_hi`/`pricing_hit` puntuales sobre el mismo `eng`).
+  - **`Gbm`/`GbmP`/`evaluate_scenario`.** Mismos nombres de campo en los 8 notebooks que usan
+    `Gbm` (`s0`/`r`/`q`/`sigma`/`observable`, confirmado por introspección de cada llamada
+    `q.Gbm(...)`) y en los 2 que usan `GbmP` (`s0`/`mu`/`sigma`/`observable`) -- coincide con los
+    parámetros nativos de `"GBM"`/`"GBM_P"` (confirmado contra `create_model(...).to_params()`
+    real, no solo contra el propio docstring de `quantdesk/model.py`). `evaluate_scenario` solo
+    lo usa `09` (único notebook con pagos intrínsecos a graficar), patrón único, sin
+    inconsistencia que comparar entre notebooks.
+  - **Sin restos de construcción manual.** `grep` de `engine\.(MarketSnapshot|PricingContext|
+    ExecutionContext)\(` sobre los 9 notebooks migrados: cero coincidencias -- ninguno quedó a
+    medio migrar con una traducción típed→nativo residual.
+  - No se encontró ninguna discrepancia que corregir en `01`...`09`: la migración hecha antes
+    del corte de sesión era correcta en los nueve, tanto numérica (Paso 1) como
+    estructuralmente (este paso).
+- **Nota para Fase 6/7.** `Gbm`, `GbmP` (`clients/python/src/quantdesk/model.py`) y
+  `Engine.evaluate_scenario` (`clients/python/src/quantdesk/engine.py`) son piezas nuevas de
+  `quantdesk` sin cobertura de test dedicada todavía (no estaban contempladas en el diseño
+  original de §3.2/§3.1 de este documento -- `Gbm`/`GbmP` llenan un hueco que Fase 4 ya había
+  detectado y resuelto solo localmente en `greeks_flow.py`; `evaluate_scenario` es un hueco de
+  cobertura real de Fase 2, ver el docstring del método). Fase 6 debería añadirles al menos un
+  test cada uno (mismo criterio que el resto de `Engine`: comparación bit a bit contra el flujo
+  nativo equivalente). El hueco de calibración con `MarketSnapshot.synthetic_from_hull_white[_2f]`
+  sin equivalente tipado (`demo_registry.ipynb`, sección 7, arriba) queda documentado pero sin
+  resolver -- decisión para una fase futura si se considera que merece un `Market` "sintético"
+  tipado, fuera de alcance de Fase 5/6 de este plan.
+
 ### Fase 6 — Tests
 
 Renombrar y adaptar `clients/python/tests/test_engine_typed_{model,payoff,greeks,trade,

@@ -27,7 +27,7 @@ contenedor, `quantdesk`, para resolver un nombre de primer nivel).
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Sequence, Union
+from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
 import engine as _native
 
@@ -421,6 +421,27 @@ class Engine:
         native_market = self._to_native_market(market)
         native_pricing = self._to_native_pricing(self._resolve_pricing(pricing))
         return self._native.simulate_paths(native_model, native_market, native_pricing)
+
+    def evaluate_scenario(self, trade: TradeSpec, scenario: Dict[str, float]) -> List[Tuple[float, str, float]]:
+        """Evaluación DETERMINISTA de un `PayoffProduct` sobre un escenario de mercado fijo
+        (`engine.Engine.evaluate_scenario`, PLAN_IMPROVE_NOTEBOOK2.md Fase 1) -- sin modelo, sin
+        Monte Carlo, sin descuento: ejecuta el AST ya compilado (`ScenarioEvaluator`) sobre una
+        única ruta conocida. Devuelve el ledger crudo `list[(time, currency, amount)]` tal cual
+        el nativo (§3.3: nada que envolver).
+
+        Añadido en PLAN_API_REFACTOR.md Fase 5, no en la Fase 2 original: `evaluate_scenario` se
+        incorporó al binding nativo (`engine.Engine`) en PLAN_IMPROVE_NOTEBOOK2.md Fase 1, que se
+        implementó DESPUÉS de que la Fase 2 de este plan introspeccionara y envolviera el resto
+        de métodos de `engine.Engine` -- es un hueco real de cobertura (el criterio de aceptación
+        de la Fase 2, "ninguna capacidad de la fachada dinámica queda solo alcanzable importando
+        `engine` a mano", habría exigido cubrirlo si el método ya hubiera existido entonces), no
+        una omisión de diseño de esta fase. Encontrado al migrar
+        `09_option_strategies_and_greeks.ipynb`, que lo usa para el payoff intrínseco de cada
+        estrategia sin reimplementar `max(S-K,0)`/`max(K-S,0)` a mano en NumPy. Mismo patrón de
+        traducción típed -> nativo que el resto de métodos (`_to_native_product`); `scenario` ya
+        es un dict `{observable: spot}`, sin objeto tipado que traducir."""
+        native_product = self._to_native_product(trade)
+        return self._native.evaluate_scenario(native_product, scenario)
 
     def calibrate(self, model_type: str, market: Market, initial_guess: Dict[str, float]):
         """`create_calibrator(model_type) + .calibrate(market, initial_guess)` en un paso
