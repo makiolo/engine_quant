@@ -282,6 +282,89 @@ a `__init__.py`.
 **Criterio de aceptación.** El bloque "Después" de §1 de este documento se ejecuta tal cual
 contra un build local y produce los mismos números que el bloque "Antes".
 
+**Estado verificado / decisiones tomadas (sesión de implementación de esta fase).**
+
+- Implementado `clients/python/src/quantdesk/engine.py` (`quantdesk.engine`, sin colisión con el
+  paquete top-level `engine`: verificado explícitamente que `quantdesk.engine._native is
+  (import engine as top_engine)` da `True` — el import absoluto `import engine as _native`
+  dentro de `quantdesk/engine.py` resuelve al módulo nanobind compilado, nunca a sí mismo).
+  Contiene `Engine` (constructor + `price`, exactamente §3.2) y `PriceResult` (§3.3). Ambos
+  añadidos a `clients/python/src/quantdesk/__init__.py` y a su `__all__` (al principio de la
+  lista, antes de `PAR`).
+- `PriceResult` implementado como `Mapping[str, engine.MeasureResult]` (`__slots__ = ("_results",)`,
+  `__getitem__`/`__iter__`/`__len__` delegan en el dict envuelto) más `__getattr__` para el
+  acceso por punto — `__getattr__` solo se invoca cuando el atributo no existe ya por la vía
+  normal (slots, métodos de `Mapping`), así que nunca compite con `_results`/`keys`/`values`/
+  `items`/etc.; solo entra en juego para nombres de medida reales. `results.PV` y `results["PV"]`
+  son literalmente el mismo objeto `engine.MeasureResult` (verificado con `is`, ver abajo) — no
+  se reimplementa `scalar`/`times`/`primary`/`secondary`/`bump_used`/`has_scalar`.
+- Traducción típed → nativo dentro de `Engine.price` replica EXACTAMENTE el patrón que ya usan
+  `clients/python/examples/price_flow.py` y `price_flow_typed.py`: `eng.create_product(trade.
+  product_type, trade.to_params())`, `eng.create_model(model.model_type, model.to_params())`,
+  `engine.MarketSnapshot(**market.to_params())`, `engine.PricingContext(pricing.to_params())`
+  (dict posicional, no kwargs — confirmado con `engine.PricingContext.__init__.__doc__` ==
+  `"__init__(self, params: dict) -> None"`), `engine.ExecutionContext(execution.to_params())`
+  (mismo patrón). `metrics` se traduce elemento a elemento con `x.to_spec() if isinstance(x,
+  Measure) else x`, igual que ya documenta `quantdesk/measure.py`.
+- **Firma real del binding nativo confirmada por introspección** (no asumida del plan a ciegas):
+  `engine.Engine.price.__doc__` da `price(self, product: engine.Product, measure_names: list,
+  model: engine.Model, market: engine.MarketSnapshot, pricing: engine.PricingContext, execution:
+  engine.ExecutionContext) -> dict` — coincide exactamente con lo que el plan (§1 "Antes", §2)
+  daba por hecho, sin discrepancia. `create_product`/`create_model` firman `(self, name: str,
+  params: dict = {}) -> engine.Product/Model`, también sin discrepancia. `engine.MeasureResult`
+  expone `bump_used`, `has_scalar`, `primary`, `scalar`, `secondary`, `times` — el plan (§3.3) solo
+  nombra `scalar`/`times`/`primary`/`secondary` explícitamente; `bump_used`/`has_scalar` existen
+  también y quedan accesibles igual (no hay nada que envolver: son atributos del objeto nativo).
+  Ninguna discrepancia que resolver con criterio propio — el plan describía el binding con
+  precisión.
+- **Override puntual `pricing=`/`execution=` en `price(...)` no muta `Engine`** (verificación
+  explícita pedida por el plan, no solo inspección de código): `Engine.price` calcula
+  `active_pricing = pricing if pricing is not None else self._pricing` (mismo patrón para
+  `execution`) en una variable local — nunca reasigna `self._pricing`/`self._execution`.
+- **Resultado exacto de la verificación funcional** (venv `S:\Projects\engine_quant\venv`,
+  módulo nativo en `venv\Lib\site-packages\engine.cp312-win_amd64.pyd`, script de verificación en
+  el scratchpad de la sesión, trade/model/market idénticos al bloque "Después" de §1: `IRSwap`
+  notional 1,000,000, `fixed_rate=0.02`, pagos anuales 1..5y; `HullWhite1F(a=0.10, b=0.03,
+  sigma=0.01, r0=0.02)`; `Market(pillars=[1.0, 2.0], zero_rates=[0.02, 0.02], hazard_rate=0.02,
+  recovery_rate=0.40)`; `n_paths=5000, n_steps=208, seed=7`):
+  - `quantdesk.Engine.price(...)` (bloque "Después"): `PV = 948.4537547220389`,
+    `DV01 = 480.18800212936185`, `UnilateralCVA = 626.7254432766481`.
+  - Flujo nativo manual equivalente (bloque "Antes" sin `engine_typed`, construido a mano con
+    `eng = engine.Engine()`, `eng.create_model(...)`, `eng.create_product(...)`,
+    `engine.MarketSnapshot(**...)`, `engine.PricingContext(...)`, `engine.ExecutionContext(...)`,
+    usando las clases tipadas de `quantdesk` solo para los parámetros): `PV =
+    948.4537547220389`, `DV01 = 480.18800212936185`, `UnilateralCVA = 626.7254432766481` —
+    **idénticos bit a bit** a los de `quantdesk.Engine`, no una aproximación (comparados con
+    `==` en Python, no con tolerancia). `ExpectedExposure.primary`/`PFE95.primary` (vectores de
+    8 valores) también idénticos elemento a elemento (`list(...) == list(...)` → `True`).
+  - `results.PV.scalar == results["PV"].scalar` → `True`, y además `results.PV is
+    results["PV"]` → `True` (mismo objeto, no solo valores iguales) — comprobado para las 5
+    medidas del ejemplo, no solo `PV`.
+  - No-mutación con overrides: `Engine._pricing`/`Engine._execution` siguen siendo
+    `PricingContext(n_paths=5000, n_steps=208, seed=7)`/`ExecutionContext(backend="auto")` tras
+    llamar a `price(..., pricing=PricingContext(n_paths=1000, n_steps=50, seed=99))` y a
+    `price(..., execution=ExecutionContext(backend="cpu"))` — confirmado leyendo los atributos
+    directamente, no solo infiriéndolo del resultado. Verificación numérica más fuerte con una
+    medida sensible a `n_paths`/`seed` (`ExpectedExposure`, que sí depende de Monte Carlo, a
+    diferencia de `PV`/`DV01` de un IRS vainilla que son deterministas/bump-and-reval y no varían
+    con `n_paths`): con `pricing=PricingContext(n_paths=200, n_steps=208, seed=123)` puntual, el
+    perfil de exposición de esa llamada difiere del baseline (`[9625.35, 17355.03, 18352.55, ...]`
+    vs `[9625.35, 17303.52, 16924.32, ...]` — el override sí tiene efecto real en esa llamada),
+    pero una llamada posterior sin override reproduce el baseline exacto
+    (`[9625.35, 17303.52, 16924.32, ...]`, `==` elemento a elemento) — confirma que el override
+    no deja rastro en `Engine` para llamadas siguientes.
+- **Nota para Fase 2/6:** ningún hallazgo que bloquee las fases siguientes. La firma nativa
+  coincide con lo que el plan asume en todos los puntos tocados por esta fase
+  (`create_product`/`create_model`/`price`/`MeasureResult`/`PricingContext`/`ExecutionContext`/
+  `MarketSnapshot`); Fase 2 puede seguir el mismo patrón de introspección (`.__doc__` de cada
+  método nativo antes de envolverlo) para `price_batch`/`price_many`/`price_grid`/`all_greeks`/
+  `hessian`/`hvp`/`simulate_paths`/`calibrate`/`list_*`, que esta fase no tocó ni introspeccionó.
+  `PV`/`DV01` de un `IRSwap` vainilla no dependen de `n_paths`/`seed` (deterministas/bump-and-
+  reval) — quien escriba tests de Fase 6 para la no-mutación de overrides debería usar una medida
+  Monte Carlo real (`ExpectedExposure`/`PFE95`) para que el test sea significativo, no `PV`/`DV01`
+  (con esas dos el test pasaría igual aunque `Engine` sí mutara, por construcción del propio
+  producto/medida).
+
 ### Fase 2 — Resto de métodos de `Engine`
 
 `price_batch`/`price_many`/`price_grid`/`all_greeks`/`hessian`/`hvp`/`simulate_paths`/

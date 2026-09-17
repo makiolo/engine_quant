@@ -27,6 +27,7 @@ fachada dinámica (dict/Excel/C ABI), es una fachada más sobre el mismo registr
 
 from quantdesk import greeks
 from quantdesk.context import ExecutionContext, PricingContext
+from quantdesk.engine import Engine, PriceResult
 from quantdesk.greeks import Greek
 from quantdesk.market import Market
 from quantdesk.measure import PV, DV01, ExposureProfile, Measure, UnilateralCVA
@@ -91,6 +92,8 @@ from quantdesk.payoff import (
 from quantdesk.trade import PAR, IRSwap, TradeSpec
 
 __all__ = [
+    "Engine",
+    "PriceResult",
     "PAR",
     "TradeSpec",
     "IRSwap",
