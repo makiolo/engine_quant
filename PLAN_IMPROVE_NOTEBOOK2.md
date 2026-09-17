@@ -429,6 +429,123 @@ efectivo que uso el motor para una `Greek` con `bump=None` (resuelto internament
 `DEFAULT_THETA_BUMP` en Python deja de ser necesaria para `annualized=True` con `bump=None` (sigue
 pudiendo existir como conveniencia, pero ya no es la UNICA fuente de verdad).
 
+**Estado verificado / decisiones tomadas (sesión de implementación de esta fase).** El enunciado se
+verificó literal contra el código real (instrucción 1 de ejecución) antes de tocar nada: el único
+sitio que traduce `greeks::GreekResult` (que SÍ lleva `bump_used`, poblado por `compute_greek`) a
+`engine::MeasureResult` (que NO lo llevaba) es `GreekMeasure::evaluate` en
+`cpp/engine/src/greeks.cpp` (línea ~1544) -- confirma exactamente el "camino que usa directamente
+`greeks.theta(...).to_spec()`" que describe el enunciado. `PayoffPriceQMeasure`/`PresentValueMeasure`
+y el resto de medidas de `measure.hpp` construyen su propio `MeasureResult` sin pasar nunca por
+`GreekResult`, así que dejan `bump_used` en `std::nullopt` por default de agregado -- sin código
+adicional, exactamente el "no aplica" documentado.
+
+**Decisión de diseño: `ThetaGreek.annualize()` pasa a recibir el `MeasureResult` completo, no solo
+`.scalar`.** El enunciado no lo especifica explícitamente, pero es la única forma de que
+`annualize()` pueda leer `bump_used` sin que el llamante tenga que pasarlo por separado a mano (lo
+que habría reintroducido el mismo acoplamiento que se está cerrando, solo que en el sitio de
+llamada en vez de en el módulo). Cambia la firma pública (`annualize(raw_value: float)` ->
+`annualize(measure_result)`) -- cambio de ruptura deliberado, documentado en el docstring de la
+clase; los dos únicos consumidores dentro del repo (`01_vanilla_options_black_scholes.ipynb` §6 y
+`test_engine_typed_greeks.py`) se actualizaron en el mismo commit. `DEFAULT_THETA_BUMP` se retiró
+por completo (no se dejó como "conveniencia" opcional, ya que ningún sitio del repo lo necesitaba
+tras el cambio) -- si una fase futura necesita un valor de bump por defecto conocido de antemano
+(antes de llamar al motor), puede releerse añadiéndolo de nuevo, pero no había ningún consumidor
+real que lo justificara ahora.
+
+**Trabajo realizado, por capa:**
+
+- **C++ (motor)**:
+  - `cpp/engine/include/engine/measure.hpp`: `MeasureResult` gana `std::optional<double> bump_used`
+    (mismo patrón que `GreekResult::bump_used`), con doc-comment explicando cuándo se puebla (solo
+    "Greek") y cuándo no (el resto de medidas, deliberado, no un descuido).
+  - `cpp/engine/src/greeks.cpp`: `GreekMeasure::evaluate` copia `out.bump_used` al
+    `MeasureResult` que devuelve (una línea, mismo patrón que ya copiaba
+    `has_scalar`/`scalar`/`times`/`primary`/`secondary`).
+  - **C ABI (`abi.h`/`abi.cpp`) deliberadamente NO tocada**: `EngineMeasureResult` (el struct
+    plano de la C ABI, usado por `engine_abi_price`/Excel) no gana un campo `bump_used` -- el plan
+    solo pide `price.hpp`/`measure.hpp` y `engine_py_ext.cpp`. `EngineGreekResultEntry` (la fila de
+    `engine_abi_all_greeks`) ya tenía su propio `has_bump`/`bump_used` construido aparte, sin pasar
+    por `EngineMeasureResult`, así que Excel/C ya podían leer `bump_used` para `all_greeks` -- lo
+    único que sigue sin poder es leerlo para un "Greek" suelto vía `engine_abi_price`, igual que
+    Python antes de esta fase. **Limitación conocida, documentada aquí para la Fase 7 (auditoría de
+    notebooks) y cualquier trabajo futuro sobre el cliente Excel**: si algún notebook Excel o test
+    de paridad C ABI necesita `bump_used` de un "Greek" vía `price()`, hace falta una fase aparte
+    que añada el campo a `EngineMeasureResult`/`export_calc_result` (abi.cpp) -- no incluida aquí
+    por no estar en el alcance que pidió el enunciado.
+  - Test nuevo en `GreeksFase5Test.GreekMeasureReachesTimeThetaThroughEnginePrice`
+    (`test_greeks.cpp`): confirma `bump_used.has_value()` para theta vía "Greek", y añade una
+    segunda aserción (`PayoffPriceQ` suelto) confirmando que una medida no-"Greek" deja `bump_used`
+    vacío -- ambos lados del criterio de aceptación, mismo test, sin crear un `TEST` nuevo (se
+    amplió el existente porque ya montaba el fixture correcto).
+- **Python (bridge nanobind)**: `clients/python/src/engine_py_ext.cpp` -- `MeasureResult` gana
+  `.def_ro("bump_used", ...)`, mismo patrón que la línea equivalente de `GreekResult` unas filas
+  más abajo en el mismo archivo.
+- **Python (`engine_typed`)**: `clients/python/src/engine_typed/greeks.py` --
+  - `DEFAULT_THETA_BUMP` eliminada, junto con el comentario de acoplamiento cruzado Python/C++ que
+    la documentaba (ya no aplica: el bug estructural que motivaba la constante -- `MeasureResult`
+    sin `bump_used` -- está cerrado).
+  - `theta()`: ya NO resuelve `bump=None` a `DEFAULT_THETA_BUMP` cuando `annualized=True` --
+    `bump=None` se deja pasar tal cual al spec en los dos casos (`annualized` True o False), el
+    motor resuelve su propio default interno y lo reporta de vuelta en `bump_used`.
+  - `ThetaGreek.annualize(measure_result)`: firma cambiada (recibía `raw_value: float`, ahora
+    recibe el `MeasureResult` completo) -- lee `.scalar` para el caso `annualized=False`
+    (paso-through) y `.scalar / .bump_used` para `annualized=True`, con un `assert` explícito
+    (mensaje nombrando la causa) si `bump_used` faltara -- no debería ocurrir nunca para
+    `risk_factor="time.theta"` porque `TimeShift` no tiene ruta AAD/pathwise, pero se prefirió un
+    assert con mensaje a un `KeyError`/`AttributeError` opaco si algún día se rompiera esa
+    invariante.
+- **Tests Python** (`clients/python/tests/test_engine_typed_greeks.py`):
+  - Test nuevo `test_theta_measure_result_exposes_bump_used_matching_the_effective_bump`: confirma
+    que `bump_used` para `bump=None` reproduce el mismo escalar que pedir explícitamente ESE
+    `bump_used` como `bump`, y que una medida no-"Greek" (`PayoffPriceQ` suelto) deja `bump_used`
+    en `None`.
+  - `test_theta_annualized_divides_the_raw_bump_delta_by_the_bump_used` renombrado a
+    `..._by_measure_result_bump_used` y reescrito para la nueva firma de `annualize()` (pasa el
+    `MeasureResult`, no `.scalar`) y para confirmar `"bump" not in spec[1]` en vez de
+    `spec[1]["bump"] == DEFAULT_THETA_BUMP` (la constante ya no existe).
+- **Notebooks**:
+  - `01_vanilla_options_black_scholes.ipynb` §6: las dos llamadas a `annualize(...)` ahora
+    guardan el `MeasureResult` completo (`eng.price(...)["Greek"]`) y se lo pasan a `annualize()`
+    en vez de solo `.scalar`; la fila de comparación "theta (1 dia, crudo)" multiplica por
+    `theta_raw_result.bump_used` (leído del motor) en vez de `greeks.DEFAULT_THETA_BUMP` (retirada).
+    Markdown de la sección actualizado para no mencionar la constante retirada.
+  - `09_option_strategies_and_greeks.ipynb`: **sin cambios de código** -- ya evitaba el problema
+    por completo leyendo `th.bump_used` de `GreekResult` (vía `Engine.all_greeks`), exactamente el
+    rodeo que describe el "Problema" de esta fase como ya funcional; no calcula ni asume
+    `DEFAULT_THETA_BUMP` en ningún sitio, así que no había nada que simplificar ahí. Se re-ejecutó
+    igualmente para confirmar 0 errores y verificar que el diff resultante es solo timestamps de
+    ejecución (`iopub.execute_input`/`execution_count`), ninguna celda de texto/imagen cambió.
+- **Verificación en capas** (todas en verde, ninguna se saltó):
+  - C++: `cmd.exe /C "vcvars64.bat && cmake --build build --config Release"` compiló limpio.
+    `ctest --test-dir build -C Release`: **480/480** (mismo conteo que la línea base de Fase 0: el
+    test nuevo se añadió DENTRO de un `TEST()` ya existente, no como `TEST()` nuevo, así que el
+    número total de casos no cambia aunque el número de aserciones sí).
+  - Python: `.pyd`/`.py` recién compilados copiados a mano a `venv/Lib/site-packages` (el venv
+    tenía copias STALE de una instalación no editable, según la nota de entorno del enunciado).
+    `pytest clients/python/tests`: **156 passed** (155 previos + 1 test nuevo) + los mismos 2
+    errores preexistentes de fixture `abi_dll_path` (no relacionados, no tocados).
+  - Notebooks: `jupyter nbconvert --to notebook --execute --inplace` en los dos notebooks, 0 errores
+    en ambos. Valores numéricos verificados idénticos a la versión previa: la tabla de `01` §6 sigue
+    dando exactamente `delta=0.59763`, `theta (1 dia, crudo)=-0.01479`,
+    `theta (anualizado)=-5.39911`, `rho=50.25497` (mismos 5 dígitos que antes de esta fase, mismos
+    seeds); el diff de `09` contra HEAD anterior no toca ninguna celda de texto/imagen, solo
+    metadata de timing.
+
+**Limitaciones/decisiones que las fases siguientes deben conocer:**
+
+- **Cambio de firma de ruptura en `ThetaGreek.annualize()`** (`raw_value: float` ->
+  `measure_result`): cualquier código nuevo (Fase 7, auditoría de notebooks) que use
+  `greeks.theta(...)` debe pasar el `MeasureResult` completo a `annualize()`, no `.scalar`.
+- **La C ABI (`EngineMeasureResult`/Excel) sigue sin `bump_used` para un "Greek" pedido vía
+  `price()`** -- ver el punto de arriba bajo "Trabajo realizado, por capa · C++". Si la Fase 7 (u
+  otra) audita el cliente Excel y encuentra una necesidad real de este dato ahí, es una fase nueva,
+  no una extensión silenciosa de esta.
+- `09_option_strategies_and_greeks.ipynb` no necesitó cambios: cualquier fase futura que quiera
+  "unificar" el patrón de lectura de theta entre `01` (via `Greek`/`MeasureResult.bump_used`) y `09`
+  (via `all_greeks`/`GreekResult.bump_used`) encontrará que ambos caminos ya leen el bump real del
+  motor por su propio tipo de resultado -- no hay una asimetría que cerrar ahí, son dos APIs
+  distintas (`price()` vs `all_greeks()`) que ya convergen en el mismo dato.
+
 ### Fase 6 — Builders de estrategia reutilizables en `engine_typed.payoff`
 
 **Problema.** No hay `call_leg`/`put_leg`/combinador de estrategia en `engine_typed.payoff` --

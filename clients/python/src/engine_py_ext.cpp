@@ -586,6 +586,10 @@ NB_MODULE(engine, m) {
         .def_ro("secondary", &engine::MeasureResult::secondary)
         .def_ro("has_scalar", &engine::MeasureResult::has_scalar)
         .def_ro("scalar", &engine::MeasureResult::scalar)
+        // PLAN_IMPROVE_NOTEBOOK2.md Fase 5: None salvo que la medida evaluada sea "Greek" y el
+        // metodo realmente ejecutado haya usado un bump numerico (mismo patron que
+        // GreekResult.bump_used mas abajo).
+        .def_ro("bump_used", &engine::MeasureResult::bump_used)
         .def("__repr__", [](const engine::MeasureResult& self) {
             return "<MeasureResult times=" + std::to_string(self.times.size()) +
                    " has_scalar=" + (self.has_scalar ? std::string("True") : std::string("False")) + ">";

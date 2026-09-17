@@ -110,44 +110,45 @@ def dv01(
     return Greek(metric=metric, risk_factor=risk_factor, metric_params=metric_params, bump=bump)
 
 
-#: Bump temporal por defecto para `theta()`/`risk_factor="time.theta"`, en anios (un dia).
-#: DEBE coincidir con `default_time_shift_bump()` en `cpp/engine/src/greeks.cpp` -- es un
-#: default que hoy vive en dos lenguajes porque `engine.MeasureResult` (lo que devuelve
-#: `Engine.price(...)["Greek"]`, el camino que usa `theta()`) no expone `bump_used` -- a
-#: diferencia de `engine.GreekResult` (lo que devuelve `Engine.all_greeks(...)`), que si lo
-#: expone. Cerrar esa asimetria es cambio de bridge C++ (`engine_py_ext.cpp`), fuera de
-#: alcance de PLAN_IMPROVE_NOTEBOOK.md Fase 4 (documentacion/API pura). Mientras tanto,
-#: `theta(annualized=True)` con `bump=None` resuelve el bump a ESTE valor y lo manda
-#: explicito en el spec (ver `theta()` abajo) -- no confia en que el default interno del
-#: motor coincida por convencion: si algun dia diverge de `default_time_shift_bump()`, el
-#: caso `bump=None` sigue siendo exacto por construccion (el motor usa el bump que se le
-#: pide, no el suyo propio), lo unico que podria desalinearse es el caso `annualized=False`
-#: con `bump=None` (que no depende de esta constante en absoluto).
-DEFAULT_THETA_BUMP: float = 1.0 / 365.0
-
-
 class ThetaGreek(Greek):
     """Subclase de `Greek` que devuelve `theta()` (PLAN_IMPROVE_NOTEBOOK.md Fase 4, ADR-IN-01
     en ese documento). `to_spec()`/`to_params()` se heredan sin cambios -- el motor no conoce
     `annualized`, nunca viaja en el spec (no es un parametro de la medida "Greek" en C++, es
-    puro post-proceso Python sobre el escalar que ya devolvio el motor). `annualize()` es ese
-    post-proceso: lo aplica el LLAMANTE explicitamente sobre el valor leido de
-    `MeasureResult.scalar`, porque `Engine.price(...)` no pasa por esta clase para construir
-    el resultado (solo consume `to_spec()`)."""
+    puro post-proceso Python sobre el resultado que ya devolvio el motor). `annualize()` es ese
+    post-proceso: lo aplica el LLAMANTE explicitamente sobre el `MeasureResult` leido de
+    `Engine.price(...)["Greek"]`, porque `Engine.price(...)` no pasa por esta clase para
+    construir el resultado (solo consume `to_spec()`).
+
+    PLAN_IMPROVE_NOTEBOOK2.md Fase 5: `annualize()` recibe el `MeasureResult` COMPLETO (no solo
+    `.scalar`) y lee `bump_used` de ahi -- el motor lo puebla con el bump EFECTIVAMENTE usado
+    para el time shift (`GreekMeasure::evaluate`, `cpp/engine/src/greeks.cpp`), resuelto
+    internamente cuando el llamante paso `bump=None`. Antes de esta fase, `engine.MeasureResult`
+    no exponia ese dato (a diferencia de `engine.GreekResult`, lo que devuelve
+    `Engine.all_greeks(...)`, que si lo hacia via `bump_used`) y este modulo mantenia una
+    constante Python duplicada (`DEFAULT_THETA_BUMP`, retirada en esta fase) que DEBIA coincidir
+    a mano con `default_time_shift_bump()` en `cpp/engine/src/greeks.cpp` -- un acoplamiento
+    cruzado Python/C++ que ya no hace falta."""
 
     annualized: bool = False
 
-    def annualize(self, raw_value: float) -> float:
-        """Aplica la convencion elegida en el ADR: si `annualized` es False (default), `raw_value`
-        se devuelve tal cual (ΔV crudo del bump, la convencion por defecto de `theta()`). Si es
-        True, devuelve `raw_value / self.bump` (derivada anualizada dV/dt) -- `self.bump` es
-        siempre un float concreto en este caso (`theta()` lo resuelve a `DEFAULT_THETA_BUMP` si
-        el llamante no dio uno explicito), nunca `None`, precisamente para que esta division use
-        EL MISMO bump que el motor uso para calcular `raw_value`."""
+    def annualize(self, measure_result) -> float:
+        """Aplica la convencion elegida en el ADR sobre `measure_result` (el `engine.MeasureResult`
+        que devolvio `eng.price(product, [self.to_spec()], ...)["Greek"]`): si `annualized` es
+        False (default), `measure_result.scalar` se devuelve tal cual (ΔV crudo del bump, la
+        convencion por defecto de `theta()`). Si es True, devuelve
+        `measure_result.scalar / measure_result.bump_used` (derivada anualizada dV/dt) --
+        `bump_used` es el bump REAL que el motor aplico para esta Greek concreta (nunca una
+        constante Python que pudiera desalinearse del default interno del motor)."""
         if not self.annualized:
-            return raw_value
-        assert self.bump is not None  # invariante garantizado por theta(), ver abajo
-        return raw_value / self.bump
+            return measure_result.scalar
+        bump_used = measure_result.bump_used
+        assert bump_used is not None, (
+            "MeasureResult.bump_used ausente para una Greek risk_factor='time.theta' -- el motor "
+            "siempre resuelve theta via bump-and-reval (TimeShift no tiene ruta AAD/pathwise, ver "
+            "metric_supports_time_shift en greeks.cpp); si esto salta indica una regresion del "
+            "motor, no un caso legitimo de bump_used ausente."
+        )
+        return measure_result.scalar / bump_used
 
 
 def theta(
@@ -161,33 +162,30 @@ def theta(
     para un unico bump `dt` (anios, `bump` aqui) y ESE ΔV crudo es lo que se devuelve --
     NO la derivada anualizada `dV/dt` -- porque para un desk es mas intuitivo como "P&L de
     revalorizar la cartera un dia" que como una tasa por anio, y porque `dt` por defecto es un
-    dia calendario real (`DEFAULT_THETA_BUMP` = 1/365 anios), no un bump infinitesimal elegido
+    dia calendario real (un dia = 1/365 anios, el default interno del motor,
+    `default_time_shift_bump()` en `cpp/engine/src/greeks.cpp`), no un bump infinitesimal elegido
     solo por estabilidad numerica como en `delta`/`vega`/`rho`/`dv01`. Es la UNICA Greek con esta
     convencion (esas otras cuatro si son derivadas propiamente normalizadas por el tamano del
     bump).
 
-    `annualized=True` (nuevo en esta fase) devuelve en cambio `ΔV / dt`, es decir, la derivada
-    anualizada `dV/dt` -- equivalente a lo que hace el llamante hoy a mano multiplicando/
-    dividiendo por `bump_days` fuera de la API (ver antes/despues en
-    `01_vanilla_options_black_scholes.ipynb` §6). El escalado ocurre en Python DESPUES de que el
-    motor devuelva el resultado (`ThetaGreek.annualize(raw_value)`, ver esa clase) -- `theta()`
-    en si solo construye el spec, no llama al motor, asi que el llamante sigue el patron
-    `eng.price(product, [greek.to_spec()], ...)["Greek"].scalar` habitual y aplica
-    `greek.annualize(...)` sobre ese escalar; no hace falta que sepa el valor concreto de
-    `bump` para hacerlo bien (evita duplicar el numero magico `1/365` en el notebook).
+    `annualized=True` (nuevo en `PLAN_IMPROVE_NOTEBOOK.md` Fase 4) devuelve en cambio `ΔV / dt`,
+    es decir, la derivada anualizada `dV/dt` -- equivalente a lo que hace el llamante hoy a mano
+    multiplicando/dividiendo por `bump_days` fuera de la API. El escalado ocurre en Python
+    DESPUES de que el motor devuelva el resultado (`ThetaGreek.annualize(measure_result)`, ver
+    esa clase) -- `theta()` en si solo construye el spec, no llama al motor, asi que el llamante
+    sigue el patron `eng.price(product, [greek.to_spec()], ...)["Greek"]` habitual y aplica
+    `greek.annualize(...)` sobre ese `MeasureResult`.
 
-    `bump` aqui es `dt` (anios) -- default un dia (`DEFAULT_THETA_BUMP` = 1/365) si se omite.
-    Con `annualized=True` y `bump=None`, se resuelve `DEFAULT_THETA_BUMP` y se manda EXPLICITO
-    en el spec (a diferencia del caso `annualized=False`, donde `bump=None` se deja pasar tal
-    cual y es el motor quien aplica su propio default) -- asi el bump que usa el motor para
-    calcular y el bump por el que se divide son garantizadamente el mismo, sin depender de que
-    el default de Python y el de `cpp/engine/src/greeks.cpp::default_time_shift_bump()` sigan
-    coincidiendo por convencion."""
-    effective_bump = bump
-    if annualized and effective_bump is None:
-        effective_bump = DEFAULT_THETA_BUMP
+    `bump` aqui es `dt` (anios) -- `None` (default) se deja pasar TAL CUAL en el spec, sea cual
+    sea `annualized`: es el motor quien resuelve su propio default interno
+    (`default_time_shift_bump()`) y lo reporta de vuelta en `MeasureResult.bump_used`
+    (PLAN_IMPROVE_NOTEBOOK2.md Fase 5) -- `ThetaGreek.annualize()` divide por ESE valor, nunca
+    por una constante Python que pudiera desalinearse del default real del motor. Antes de esa
+    fase, `annualized=True` con `bump=None` tenia que resolver el bump a mano en Python
+    (`DEFAULT_THETA_BUMP`, retirada) precisamente porque `engine.MeasureResult` no exponia el
+    bump efectivo -- ya no hace falta."""
     return ThetaGreek(
-        metric=metric, risk_factor="time.theta", metric_params=metric_params, bump=effective_bump, annualized=annualized
+        metric=metric, risk_factor="time.theta", metric_params=metric_params, bump=bump, annualized=annualized
     )
 
 

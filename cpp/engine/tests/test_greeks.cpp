@@ -1163,6 +1163,21 @@ TEST(GreeksFase5Test, GreekMeasureReachesTimeThetaThroughEnginePrice) {
     ASSERT_EQ(result.size(), 1u);
     ASSERT_TRUE(result[0].result.has_scalar);
     EXPECT_LT(result[0].result.scalar, 0.0);
+
+    // PLAN_IMPROVE_NOTEBOOK2.md Fase 5: MeasureResult.bump_used (nuevo) debe venir poblado para
+    // una "Greek" resuelta por bump-and-reval (TimeShift no tiene ruta AAD/pathwise) -- mismo
+    // valor que expondria GreekResult::bump_used para la misma peticion via compute_greek.
+    ASSERT_TRUE(result[0].result.bump_used.has_value());
+    EXPECT_GT(*result[0].result.bump_used, 0.0);
+
+    engine::PriceResult non_greek_result = engine::price(
+        registries, product, std::vector<engine::MeasureSpec>{{"PayoffPriceQ", Params{}}}, model, flat_market(),
+        pricing_context(1'000, 7), cpu_execution()
+    );
+    ASSERT_EQ(non_greek_result.size(), 1u);
+    // PLAN_IMPROVE_NOTEBOOK2.md Fase 5: "bump_used" no aplica a una medida que no es "Greek" --
+    // se deja explicitamente vacio, nunca un valor inventado.
+    EXPECT_FALSE(non_greek_result[0].result.bump_used.has_value());
 }
 
 // --- Fase 6: segundo orden y derivadas cruzadas (Gamma, Vanna) ----------------------------------

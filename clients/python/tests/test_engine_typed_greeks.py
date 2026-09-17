@@ -94,27 +94,52 @@ def test_delta_of_a_call_through_price_matches_black_scholes():
     assert math.isclose(delta, expected, rel_tol=0.05)
 
 
-def test_theta_annualized_divides_the_raw_bump_delta_by_the_bump_used():
+def test_theta_measure_result_exposes_bump_used_matching_the_effective_bump():
+    # PLAN_IMPROVE_NOTEBOOK2.md Fase 5: engine.MeasureResult.bump_used (nuevo) para una "Greek"
+    # con bump=None debe coincidir EXACTAMENTE con el bump que el motor resolvio internamente
+    # (default_time_shift_bump() en cpp/engine/src/greeks.cpp) -- verificado repitiendo la
+    # llamada con ESE bump explicito y comprobando que el escalar no cambia.
+    eng, product, model, market, pricing, execution = _gbm_call_fixture()
+    greek = greeks.theta("PayoffPriceQ")  # bump=None
+    result = eng.price(product, [greek.to_spec()], model, market, pricing, execution)["Greek"]
+    assert result.bump_used is not None
+
+    explicit_greek = greeks.theta("PayoffPriceQ", bump=result.bump_used)
+    explicit_result = eng.price(product, [explicit_greek.to_spec()], model, market, pricing, execution)["Greek"]
+    assert math.isclose(explicit_result.scalar, result.scalar, rel_tol=0.0, abs_tol=1e-9)
+
+    # Medidas que no son "Greek" nunca rellenan bump_used (no aplica, PLAN_IMPROVE_NOTEBOOK2.md
+    # Fase 5) -- se deja explicitamente None, nunca un valor inventado.
+    pv_result = eng.price(product, ["PayoffPriceQ"], model, market, pricing, execution)["PayoffPriceQ"]
+    assert pv_result.bump_used is None
+
+
+def test_theta_annualized_divides_the_raw_bump_delta_by_measure_result_bump_used():
     # PLAN_IMPROVE_NOTEBOOK.md Fase 4 (ADR-IN-01): annualized=False (default) devuelve el
     # DeltaV crudo del bump (convencion historica, sin cambios); annualized=True devuelve
-    # DeltaV/bump (derivada anualizada dV/dt), aplicado en Python via ThetaGreek.annualize()
-    # DESPUES de leer el escalar que ya devolvio el motor -- el motor nunca ve `annualized`.
+    # DeltaV/bump (derivada anualizada dV/dt). PLAN_IMPROVE_NOTEBOOK2.md Fase 5:
+    # ThetaGreek.annualize() ahora recibe el MeasureResult completo (no solo el escalar) y lee
+    # `bump_used` de ahi -- ya no depende de la constante Python DEFAULT_THETA_BUMP (retirada).
     eng, product, model, market, pricing, execution = _gbm_call_fixture()
 
     raw_greek = greeks.theta("PayoffPriceQ")
-    raw_theta = eng.price(product, [raw_greek.to_spec()], model, market, pricing, execution)["Greek"].scalar
-    assert raw_greek.annualize(raw_theta) == raw_theta  # annualized=False: paso-through
+    raw_result = eng.price(product, [raw_greek.to_spec()], model, market, pricing, execution)["Greek"]
+    assert raw_greek.annualize(raw_result) == raw_result.scalar  # annualized=False: paso-through
 
     annualized_greek = greeks.theta("PayoffPriceQ", annualized=True)
     spec = annualized_greek.to_spec()
-    assert spec[1]["bump"] == greeks.DEFAULT_THETA_BUMP  # bump resuelto explicito, no None
-    annualized_raw = eng.price(product, [spec], model, market, pricing, execution)["Greek"].scalar
-    annualized_theta = annualized_greek.annualize(annualized_raw)
+    assert "bump" not in spec[1]  # bump=None se deja pasar tal cual, el motor resuelve su default
+    annualized_result = eng.price(product, [spec], model, market, pricing, execution)["Greek"]
+    annualized_theta = annualized_greek.annualize(annualized_result)
 
-    # Mismo bump (1/365) en ambas llamadas => ambos escalares crudos deben coincidir (mismo
-    # bump-and-reval), y el anualizado debe ser exactamente ese crudo dividido por el bump.
-    assert math.isclose(annualized_raw, raw_theta, rel_tol=0.0, abs_tol=1e-9)
-    assert math.isclose(annualized_theta, raw_theta / greeks.DEFAULT_THETA_BUMP, rel_tol=0.0, abs_tol=1e-9)
+    # Mismo bump por defecto en ambas llamadas (bump=None en las dos) => ambos escalares crudos
+    # deben coincidir (mismo bump-and-reval), y el anualizado debe ser exactamente ese crudo
+    # dividido por el bump_used que reporto el motor.
+    assert math.isclose(annualized_result.scalar, raw_result.scalar, rel_tol=0.0, abs_tol=1e-9)
+    assert annualized_result.bump_used is not None
+    assert math.isclose(
+        annualized_theta, raw_result.scalar / annualized_result.bump_used, rel_tol=0.0, abs_tol=1e-9
+    )
 
 
 def test_payoff_sensitivity_q_is_a_pathwise_alias_of_greek():
@@ -328,7 +353,8 @@ if __name__ == "__main__":
     test_greek_forwards_an_explicit_bump_and_method()
     test_builders_forward_an_explicit_bump_and_method_too()
     test_delta_of_a_call_through_price_matches_black_scholes()
-    test_theta_annualized_divides_the_raw_bump_delta_by_the_bump_used()
+    test_theta_measure_result_exposes_bump_used_matching_the_effective_bump()
+    test_theta_annualized_divides_the_raw_bump_delta_by_measure_result_bump_used()
     test_payoff_sensitivity_q_is_a_pathwise_alias_of_greek()
     test_payoff_sensitivity_q_rejects_a_product_that_is_not_a_payoff_product()
     test_all_greeks_on_gbm_returns_the_four_model_parameters_plus_curve_credit_and_theta()

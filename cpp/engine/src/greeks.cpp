@@ -1552,6 +1552,10 @@ MeasureResult GreekMeasure::evaluate(
     result.times = out.times;
     result.primary = out.primary;
     result.secondary = out.secondary;
+    // PLAN_IMPROVE_NOTEBOOK2.md Fase 5: propaga el bump efectivo tal cual lo dejó
+    // `compute_greek` -- `std::nullopt` si el método realmente ejecutado no usó bump numérico
+    // (AAD/pathwise), nunca un valor inventado.
+    result.bump_used = out.bump_used;
     return result;
 }
 

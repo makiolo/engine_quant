@@ -1,5 +1,6 @@
 #pragma once
 
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -16,12 +17,23 @@ namespace engine {
 // Resultado uniforme de cualquier medida (PLAN.md §5.4): times/primary/secondary son el
 // perfil temporal (EE/PFE para ExposureProfileMeasure, vacíos para el resto), has_scalar/
 // scalar es el agregado escalar (PV, DV01, CVA).
+//
+// `bump_used` (PLAN_IMPROVE_NOTEBOOK2.md Fase 5): mismo patrón que
+// `engine::greeks::GreekResult::bump_used` -- SOLO se puebla cuando la medida evaluada es
+// "Greek" (`GreekMeasure::evaluate`, greeks.cpp) y el método realmente ejecutado usó un bump
+// numérico (bump-and-reval); queda `std::nullopt` para el resto de medidas (PV/DV01/
+// ExposureProfile/UnilateralCVA/PayoffPriceQ/...) porque "bump" no tiene sentido para ellas, y
+// también para una "Greek" resuelta por AAD/pathwise (sin bump numérico) -- nunca se rellena con
+// un valor inventado. Cierra la asimetría que dejaba a `engine.MeasureResult` (el camino de
+// `Engine.price(...)["Greek"]`) sin forma de leer el bump efectivo que sí exponía
+// `engine.GreekResult` (`Engine.all_greeks`/`Engine.hessian`).
 struct MeasureResult {
     std::vector<double> times;
     std::vector<double> primary;
     std::vector<double> secondary;
     bool has_scalar = false;
     double scalar = 0.0;
+    std::optional<double> bump_used;
 };
 
 // Interfaz base de toda medida registrable (PLAN.md §5.4). Desde PLAN.md §7.15, `evaluate`
