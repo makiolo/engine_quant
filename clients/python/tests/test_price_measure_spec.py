@@ -2,6 +2,15 @@
 Fase 3, propuesta 3): tuplas `(nombre, params)` conviviendo con strings "pelados" en la misma
 llamada, y `DV01(bump=...)` dando un resultado distinto según el bump -- equivalente Python de
 `cpp/engine/tests/test_registry.cpp::Price.Dv01BumpIsConfigurableViaMeasureSpec`.
+
+PLAN_IMPROVE_NOTEBOOK2.md Fase 3 (opción (b), `MeasureSpec::alias`): antes de esa fase, dos
+entradas con el mismo `measure_name` en la misma llamada a `Engine.price(...)` colisionaban EN
+SILENCIO en el dict de salida (la ultima ganaba) -- friccion #5 del plan, el motivo exacto por el
+que pedir varias `Greek` (todas con `measure_name == "Greek"`) en una sola llamada era inutil.
+Desde esa fase, esa colision lanza `ValueError` explicito (nunca se pisa en silencio) y una
+tupla de 3 elementos `(nombre, params, alias)` permite distinguirlas -- ver
+`test_duplicate_measure_names_without_alias_raise_instead_of_silently_colliding` y
+`test_alias_lets_two_greek_entries_coexist_in_the_same_price_call` mas abajo.
 """
 
 import math
@@ -9,6 +18,8 @@ import sys
 
 if len(sys.argv) > 1:
     sys.path.insert(0, sys.argv[1])
+
+import pytest  # noqa: E402
 
 import engine  # noqa: E402
 
@@ -63,17 +74,52 @@ def test_dv01_bump_changes_the_scalar_proportionally():
     pricing = _deterministic_pricing()
     execution = _cpu_execution()
 
-    result = eng.price(
-        product, [("DV01", {}), ("DV01", {"bump": 0.0002})], model, market, pricing, execution
-    )
-    default_dv01 = result["DV01"].scalar  # el ultimo gana en el dict de salida, ver abajo
-
     default_only = eng.price(product, [("DV01", {})], model, market, pricing, execution)["DV01"].scalar
     doubled = eng.price(product, [("DV01", {"bump": 0.0002})], model, market, pricing, execution)["DV01"].scalar
 
     assert default_only != doubled
     assert math.isclose(doubled, default_only * 2.0, rel_tol=0.01)
-    assert math.isclose(default_dv01, doubled, abs_tol=1e-6)  # confirma que no se cacheo por nombre
+
+
+def test_duplicate_measure_names_without_alias_raise_instead_of_silently_colliding():
+    # PLAN_IMPROVE_NOTEBOOK2.md Fase 3: pedir dos entradas que resuelven al MISMO nombre de
+    # salida ("DV01" dos veces, sin alias) en la misma llamada a Engine.price(...) solia pisarse
+    # en silencio en el dict de salida (el ultimo ganaba, ver el comentario retirado de este
+    # mismo test arriba) -- ahora es un error explicito, nunca un overwrite silencioso.
+    eng = engine.Engine()
+    model = eng.create_model("HullWhite1F", _hull_white_params())
+    product = eng.create_product("IRSwap", _irs_5y_params(1_000_000.0, 0.02))
+    market = _market()
+    pricing = _deterministic_pricing()
+    execution = _cpu_execution()
+
+    with pytest.raises(Exception, match="mismo nombre de salida 'DV01'"):
+        eng.price(product, [("DV01", {}), ("DV01", {"bump": 0.0002})], model, market, pricing, execution)
+
+
+def test_alias_lets_two_dv01_entries_coexist_in_the_same_price_call():
+    # PLAN_IMPROVE_NOTEBOOK2.md Fase 3 (opcion (b)): la tupla de 3 elementos (nombre, params,
+    # alias) evita la colision de arriba -- cada entrada aparece bajo su propio alias en el
+    # dict de salida, con el MISMO valor numerico que pedirlas por separado (alias es puramente
+    # de presentacion, no cambia el calculo).
+    eng = engine.Engine()
+    model = eng.create_model("HullWhite1F", _hull_white_params())
+    product = eng.create_product("IRSwap", _irs_5y_params(1_000_000.0, 0.02))
+    market = _market()
+    pricing = _deterministic_pricing()
+    execution = _cpu_execution()
+
+    default_only = eng.price(product, [("DV01", {})], model, market, pricing, execution)["DV01"].scalar
+    doubled = eng.price(product, [("DV01", {"bump": 0.0002})], model, market, pricing, execution)["DV01"].scalar
+
+    result = eng.price(
+        product,
+        [("DV01", {}, "dv01_default"), ("DV01", {"bump": 0.0002}, "dv01_wide")],
+        model, market, pricing, execution,
+    )
+    assert set(result.keys()) == {"dv01_default", "dv01_wide"}
+    assert math.isclose(result["dv01_default"].scalar, default_only, abs_tol=1e-9)
+    assert math.isclose(result["dv01_wide"].scalar, doubled, abs_tol=1e-9)
 
 
 def test_price_resolves_measure_name_directly_from_the_registry():
@@ -95,5 +141,7 @@ def test_price_resolves_measure_name_directly_from_the_registry():
 if __name__ == "__main__":
     test_price_accepts_tuples_and_plain_strings_in_the_same_call()
     test_dv01_bump_changes_the_scalar_proportionally()
+    test_duplicate_measure_names_without_alias_raise_instead_of_silently_colliding()
+    test_alias_lets_two_dv01_entries_coexist_in_the_same_price_call()
     test_price_resolves_measure_name_directly_from_the_registry()
-    print("OK: tests de Engine.price con MeasureSpec (tuplas (nombre, params)) pasaron")
+    print("OK: tests de Engine.price con MeasureSpec (tuplas (nombre, params[, alias])) pasaron")

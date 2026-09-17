@@ -3,6 +3,7 @@
 #include <string>
 #include <tuple>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include <nanobind/nanobind.h>
@@ -98,20 +99,36 @@ std::vector<engine::greeks::RiskFactor> parse_risk_factor_list(const std::vector
 // siempre, PLAN.md §7.15/§7.19) es MeasureSpec{name, {}}; una tupla (nombre, dict) es
 // MeasureSpec{name, dict_to_params(dict)} -- así engine_typed.DV01(bump=...).to_spec() (una
 // tupla (str, dict)) y el ["PV", "DV01"] de siempre conviven en la misma llamada.
+//
+// PLAN_IMPROVE_NOTEBOOK2.md Fase 3 (opción (b)): una tupla de 3 elementos (nombre, dict, alias)
+// puebla además `MeasureSpec::alias` -- así varias entradas "Greek" (delta/vega/gamma/... de la
+// MISMA métrica) pueden convivir en una sola llamada a Engine.price(...)/price_grid(...) sin
+// pisarse en el dict de salida (antes de esta fase, colisionaban bajo la clave fija "Greek" --
+// ver el doc-comment de MeasureSpec::alias en cpp/engine/include/engine/price.hpp). `alias` es
+// SIEMPRE un string (nunca None/params vacíos con alias=None): omitir el alias es simplemente
+// usar la tupla de 2 elementos o el string pelado de siempre, no una tupla de 3 con alias=None.
 engine::MeasureSpec to_measure_spec(nb::handle item) {
     if (nb::isinstance<nb::str>(item)) {
         return engine::MeasureSpec{nb::cast<std::string>(item), engine::Params{}};
     }
     if (nb::isinstance<nb::tuple>(item)) {
         nb::tuple spec = nb::borrow<nb::tuple>(item);
-        if (spec.size() != 2) {
-            throw std::invalid_argument("Engine.price: una medida-tupla debe ser (nombre, params)");
+        if (spec.size() != 2 && spec.size() != 3) {
+            throw std::invalid_argument(
+                "Engine.price: una medida-tupla debe ser (nombre, params) o (nombre, params, alias)"
+            );
         }
         std::string name = nb::cast<std::string>(spec[0]);
         nb::dict params = nb::cast<nb::dict>(spec[1]);
-        return engine::MeasureSpec{std::move(name), dict_to_params(params)};
+        engine::MeasureSpec result{std::move(name), dict_to_params(params)};
+        if (spec.size() == 3) {
+            result.alias = nb::cast<std::string>(spec[2]);
+        }
+        return result;
     }
-    throw std::invalid_argument("Engine.price: cada medida debe ser un string o una tupla (nombre, params)");
+    throw std::invalid_argument(
+        "Engine.price: cada medida debe ser un string, una tupla (nombre, params) o (nombre, params, alias)"
+    );
 }
 
 std::vector<engine::MeasureSpec> to_measure_specs(const nb::list& measures) {
@@ -133,6 +150,37 @@ nb::dict params_to_dict(const engine::Params& params) {
         std::visit([&](const auto& v) { result[key.c_str()] = v; }, value);
     }
     return result;
+}
+
+// Traduce un engine::PriceResult (usado por Engine.price y dentro de BatchResult/GridResult) a
+// un dict {nombre_medida: MeasureResult} -- misma forma en las tres, extraída aquí para no
+// duplicarla (PLAN.md §7.19).
+//
+// PLAN_IMPROVE_NOTEBOOK2.md Fase 3 (opción (b)): `engine::PriceResult` es una LISTA ordenada
+// (`PriceResultEntry::measure_name` puede repetirse sin problema a ese nivel -- ver la nota de
+// diseño junto a `MeasureSpec::alias` en price.hpp), pero APLANARLA a un dict Python por nombre
+// SI puede pisar en silencio una entrada con otra si dos comparten `measure_name` -- exactamente
+// la friccion #5 de este plan ("varias 'Greek' se pisan entre si bajo la clave fija 'Greek'").
+// Esta es la capa correcta para rechazarlo explícito: antes de esta fase no había forma de
+// evitarlo (toda 'Greek' comparte measure_name="Greek", nunca configurable); ahora
+// `MeasureSpec::alias` (ver `to_measure_spec` arriba) permite dar a cada entrada un nombre de
+// salida distinto -- una colisión (con o sin alias) sigue siendo un error explícito, nunca un
+// overwrite silencioso.
+nb::dict calc_result_to_dict(const engine::PriceResult& result, const char* caller) {
+    nb::dict out;
+    std::unordered_set<std::string> seen;
+    for (const auto& entry : result) {
+        if (!seen.insert(entry.measure_name).second) {
+            throw std::invalid_argument(
+                std::string(caller) + ": dos medidas resuelven al mismo nombre de salida '" + entry.measure_name +
+                "' -- se pisarian en silencio en el dict de salida; dales un alias distinto "
+                "(tupla (nombre, params, alias), o Measure.to_spec(alias=...) en engine_typed, "
+                "PLAN_IMPROVE_NOTEBOOK2.md Fase 3)"
+            );
+        }
+        out[entry.measure_name.c_str()] = entry.result;
+    }
+    return out;
 }
 
 // engine::Portfolio::price/hessian/hvp (PLAN_BACKWARD.md §9 Fase 6) toman `const Registries&`
@@ -197,11 +245,7 @@ public:
     ) const {
         engine::PriceResult result =
             engine::price(registries_, product, to_measure_specs(measures), model, market, pricing, execution);
-        nb::dict out;
-        for (const auto& entry : result) {
-            out[entry.measure_name.c_str()] = entry.result;
-        }
-        return out;
+        return calc_result_to_dict(result, "Engine.price");
     }
 
     // Nivel 3, lote homogéneo (PLAN.md §7.17/§7.19): `products` debe ser del mismo tipo
@@ -485,17 +529,6 @@ public:
 private:
     engine::Registries registries_;
 };
-
-// Traduce un engine::PriceResult (usado dentro de BatchResult/GridResult) a un dict
-// {nombre_medida: MeasureResult} -- misma forma que ya devuelve Engine.price, extraída aquí
-// para no duplicarla entre BatchResult y GridResult (PLAN.md §7.19).
-nb::dict calc_result_to_dict(const engine::PriceResult& result) {
-    nb::dict out;
-    for (const auto& entry : result) {
-        out[entry.measure_name.c_str()] = entry.result;
-    }
-    return out;
-}
 
 } // namespace
 
@@ -803,7 +836,8 @@ NB_MODULE(engine, m) {
     nb::class_<engine::PriceBatchResultEntry>(m, "BatchResult")
         .def_ro("trade_index", &engine::PriceBatchResultEntry::trade_index)
         .def_prop_ro(
-            "measures", [](const engine::PriceBatchResultEntry& self) { return calc_result_to_dict(self.measures); }
+            "measures",
+            [](const engine::PriceBatchResultEntry& self) { return calc_result_to_dict(self.measures, "BatchResult.measures"); }
         )
         .def("__repr__", [](const engine::PriceBatchResultEntry& self) {
             return "<BatchResult trade_index=" + std::to_string(self.trade_index) + ">";
@@ -814,7 +848,8 @@ NB_MODULE(engine, m) {
         .def_ro("model_index", &engine::PriceGridResultEntry::model_index)
         .def_ro("market_index", &engine::PriceGridResultEntry::market_index)
         .def_prop_ro(
-            "measures", [](const engine::PriceGridResultEntry& self) { return calc_result_to_dict(self.measures); }
+            "measures",
+            [](const engine::PriceGridResultEntry& self) { return calc_result_to_dict(self.measures, "GridResult.measures"); }
         )
         .def("__repr__", [](const engine::PriceGridResultEntry& self) {
             return "<GridResult trade_index=" + std::to_string(self.trade_index) +
@@ -963,7 +998,21 @@ NB_MODULE(engine, m) {
             "product/model/market/pricing/execution de una vez. Devuelve un dict {nombre: "
             "MeasureResult} en el mismo orden que measure_names.\n\n"
             ">>> eng.price(trade, ['PV', 'DV01', 'ExpectedExposure', 'PFE95', 'UnilateralCVA'],\n"
-            "...          model, market, pricing, execution)"
+            "...          model, market, pricing, execution)\n\n"
+            "Cada elemento de measure_names es un string pelado, una tupla (nombre, params) o "
+            "-- PLAN_IMPROVE_NOTEBOOK2.md Fase 3 -- una tupla (nombre, params, alias): varias "
+            "entradas 'Greek' (que de otro modo colisionarian bajo la misma clave 'Greek' en el "
+            "dict de salida) pueden convivir en una sola llamada dandole a cada una un alias "
+            "distinto. No comparte simulacion Monte Carlo entre ellas (cada 'Greek' sigue "
+            "disparando su propio calculo interno) -- es una mejora de ERGONOMIA de API (menos "
+            "round-trips Python<->motor), no de rendimiento; ver el ADR de esa fase. Dos medidas "
+            "que resuelvan al mismo nombre de salida (con o sin alias) lanzan ValueError en vez "
+            "de pisarse en silencio.\n\n"
+            ">>> from engine_typed import greeks\n"
+            ">>> eng.price(trade, [\n"
+            "...     greeks.delta('PayoffPriceQ', 'spot').to_spec(alias='delta'),\n"
+            "...     greeks.vega('PayoffPriceQ').to_spec(alias='vega'),\n"
+            "... ], model, market, pricing, execution)  # {'delta': ..., 'vega': ...}"
         )
         .def(
             "price_batch",
@@ -977,7 +1026,8 @@ NB_MODULE(engine, m) {
             "Nivel 3 (PLAN.md §7.17/§7.19): calcula measure_names para una LISTA de trades del "
             "mismo tipo/calendario, vectorizado sin bucle -- cada trade de IRSwap debe traer "
             "fixed_rate explicito (sin use_par_rate). Devuelve list[BatchResult], una fila por "
-            "trade en el mismo orden que products."
+            "trade en el mismo orden que products. measure_names acepta el mismo alias opcional "
+            "por entrada que price() (PLAN_IMPROVE_NOTEBOOK2.md Fase 3)."
         )
         .def(
             "price_many",
@@ -990,7 +1040,8 @@ NB_MODULE(engine, m) {
             nb::arg("execution"),
             "Nivel 2 (PLAN.md §7.17/§7.19): igual que price_batch pero products puede mezclar "
             "tipos/calendarios distintos -- se agrupan internamente (nunca falla por "
-            "heterogeneidad) y el resultado se devuelve en el orden de entrada original."
+            "heterogeneidad) y el resultado se devuelve en el orden de entrada original. Mismo "
+            "alias opcional por entrada que price() (PLAN_IMPROVE_NOTEBOOK2.md Fase 3)."
         )
         .def(
             "price_grid",
@@ -1003,7 +1054,8 @@ NB_MODULE(engine, m) {
             nb::arg("execution"),
             "Explosion de combinaciones Trades x Models x Markets (PLAN.md §7.19): por cada "
             "par (modelo, mercado), llama a price_many sobre products entero. pricing/execution "
-            "son compartidos, no forman parte de la rejilla. Devuelve list[GridResult]."
+            "son compartidos, no forman parte de la rejilla. Devuelve list[GridResult]. Mismo "
+            "alias opcional por entrada que price() (PLAN_IMPROVE_NOTEBOOK2.md Fase 3)."
         )
         .def(
             "all_greeks",

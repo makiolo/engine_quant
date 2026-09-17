@@ -49,12 +49,21 @@ métricas y visualizaciones financieras — cada uno explota una parte distinta 
    que `02`; réplica manual con `q.both` a mano como celda de verificación cruzada)
    (buy/sell call/put, straddle, butterfly, condor, calendar spread, ratio spread, cada una
    larga y corta) bajo 6 escenarios de volatilidad: valor hoy vs payoff intrínseco, y las
-   griegas delta/gamma/theta/vega más vanna/volga/charm (`Engine.all_greeks`/`Engine.hessian`,
-   más una diferencia finita entre dos `PricingContext` con `method="bump_and_reval"` explícito
-   para charm — por diseño, no como workaround: ninguna especialización pathwise/likelihood-ratio
-   cubre `RiskFactorKind::TimeShift`, y desde PLAN_IMPROVE_NOTEBOOK2.md Fase 0 el motor además
-   rechaza explícitamente la especialización pathwise de spot/vega/rho bajo `pricing_date != 0` en
-   vez de ignorarlo en silencio). El payoff intrínseco a vencimiento (`intrinsic_value`) ya no se
+   griegas delta/gamma/theta/vega más vanna/volga/charm. Delta/vega/theta se piden en una única
+   llamada a `Engine.price(...)` con tres entradas `"Greek"` distinguidas por alias
+   (`Measure.to_spec(alias=...)`, PLAN_IMPROVE_NOTEBOOK2.md Fase 3, opción (b)) en vez de
+   `Engine.all_greeks` — no comparte pasada Monte Carlo entre las tres (eso sigue pendiente como
+   Fase 3b, ver el ADR de esa fase), pero evita las 3 simulaciones que `all_greeks` desperdiciaba
+   por punto del grid (`curve.parallel`/`credit.hazard_rate`/`credit.recovery_rate`, sin sentido
+   económico para este producto). Gamma/vanna/volga siguen viniendo de `Engine.hessian` (una
+   única pasada Monte Carlo compartida por las tres, sin cambios en esta fase). Charm sigue una
+   diferencia finita entre dos `PricingContext` con `method="bump_and_reval"` explícito — por
+   diseño, no como workaround: ninguna especialización pathwise/likelihood-ratio cubre
+   `RiskFactorKind::TimeShift`, y desde PLAN_IMPROVE_NOTEBOOK2.md Fase 0 el motor además rechaza
+   explícitamente la especialización pathwise de spot/vega/rho bajo `pricing_date != 0` en vez de
+   ignorarlo en silencio (las dos llamadas de charm no se pueden fusionar con alias porque usan
+   `PricingContext` distintos — `Engine.price` solo acepta uno por llamada). El payoff intrínseco
+   a vencimiento (`intrinsic_value`) ya no se
    reimplementa a mano en NumPy: delega en `Engine.evaluate_scenario` (PLAN_IMPROVE_NOTEBOOK2.md
    Fase 1, `ScenarioEvaluator` nativo sobre un escenario de spot fijo, sin modelo ni Monte Carlo);
    la fórmula NumPy se conserva como `intrinsic_value_manual`, celda de verificación cruzada que

@@ -6,9 +6,22 @@ funcionando igual (`eng.price(product, ["PV", "DV01"], ...)`), `.to_spec()` es s
 cuando una medida lleva configuración real.
 
     result = eng.price(product, [q.PV().to_spec(), q.DV01(bump=0.0002).to_spec()], ...)
-"""
 
-from typing import ClassVar, Tuple
+`.to_spec(alias=...)` (PLAN_IMPROVE_NOTEBOOK2.md Fase 3, opción (b)): produce en cambio la
+tupla de 3 elementos `(nombre, params, alias)` -- necesario para pedir varias `Greek` (todas
+registradas bajo el mismo `measure_name == "Greek"`, que de otro modo colisionarian en el dict
+de salida) en una sola llamada a `Engine.price`/`price_grid`, cada una con su propio alias:
+
+    result = eng.price(product, [
+        greeks.delta("PayoffPriceQ", "spot").to_spec(alias="delta"),
+        greeks.vega("PayoffPriceQ").to_spec(alias="vega"),
+    ], model, market, pricing, execution)
+    # result == {"delta": MeasureResult(...), "vega": MeasureResult(...)}
+
+Sin `alias` (default `None`), `to_spec()` sigue devolviendo la tupla de 2 elementos de siempre
+-- ningun consumidor existente de `.to_spec()` sin argumentos cambia de comportamiento."""
+
+from typing import ClassVar, Optional, Tuple, Union
 
 from pydantic import BaseModel, ConfigDict
 
@@ -22,10 +35,13 @@ class Measure(BaseModel):
         """Traduce este spec al `Params`/dict que consume la medida registrada subyacente."""
         raise NotImplementedError
 
-    def to_spec(self) -> Tuple[str, dict]:
+    def to_spec(self, alias: Optional[str] = None) -> Union[Tuple[str, dict], Tuple[str, dict, str]]:
         """`(nombre, params)`: lo que espera `Engine.price(...)` para pasar configuración por
-        medida (PLAN_REAPI.md §6 Fase 3)."""
-        return (self.measure_name, self.to_params())
+        medida (PLAN_REAPI.md §6 Fase 3). Con `alias` (PLAN_IMPROVE_NOTEBOOK2.md Fase 3, opción
+        (b)): `(nombre, params, alias)` -- ver el doc-comment del módulo."""
+        if alias is None:
+            return (self.measure_name, self.to_params())
+        return (self.measure_name, self.to_params(), alias)
 
 
 class PV(Measure):

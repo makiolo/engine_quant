@@ -534,6 +534,259 @@ camino actual, misma seed). Con (b) solamente: el codigo de Python se simplifica
 mejora parcial (queda una Fase 3b pendiente para la version que si comparte simulacion, si en su
 momento se decide que vale la pena el esfuerzo).
 
+**Estado verificado / decisiones tomadas (sesión de implementación de esta fase).**
+
+**Lectura del código real primero (instrucción 1 de ejecución).** Se leyeron `Engine::price`/
+`price_batch`/`price_many`/`price_grid` (`cpp/engine/include/engine/price.hpp`,
+`cpp/engine/src/price.cpp`), `compute_all_greeks`/`compute_hessian`/`try_pathwise*`/
+`try_hessian_likelihood_ratio` (`cpp/engine/src/greeks.cpp`) y las funciones Rust que cada una
+delega (`rust/crates/engine-core/src/payoff/api.rs`) antes de decidir nada, con estos hallazgos
+concretos:
+
+1. **La colisión de la friccion #5 NO vive en `engine::price()`/`price_batch()`/etc.**
+   (`cpp/engine/src/price.cpp`): estas funciones devuelven `PriceResult`/`PriceBatchResult`/
+   `PriceGridResult`, que son LISTAS ordenadas (`std::vector<PriceResultEntry>`), no dicts —
+   `price()` ya documentaba explícitamente "devuelve los resultados en el mismo orden en que se
+   pidieron". Confirmado con un test C++ preexistente
+   (`Price.Dv01BumpIsConfigurableViaMeasureSpec`) que pide `"DV01"` DOS VECES con distinto `bump`
+   en la MISMA llamada y accede a `result[0]`/`result[1]` por posición — ya funcionaba antes de
+   esta fase, la duplicidad de `measure_name` nunca fue un problema a este nivel. La colisión
+   real ocurre exclusivamente en el binding Python (`clients/python/src/engine_py_ext.cpp`),
+   donde `Engine::price`/`calc_result_to_dict` aplanan esa lista a un dict Python
+   `{measure_name: MeasureResult}` con `out[entry.measure_name.c_str()] = entry.result` — ahí
+   es donde una segunda entrada "Greek" pisa a la primera EN SILENCIO.
+2. **`compute_all_greeks` (`greeks.cpp`) confirmado: dispara `compute_greek` — con su propia
+   invocación a `metric->evaluate(...)`, y por tanto su propia simulación Monte Carlo completa —
+   una vez POR CADA `RiskFactor` candidato**, sin ningún mecanismo de compartir trayectorias entre
+   candidatos. La única excepción real en todo el motor es `try_hessian_likelihood_ratio`
+   (`payoff_local_hessian_gbm[_p]`, Rust): UNA sola llamada a `simulate_gbm_columns` reutilizada
+   para gamma+volga+vanna a la vez (verificado leyendo `payoff_local_hessian_lrm_on` en
+   `rust/crates/engine-core/src/payoff/api.rs`, líneas ~696-734: "UNA sola llamada a
+   `simulate_gbm_columns` (verificable por inspección: no hay ninguna otra en esta función)").
+   Ninguna otra combinación de Greeks comparte una simulación hoy.
+3. **Las dos interpretaciones de "una sola pasada" que pedía la instrucción 1 de ejecución, ambas
+   evaluadas:** (i) compartir literalmente un buffer de trayectorias en memoria entre varias
+   cantidades calculadas en la misma llamada — es exactamente lo que ya hace
+   `payoff_local_hessian_lrm_on` para gamma/volga/vanna (una `simulate_gbm_columns`, tres
+   agregaciones LRM sobre las mismas columnas); (ii) mismo seed → mismas trayectorias
+   DETERMINISTAS pero SIMULADAS DE NUEVO en cada llamada (lo que ya hace hoy el bump-and-reval de
+   `compute_greek`, números aleatorios comunes para reducir varianza, sin ahorrar el coste de
+   volver a generar la ruta) — confirmado leyendo `simulate_gbm_columns_at`
+   (`rust/crates/engine-core/src/payoff/api.rs`): CADA una de `risk_neutral_price_gbm_q`,
+   `payoff_sensitivity_gbm_q` (pathwise delta/vega/rho), `payoff_sensitivity2_gbm_q` (gamma LRM),
+   `payoff_sensitivity_cross_gbm_q` (vanna LRM) y `payoff_local_hessian_gbm_q` (gamma+volga+vanna
+   LRM) llama a `simulate_gbm_columns` POR SU CUENTA — nunca comparten el resultado de una
+   simulación ya hecha por otra. Solo la interpretación (i) es una mejora de rendimiento real;
+   la (ii) ya está disponible hoy vía `bump_override`/mismo `pricing.seed()` y no requiere
+   ningún cambio de esta fase.
+4. **Confirmado el hueco que deja la Fase 0 de este mismo plan** (ADR-IN2-01, Opción 2): las
+   cuatro especializaciones pathwise/likelihood-ratio de GBM/GBM_P
+   (`try_pathwise`/`try_pathwise2`/`try_pathwise_cross`/`try_hessian_likelihood_ratio`) rechazan
+   `pricing.pricing_date() != 0` explícitamente — cualquier diseño de la opción (a) que quisiera
+   compartir una pasada para precio+Greeks solo podría hacerlo bajo `pricing_date == 0`; con
+   `pricing_date != 0` (p.ej. un charm/theta futuro integrado en el mismo informe) la ruta
+   compartida tendría que caer a bump-and-reval, con una segunda simulación completa por
+   construcción (el propio charm de `09` ya lo hace así: dos `PricingContext` distintos no se
+   pueden fusionar en una sola llamada a nada, tengan alias o no).
+
+**Decisión de diseño: Opción (b) — alias por entrada de medida — SIN implementar la Opción (a).**
+Justificación con el código ya leído:
+
+- **Construir la Opción (a) de verdad (una simulación Rust compartida para precio+delta+vega+rho
+  vía pathwise MÁS gamma+vanna+volga vía LRM, todas sobre las MISMAS columnas ya simuladas)
+  habría requerido código Rust NUEVO**: hoy no existe ninguna función que combine el bucle
+  pathwise (`payoff_sensitivity_pathwise_on`, que interpreta el ledger como `Dual` sobre
+  `GbmDualPath`) con el bucle LRM (`payoff_local_hessian_lrm_on`, que pesa el valor presente por
+  ruta con `lrm::gamma_weight`/`volga_weight`/`vanna_weight`) sobre la MISMA llamada a
+  `simulate_gbm_columns` — habría que escribir esa función nueva (Rust,
+  `rust/crates/engine-core/src/payoff/api.rs`), exponerla en el bridge cxx
+  (`rust/crates/engine-ffi`), añadir el dispatch C++ correspondiente en `greeks.cpp` (un
+  `try_risk_report` nuevo, paralelo a `try_pathwise`/`try_hessian_likelihood_ratio` pero
+  agregando 7 cantidades en vez de 1 o 3) y el binding Python (`engine_py_ext.cpp`) — tocando las
+  tres capas (Rust + FFI + C++) de forma sustancial, exactamente el "esfuerzo alto" que la propia
+  tabla de priorización de este documento asigna a la opción (a) y que el enunciado de esta fase
+  explícitamente advertía no forzar si el alcance se dispara de forma desproporcionada.
+- **Precedente directo en esta misma cadena de fases**: la Fase 2 de este documento (Hessiano con
+  fallback bump-and-reval para contratos multi-fecha) ya enfrentó la misma disyuntiva (fallback
+  genérico de mayor esfuerzo (a) vs. skip explícito con motivo (b)) y **eligió (b)** con el mismo
+  criterio de "alcance desproporcionado para el esfuerzo asignado a esta fase" — mismo patrón,
+  mismo documento, aplicado consistentemente.
+- **La Opción (b) SÍ cierra un problema real y verificado del código**, no solo un "quick win"
+  cosmético: antes de esta fase, era estructuralmente IMPOSIBLE pedir dos Greeks en la misma
+  llamada a `Engine.price(...)` sin que una pisara a la otra en el dict de salida — confirmado
+  con un test que reproduce exactamente la friccion #5 (ver más abajo). Cierra la fricción real
+  que motivó Fase 3 para el caso de uso que `09` de verdad necesita (delta+vega+theta del mismo
+  modelo/mercado/pricing en una sola llamada), aunque no la resuelva "de raíz" en el sentido de
+  ahorrar simulaciones Monte Carlo.
+
+**Diseño exacto de la Opción (b) — dónde vive cada pieza (más fino que lo que anticipaba el
+enunciado de la fase, que hablaba solo de "una tupla de 3").** Al leer `price.cpp` se descubrió
+que `PriceResult` ya es una lista ordenada (punto 1 de arriba) — la colisión ocurre
+EXCLUSIVAMENTE al aplanarla a un dict. Diseño resultante, en dos mitades:
+
+- `engine::MeasureSpec` (`cpp/engine/include/engine/price.hpp`) gana un tercer campo
+  `std::optional<std::string> alias = std::nullopt`. `price()`/`price_batch()`/`price_many()`/
+  `price_grid()` (`cpp/engine/src/price.cpp`) etiquetan cada `PriceResultEntry::measure_name`
+  con `alias.value_or(name)` en vez de `name` a secas (helper `display_name()`, `namespace`
+  anónimo de `price.cpp`) — `alias` NO participa en la clave de deduplicación interna
+  (`cache_key = registered_type + "#" + params`), así que dos specs con el mismo `name`+`params`
+  pero distinto `alias` siguen compartiendo una única evaluación subyacente (mismo criterio que
+  "ExpectedExposure"/"PFE95" comparten "ExposureProfile" hoy) — `alias` es puramente cosmético,
+  nunca cambia qué se calcula. Esta capa NO valida unicidad de `alias.value_or(name)` (ver el
+  punto 1: duplicar `measure_name` sin alias sigue siendo válido aquí, mismo comportamiento que
+  siempre — `Price.Dv01BumpIsConfigurableViaMeasureSpec` sigue en verde sin cambios).
+- El binding Python (`clients/python/src/engine_py_ext.cpp`) es la capa que SÍ valida: `
+  to_measure_spec` acepta ahora una tupla de 3 elementos `(nombre, params, alias)` (además de la
+  de 2 y del string pelado de siempre) y puebla `MeasureSpec::alias`; `calc_result_to_dict`
+  (compartida entre `Engine.price`, `BatchResult.measures` y `GridResult.measures` — antes solo
+  la usaban las dos últimas, `Engine.price` construía su dict a mano de forma duplicada) lanza
+  `std::invalid_argument` explícito si dos entradas resuelven al mismo nombre de salida, en vez
+  de pisarse en silencio — el error nombra el nombre duplicado y ofrece la solución (`alias`).
+  Se intentó primero poner esta validación en `price()`/`price_batch()` (C++ core) pero un test
+  preexistente (`Price.Dv01BumpIsConfigurableViaMeasureSpec`,
+  `Price.BucketedDv01SumsToTheParallelDv01`,
+  `PriceManyMixedProductsTest.BucketedDv01OfAPayoffProductSumsToItsParallelDv01`,
+  `GreeksFase8Test.PriceBatchOfIrsMixesPvDv01AndGreekMatchingALoopOfScalarCalls`) rompió de
+  inmediato — esos tests piden el MISMO `measure_name` dos veces A PROPÓSITO y acceden al
+  resultado por posición, un patrón legítimo a nivel de lista que la validación no debía
+  romper — de ahí que la validación se moviera a la capa correcta (dict, no lista) tras revertir
+  el primer intento.
+- `engine_typed.measure.Measure.to_spec(alias: Optional[str] = None)` (antes `to_spec()` sin
+  argumentos): con `alias=None` (default) sigue devolviendo la tupla de 2 de siempre —
+  retrocompatible con todo consumidor existente — y con `alias="..."` devuelve la tupla de 3.
+  Aplica automáticamente a TODAS las subclases de `Measure` (`PV`/`DV01`/`ExposureProfile`/
+  `UnilateralCVA`/`Greek` y sus builders `delta`/`vega`/`rho`/`gamma`/`cross_gamma`/`theta`/
+  `hazard_rate`/`recovery_rate` en `engine_typed.greeks`), no solo `Greek` — ningún cambio
+  adicional hizo falta en `engine_typed/greeks.py`.
+
+**Tareas de notebook.** `09_option_strategies_and_greeks.ipynb::compute_greeks_grid`: el bloque
+`report = eng.all_greeks(...)` + parseo de `report.greeks` por `risk_factor` se sustituyó por una
+única llamada `eng.price(product, [greeks.delta(...).to_spec(alias="delta"),
+greeks.vega(...).to_spec(alias="vega"), greeks.theta(...).to_spec(alias="theta")], ...)`. Esto NO
+solo simplifica el código (un dict con 3 claves legibles en vez de parsear una lista de
+`GreekResult` por string namespaced) sino que además EVITA trabajo desperdiciado real:
+`all_greeks` siempre barre también `curve.parallel`/`credit.hazard_rate`/`credit.recovery_rate`
+(3 simulaciones Monte Carlo más por punto del grid, sin ningún sentido económico para un
+`PayoffProduct` sobre GBM sin curva de crédito) que el notebook nunca leía — la llamada nueva
+pide exactamente las 3 Greeks que se grafican, ni una más. Gamma/vanna/volga siguen viniendo de
+`Engine.hessian` sin cambios (ya comparte una única pasada LRM para las tres, ver punto 2 de
+arriba — reemplazarlo por tres entradas `"Greek"` con `order=2`/`cross_factor` habría sido una
+REGRESIÓN de rendimiento, tres simulaciones en vez de una compartida). Charm sigue sus dos
+llamadas separadas a `eng.price(...)` con `method="bump_and_reval"` explícito — el alias no
+ayuda ahí porque cada una usa un `PricingContext` distinto (`GREEK_PRICING` vs `CHARM_PRICING`)
+y `Engine.price(...)` solo acepta uno por llamada, con o sin alias.
+
+**Trabajo realizado, por capa:**
+
+- **Rust: sin cambios** (Opción (b) no los requiere). `cargo test -p engine-core --release` no se
+  ejecutó, mismo criterio que las fases anteriores de este plan ("solo si tocaste Rust").
+- **C++ (core, `cpp/engine/`)**: `cpp/engine/include/engine/price.hpp` (`MeasureSpec::alias`
+  nuevo, doc-comment extenso justificando por qué NO valida unicidad aquí — ver el diseño de
+  arriba); `cpp/engine/src/price.cpp` (`display_name()` helper, los cuatro sitios que construían
+  `PriceResultEntry{measures[i].name, ...}` pasan a usar `display_name(measures[i])`).
+- **C++ (binding nanobind, `clients/python/src/`)**: `engine_py_ext.cpp` —
+  `to_measure_spec` acepta la tupla de 3; `calc_result_to_dict` (movida antes de `class Engine`
+  para que `Engine::price` pueda reutilizarla, gana un parámetro `caller` para mensajes de error
+  específicos) centraliza la construcción de dict + validación de unicidad, usada ahora por
+  `Engine::price`, `BatchResult.measures` y `GridResult.measures` (antes `Engine::price`
+  duplicaba su propio bucle sin validar); docstrings de `price`/`price_batch`/`price_many`/
+  `price_grid` actualizados con un ejemplo de alias.
+- **Python (`clients/python/src/engine_typed/`)**: `measure.py` —
+  `Measure.to_spec(alias: Optional[str] = None)`.
+- **Tests nuevos**: `cpp/engine/tests/test_registry.cpp`
+  (`Price.MeasureSpecAliasLabelsTheOutputEntryWithoutChangingTheComputedValue` — alias etiqueta
+  `measure_name` sin alterar el valor calculado, verificado con paridad exacta `EXPECT_DOUBLE_EQ`
+  contra la misma medida pedida sin alias); `clients/python/tests/test_price_measure_spec.py`
+  (`test_duplicate_measure_names_without_alias_raise_instead_of_silently_colliding` — reproduce
+  la friccion #5 exacta y confirma que ahora lanza en vez de pisar en silencio;
+  `test_alias_lets_two_dv01_entries_coexist_in_the_same_price_call` — dos entradas con alias
+  conviven en el dict de salida con el mismo valor numérico que pedirlas por separado). El test
+  preexistente `test_dv01_bump_changes_the_scalar_proportionally` se REESCRIBIÓ: antes pedía
+  deliberadamente el mismo `"DV01"` dos veces sin alias en una llamada y documentaba en un
+  comentario "el ultimo gana en el dict de salida" — exactamente el comportamiento que esta fase
+  cierra, así que ese sub-caso se movió al nuevo test de colisión explícita (que ahora espera
+  `ValueError`, no un resultado silencioso).
+- **Notebook**: `09_option_strategies_and_greeks.ipynb::compute_greeks_grid` (ver "Tareas de
+  notebook" arriba); `clients/python/notebooks/README.md` (entrada de `09` actualizada).
+
+**Verificación en capas** (todas en verde, ninguna se saltó):
+
+- C++: `cmd.exe /C "vcvars64.bat && cmake --build build --config Release"` compiló limpio.
+  `ctest --test-dir build -C Release`: **489/489** (488 previos + 1 nuevo de esta fase). Un
+  primer intento (con la validación de unicidad puesta en `price()`/`price_batch()` en vez de en
+  el binding Python) rompió 4 tests preexistentes que dependían del comportamiento de lista —
+  documentado arriba como parte del proceso de diseño, corregido antes de continuar (nunca se
+  hizo commit de ese intento roto).
+- Python: `.pyd`/`engine_typed` recién compilados copiados a mano a `venv/Lib/site-packages`
+  (venv con copias STALE, según la nota de entorno). `pytest clients/python/tests`: **190
+  passed** (188 previos + 2 nuevos de esta fase) + los mismos 2 errores preexistentes de fixture
+  `abi_dll_path` (no relacionados, no tocados).
+- Notebook: `nbconvert --to notebook --execute --inplace
+  clients/python/notebooks/09_option_strategies_and_greeks.ipynb` ejecutó de punta a punta sin
+  errores (0 celdas `output_type == "error"` de 39 celdas totales). **Test de paridad exacta**
+  (criterio de aceptación explícito de la fase, aunque formalmente solo obligatorio bajo la
+  opción (a)): se comparó el texto de las 14 celdas markdown de resumen ("Observado...") entre
+  el notebook ANTES de esta fase (`git stash`) y DESPUÉS — `diff` reporta CERO diferencias: los
+  7 valores (delta/gamma/theta_anual/vega/vanna/volga/charm_anual) de las 14 estrategias
+  coinciden byte a byte, incluidos los `NaN` de gamma/vanna/volga en los dos calendarios (Fase 2,
+  sin relación con esta fase). No se midió tiempo de ejecución antes/después (el criterio de
+  "tiempo medible" del enunciado aplica solo a la opción (a), no implementada aquí) — la opción
+  (b) no reduce el número de simulaciones Monte Carlo del camino delta/vega/theta (siguen siendo
+  3, una por Greek, antes vía `all_greeks` y ahora vía 3 entradas `"Greek"` explícitas), solo
+  elimina las 3 simulaciones adicionales que `all_greeks` desperdiciaba en factores no usados
+  (`curve.parallel`/`credit.hazard_rate`/`credit.recovery_rate`) — una mejora real pero no la que
+  el criterio de "tiempo medible" de la opción (a) pedía reportar.
+
+**Fase 3b — pendiente explícita (igual que Fase 2b de este mismo documento).** Si en el futuro se
+decide que vale la pena el esfuerzo, la versión que sí comparte una única pasada Monte Carlo para
+precio+delta+vega+rho (pathwise) + gamma+vanna+volga (LRM) de GBM/GBM_P requeriría: (1) Rust —
+una función nueva en `rust/crates/engine-core/src/payoff/api.rs` que combine el bucle de
+`payoff_sensitivity_pathwise_on` (Dual sobre `GbmDualPath`) con el de `payoff_local_hessian_lrm_on`
+(pesos LRM) sobre una ÚNICA llamada a `simulate_gbm_columns`, análoga a como
+`payoff_local_hessian_gbm_q` ya combina gamma+volga+vanna; (2) exponerla en el bridge cxx
+(`rust/crates/engine-ffi`); (3) un `try_risk_report`/`Engine.risk_report` nuevo en
+`greeks.cpp`/`engine_py_ext.cpp`, paralelo a `try_pathwise`/`try_hessian_likelihood_ratio` pero
+agregando 7 cantidades en vez de 1 o 3. Limitado a `pricing_date == 0` (ADR-IN2-01 de Fase 0 de
+este mismo plan: las cuatro especializaciones existentes ya rechazan `pricing_date != 0`, y esa
+función nueva heredaría la misma restricción salvo que se le añada soporte explícito para
+`valuation_time`, lo que la Fase 0 descartó deliberadamente por desproporcionado). Theta/charm
+NUNCA podrían compartir esa pasada con precio/delta/vega/gamma/vanna/volga sin importar cuánto se
+invierta en (a): requieren un `PricingContext` distinto (`pricing_date` desplazado), así que
+siempre serían, como mínimo, una segunda simulación completa aparte.
+
+**Limitaciones/decisiones que la Fase 7 (auditoría final de notebooks 01-09) debe conocer:**
+
+- **Patrón exacto a buscar/reemplazar en los notebooks 01/03/04/05/06/07 no tocados por esta
+  fase**: cualquier celda que llame a `Engine.all_greeks(...)` y luego lea solo un SUBCONJUNTO de
+  `report.greeks` (descartando el resto) es candidata a la misma simplificación que `09` —
+  reemplazar por `Engine.price(product, [greeks.X(...).to_spec(alias="X"), ...], ...)` con
+  exactamente los factores que de verdad se usan. Grep sugerido: `all_greeks\(` en cada notebook,
+  y comprobar si el `report.greeks`/`by_factor` resultante se indexa por menos claves de las que
+  `compute_all_greeks` enumera (model params + `curve.parallel` + `credit.hazard_rate`/
+  `recovery_rate` + `time.theta`, más `curve.pillar:i`/Gamma pura si se pasan los flags
+  opcionales) — si el notebook necesita el barrido COMPLETO (p.ej. para mostrar todas las
+  sensibilidades de un swap sin saber de antemano cuáles), `all_greeks` sigue siendo la
+  herramienta correcta, esta simplificación NO aplica ahí.
+- **Patrón exacto para detectar una colisión de "Greek" ya presente (silenciosa antes de esta
+  fase) en cualquier notebook**: buscar dos o más entradas `"Greek"`/`greeks.*(...).to_spec()`
+  (sin alias) dentro de la MISMA lista pasada a `eng.price(...)`/`eng.price_batch(...)`/
+  `eng.price_many(...)`/`eng.price_grid(...)` — desde esta fase, ese patrón ahora LANZA
+  `ValueError` en vez de devolver un resultado silenciosamente incorrecto (el último pisa al
+  resto), así que si algún notebook ya lo hacía por error, la ejecución de la Fase 7 lo revelará
+  con un traceback claro en vez de dejarlo pasar.
+- **`Portfolio.price` (`clients/python/src/engine_py_ext.cpp`) NO gana soporte de alias en esta
+  fase** — solo toma `std::vector<std::string>` (nombres pelados, sin tuplas), a diferencia de
+  `Engine.price`/`price_batch`/`price_many`/`price_grid`. Ningún notebook de este plan usa
+  `Portfolio.price` con varias `"Greek"` a la vez, así que quedó fuera de alcance explícitamente
+  — si una fase futura lo necesita, extender su firma Python a aceptar el mismo `nb::list` de
+  specs que `Engine.price`.
+- **La validación de nombres de salida duplicados es estricta y sin excepciones** (incluye
+  duplicados SIN alias, comportamiento preexistente que ahora también se rechaza en la capa de
+  dict): cualquier notebook/test que pidiera deliberadamente el mismo nombre "pelado" dos veces
+  en una llamada a `Engine.price(...)` (confiando en "el último gana") se romperá con
+  `ValueError` al ejecutarse bajo esta fase — ningún notebook de 01-09 lo hacía (verificado por
+  grep antes de implementar), pero la Fase 7 debe tenerlo presente si encuentra algún caso así.
+
 ### Fase 4 — Extender `simulate_paths`/Greeks a `GbmBasket`
 
 **Problema.** `Engine.simulate_paths` (Fase 0 de `PLAN_IMPROVE_NOTEBOOK.md`) solo hace dispatch a
