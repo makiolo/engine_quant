@@ -1359,6 +1359,15 @@ std::vector<RiskFactor> distinct_factors_in(const std::vector<HessianEntry>& ent
 // importa. La enumeracion automatica (`factors` vacio) es exactamente el conjunto de factores que
 // la especializacion aplicable produjo (documentado explicitamente aqui: {spot,volatility} para
 // GBM/GBM_P, {a,b,sigma,r0} para HullWhite1F, {a,b,sigma,eta,r0} para HullWhite2F).
+//
+// PLAN_IMPROVE_NOTEBOOK2.md Fase 2 (decision (b), ver el doc-comment junto a `!applied` mas abajo
+// para el detalle): un contrato GBM/GBM_P que no depende de una unica fecha terminal (p.ej. un
+// calendar spread, `payoff_supports_second_order_lrm[_p]` en `false`) tiene su PROPIA entrada de
+// `skipped` distinguible del caso generico "(modelo, metrica) no cubierta" -- nunca queda
+// completamente ausente ni se confunde con "esta combinacion de (modelo, metrica) nunca fue
+// cableada". No existe fallback bump-and-reval generico de segundo orden/cruzado para este caso
+// (mas caro: 3-4 revaluaciones por entrada -- ver el texto de la fase); queda como "Fase 2b"
+// explicitamente pendiente si en el futuro se quiere el numero real en vez de solo el motivo.
 HessianReport compute_hessian(
     const Registries& registries, const std::string& metric_name, const Params& metric_params,
     const IModel& model, const IProduct& product, const MarketSnapshot& market,
@@ -1393,8 +1402,9 @@ HessianReport compute_hessian(
         // `try_hessian_likelihood_ratio` ya devolvio `nullopt` por ese motivo especifico (no por no
         // estar cubierta) -- mensaje mas preciso que el generico de abajo. No hay fallback
         // bump-and-reval generico de segundo orden todavia (eso es la Fase 2 de este mismo plan).
-        if ((model.type_name() == "GBM" || model.type_name() == "GBM_P") &&
-            capability_listed(hessian_capabilities(), model.type_name(), metric_name) && pricing.pricing_date() != 0.0) {
+        const bool capability_present = (model.type_name() == "GBM" || model.type_name() == "GBM_P") &&
+            capability_listed(hessian_capabilities(), model.type_name(), metric_name);
+        if (capability_present && pricing.pricing_date() != 0.0) {
             report.skipped.push_back(
                 "Hessiano local: (" + model.type_name() + ", " + metric_name + ") via likelihood ratio no "
                 "soporta PricingContext::pricing_date() != 0 (recibido " + std::to_string(pricing.pricing_date()) +
@@ -1403,6 +1413,40 @@ HessianReport compute_hessian(
                 "generico de segundo orden todavia (ver Fase 2 de PLAN_IMPROVE_NOTEBOOK2.md)"
             );
             return report;
+        }
+        // PLAN_IMPROVE_NOTEBOOK2.md Fase 2: (modelo, metrica) SI esta en `hessian_capabilities()`
+        // y `pricing_date() == 0`, pero `try_hessian_likelihood_ratio` igual devolvio `nullopt` --
+        // el UNICO motivo restante posible con esas dos condiciones ya descartadas es que el
+        // contrato no depende de una unica fecha terminal (`payoff_supports_second_order_lrm[_p]`
+        // en `false`, p.ej. un calendar spread con patas en T distintas sobre el mismo
+        // observable -- mismo criterio estructural que excluye `ContractOp::Exercise`). Antes de
+        // esta fase, este caso caia en el mensaje generico de abajo ("no esta cubierta por
+        // hessian_capabilities()"), que es enganoso: la combinacion SI esta cubierta, solo que
+        // este contrato concreto no cumple la condicion dinamica de una unica fecha. Decision
+        // (b) de esta fase (ver PLAN_IMPROVE_NOTEBOOK2.md): no se implementa un fallback
+        // bump-and-reval generico de segundo orden/cruzado para este caso (alcance "esfuerzo
+        // alto", fuera de esta fase de "esfuerzo medio") -- se deja como Fase 2b pendiente. Aqui
+        // solo se nombra el motivo exacto en `skipped`, nunca se omite en silencio.
+        if (capability_present) {
+            const auto* payoff_product = dynamic_cast<const payoff::PayoffProduct*>(&product);
+            if (payoff_product != nullptr) {
+                const bool supports_lrm = model.type_name() == "GBM"
+                    ? payoff::payoff_supports_second_order_lrm(*payoff_product->payoff_program())
+                    : payoff::payoff_supports_second_order_lrm_p(*payoff_product->payoff_program());
+                if (!supports_lrm) {
+                    report.skipped.push_back(
+                        "Hessiano local: (" + model.type_name() + ", " + metric_name + ") via likelihood ratio "
+                        "solo cubre contratos que dependen de una unica fecha terminal (mismo criterio "
+                        "estructural que excluye ContractOp::Exercise, ver payoff_supports_second_order_lrm" +
+                        std::string(model.type_name() == "GBM" ? "" : "_p") + "); este contrato depende de mas "
+                        "de una fecha (p.ej. un calendar spread con patas en T distintas sobre el mismo "
+                        "observable) -- no existe fallback bump-and-reval generico de segundo orden/cruzado "
+                        "para este caso todavia (PLAN_IMPROVE_NOTEBOOK2.md Fase 2, decision (b): solo skip "
+                        "explicito con el motivo exacto, sin fallback numerico -- ver Fase 2b pendiente)"
+                    );
+                    return report;
+                }
+            }
         }
         report.skipped.push_back(
             "Hessiano local: (" + model.type_name() + ", " + metric_name + ") no esta cubierta por "

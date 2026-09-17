@@ -50,7 +50,11 @@ métricas y visualizaciones financieras — cada uno explota una parte distinta 
    Fase 1, `ScenarioEvaluator` nativo sobre un escenario de spot fijo, sin modelo ni Monte Carlo);
    la fórmula NumPy se conserva como `intrinsic_value_manual`, celda de verificación cruzada que
    confirma coincidencia exacta para las 14 estrategias. Análisis escrito antes y después de cada
-   bloque de gráficos.
+   bloque de gráficos. Para los dos calendarios, `gamma`/`vanna`/`volga` salen `NaN` (contrato de
+   más de una fecha terminal, fuera del alcance de la Hessiana vía likelihood-ratio) — desde
+   PLAN_IMPROVE_NOTEBOOK2.md Fase 2 el motivo exacto lo reporta el propio motor en
+   `HessianReport.skipped` (celda de verificación dedicada justo antes de analizar
+   `long_calendar_spread`), no una explicación inferida a mano.
 
 Varios notebooks documentan, en la celda donde aparece, un workaround motivado por una
 limitación concreta del motor (no del binding Python) — cada uno enlaza a la fase

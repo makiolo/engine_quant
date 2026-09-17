@@ -274,6 +274,38 @@ def test_hessian_on_gbm_call_returns_gamma_volga_vanna_via_likelihood_ratio():
         assert e.std_error is not None
 
 
+def test_hessian_on_a_calendar_spread_reports_the_multi_date_reason_in_skipped():
+    # PLAN_IMPROVE_NOTEBOOK2.md Fase 2 (paridad Python del test C++
+    # GreeksHessianTest.ComputeHessianOnACalendarSpreadGoesToSkippedWithTheMultiDateReasonNotThe
+    # GenericOne en test_greeks.cpp): un calendar spread (dos patas del mismo observable en
+    # fechas distintas, mismo patron que long_calendar_spread en
+    # 09_option_strategies_and_greeks.ipynb) no depende de una unica fecha terminal -- gamma/
+    # vanna/volga no se calculan (sin fallback numerico, decision (b) de esta fase), pero
+    # `HessianReport.skipped` debe nombrar el motivo EXACTO (multi-fecha), no el mensaje generico
+    # de "combinacion no cubierta" (esa combinacion (GBM, PayoffPriceQ) SI esta cubierta para un
+    # contrato de una unica fecha, ver test_hessian_on_gbm_call_returns_gamma_volga_vanna_via_
+    # likelihood_ratio de arriba).
+    eng = engine.Engine()
+    legs = [
+        q.call_leg("EQ.SPOT.AAPL", 100.0, -1.0, 0.25),
+        q.call_leg("EQ.SPOT.AAPL", 100.0, 1.0, 1.0),
+    ]
+    trade = q.custom_strategy("CALENDAR_SPREAD", legs)
+    product = eng.create_product(trade.product_type, trade.to_params())
+    model = eng.create_model("GBM", {"s0": 100.0, "r": 0.05, "q": 0.0, "sigma": 0.2, "observable": "EQ.SPOT.AAPL"})
+    market = engine.MarketSnapshot(pillars=[1.0], zero_rates=[0.05])
+    pricing = engine.PricingContext({"pricing_date": 0.0, "n_paths": 20_000.0, "n_steps": 1.0, "seed": 7.0})
+    execution = engine.ExecutionContext({"backend": "cpu"})
+
+    report = eng.hessian(product, "PayoffPriceQ", model, market, pricing, execution)
+
+    assert report.entries == []
+    assert len(report.skipped) == 1
+    reason = report.skipped[0]
+    assert "unica fecha" in reason
+    assert "no esta cubierta por hessian_capabilities()" not in reason
+
+
 def test_hvp_on_gbm_call_with_unit_direction_matches_the_hessian_row():
     eng, product, model, market, pricing, execution = _gbm_call_fixture()
     hessian_report = eng.hessian(product, "PayoffPriceQ", model, market, pricing, execution)

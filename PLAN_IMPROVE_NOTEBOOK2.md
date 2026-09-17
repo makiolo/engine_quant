@@ -444,6 +444,57 @@ explicacion: o la calcula (via el fallback generico) o aparece en `skipped` con 
 nuevo en `cpp/engine/tests/` sobre un contrato multi-fecha (p.ej. un calendar spread minimo)
 verificando uno de los dos comportamientos segun lo que se decida.
 
+**Estado verificado / decisiones tomadas (sesion de implementacion de esta fase).**
+
+- **Lectura del codigo real primero:** `HessianReport` YA tenia `skipped` desde PLAN_BACKWARD.md
+  Fase 1 (`cpp/engine/include/engine/greeks.hpp`, no hubo que anadirlo), y `compute_hessian` YA
+  poblaba `skipped` en el camino `!applied` -- incluido un motivo especifico para
+  `pricing_date() != 0` (Fase 0 de este mismo plan, `89f0250`). Es decir, la premisa literal del
+  problema ("las entradas... NO aparecen... sin ningun mensaje ni entrada en `skipped`") ya no
+  describia el estado real del codigo al empezar esta fase: SI habia una entrada en `skipped` para
+  un calendar spread, pero era la rama GENERICA ("(GBM, PayoffPriceQ) no esta cubierta por
+  hessian_capabilities()") -- **enganosa**, porque esa combinacion SI esta cubierta (lo prueba el
+  test `ComputeHessianWithEmptyFactorsReturnsGammaVolgaVannaAllViaLikelihoodRatio` con una call de
+  una unica fecha); solo este CONTRATO concreto no cumple la condicion dinamica de una unica fecha
+  terminal (`payoff_supports_second_order_lrm[_p]` en `false`). Ese era el gap real a cerrar.
+- **Decision: (b), no (a).** Se anadio una TERCERA rama de skip en `compute_hessian` (entre la de
+  `pricing_date() != 0` y la generica) que detecta especificamente "el (modelo, metrica) SI esta en
+  `hessian_capabilities()`, `pricing_date()==0`, pero el contrato no soporta
+  `payoff_supports_second_order_lrm[_p]`" y emite un mensaje que nombra el motivo exacto (contrato
+  multi-fecha, mismo criterio estructural que excluye `ContractOp::Exercise`), sin implementar el
+  fallback bump-and-reval generico de segundo orden/cruzado ((a)). Motivo: (a) es "el cambio de
+  mayor alcance" segun el propio texto de la fase, y el criterio de aceptacion se satisface
+  igualmente con (b) ("o la calcula... o aparece en `skipped`"). Queda "Fase 2b" explicitamente
+  pendiente si en el futuro se quiere el numero real para contratos multi-fecha (costaria, como
+  minimo, 3 revaluaciones extra por diagonal y 4 por cruzada, sobre la metrica completa en vez de
+  reutilizar la simulacion LRM ya optimizada de una pasada).
+- **Nota de Fase 0 (unificar/separar skip de `pricing_date != 0` vs multi-fecha):** se DEJAN
+  SEPARADOS, como dos ramas de `skipped` distintas con mensajes propios -- son motivos
+  estructuralmente distintos (uno depende de `PricingContext`, el otro de la forma del contrato) y
+  unificarlos perderia precision diagnostica sin ganar nada (ninguna de las dos tiene fallback
+  bump-and-reval de segundo orden todavia, asi que no hay codigo compartido que "fundir").
+- **Archivos tocados:** `cpp/engine/src/greeks.cpp` (`compute_hessian`, nueva rama de skip +
+  doc-comments actualizados); `cpp/engine/tests/test_greeks.cpp` (test nuevo
+  `GreeksHessianTest.ComputeHessianOnACalendarSpreadGoesToSkippedWithTheMultiDateReasonNotTheGenericOne`);
+  `clients/python/tests/test_engine_typed_greeks.py` (paridad Python:
+  `test_hessian_on_a_calendar_spread_reports_the_multi_date_reason_in_skipped` -- no hizo falta
+  tocar el binding nanobind, `HessianReport.skipped` ya estaba expuesto); `09_option_strategies_and_
+  greeks.ipynb` (nota markdown de `long_calendar_spread` simplificada para citar el mecanismo real
+  en vez de una explicacion inferida a mano, mas una celda de verificacion en vivo que consulta
+  `HessianReport.skipped` directamente sobre el producto del calendario largo). El
+  `.get(..., np.nan)` defensivo de `compute_greeks_grid` se mantiene (decision (b): sigue sin haber
+  numero real que poner ahi para multi-fecha).
+- **Verificacion:** C++ `ctest --test-dir build -C Release` = 481/481 (incluye el test nuevo);
+  Python `pytest clients/python/tests` = 180 passed + los mismos 2 errores preexistentes de
+  `abi_dll_path` (no relacionados); notebook `09` re-ejecutado de extremo a extremo sin errores.
+- **Relevante para Fase 3 (siguiente en orden de prioridad):** el diseño de un "informe de riesgo de
+  una sola pasada" que la Fase 3 quiera construir sobre `compute_hessian` hereda el mismo hueco que
+  esta fase deja explicito: para un contrato multi-fecha, ese informe tampoco podra ofrecer
+  gamma/vanna/volga sin antes resolver la Fase 2b (el fallback generico). Esta fase NO cambia la
+  forma de `HessianEntry`/`HessianReport` ni el conjunto de factores que produce la especializacion
+  aplicable -- solo añade texto a `skipped` -- asi que no hay ningun cambio de contrato que Fase 3/
+  Fase 4/Fase 7 deban tener en cuenta al construir encima.
+
 ### Fase 3 — Informe de riesgo de una sola pasada Monte Carlo (precio + Greeks)
 
 **Problema.** Ni `Engine.price` con varias `Greek` en la misma llamada (colisionan bajo la misma

@@ -2491,6 +2491,54 @@ TEST(GreeksHessianTest, ComputeHessianOnAnUnsupportedModelMetricCombinationGoesT
     EXPECT_NE(report.skipped.front().find("PV"), std::string::npos) << report.skipped.front();
 }
 
+// PLAN_IMPROVE_NOTEBOOK2.md Fase 2: un calendar spread (dos patas del mismo observable en
+// fechas DISTINTAS, T_near/T_far -- el caso real que motivo esta fase, ver 09_option_strategies_
+// and_greeks.ipynb) no depende de una unica fecha terminal, asi que `try_hessian_likelihood_ratio`
+// devuelve `nullopt` via `payoff_supports_second_order_lrm` en `false` -- ANTES de esta fase,
+// `compute_hessian` caia al mensaje generico "(GBM, PayoffPriceQ) no esta cubierta por
+// hessian_capabilities()", enganoso porque esa combinacion SI esta cubierta (ver el test de
+// arriba con una call de una unica fecha). Decision (b) de esta fase: `compute_hessian` nunca
+// lanza (sigue siendo "mejor esfuerzo") y nunca deja la entrada ausente sin explicacion -- va a
+// `skipped` con el motivo EXACTO (contrato multi-fecha), distinguible del generico.
+TEST(GreeksHessianTest, ComputeHessianOnACalendarSpreadGoesToSkippedWithTheMultiDateReasonNotTheGenericOne) {
+    Registries registries;
+    register_builtins(registries);
+    const pf::ObservableId spot{"EQ.SPOT.XYZ"};
+    const double s0 = 100.0, strike = 100.0, r = 0.05, q = 0.0, sigma = 0.2;
+    const double t_near = 0.25, t_far = 1.0;
+
+    // Calendario minimo: corto C100 a T_near, largo C100 a T_far -- mismo patron que
+    // long_calendar_spread en el notebook 09 (dos fechas de fixing distintas sobre el mismo
+    // observable, sin un unico S_T).
+    pf::ContractPtr calendar = pf::both({
+        pf::when(
+            tp(t_near),
+            pf::cashflow(
+                pf::Currency{"USD"},
+                pf::neg(pf::maximum(pf::sub(pf::fixing(spot, tp(t_near)), pf::constant(strike)), pf::constant(0.0)))
+            )
+        ),
+        european_call(spot, strike, t_far),
+    });
+    pf::PayoffProduct product("CALENDAR", calendar);
+    engine::GbmModel model = make_gbm_q(s0, r, q, sigma, spot.value);
+
+    // Confirma primero la premisa: este contrato NO soporta el estencil de una unica fecha
+    // terminal (si esto fallara, el resto del test estaria verificando el caso equivocado).
+    ASSERT_FALSE(pf::payoff_supports_second_order_lrm(*product.payoff_program()));
+
+    engine::greeks::HessianReport report = engine::greeks::compute_hessian(
+        registries, "PayoffPriceQ", Params{}, model, product, flat_market(), pricing_context(20'000, 7), cpu_execution()
+    );
+
+    EXPECT_TRUE(report.entries.empty()) << "un calendar spread no tiene fallback numerico todavia (decision (b))";
+    ASSERT_FALSE(report.skipped.empty());
+    const std::string& reason = report.skipped.front();
+    EXPECT_NE(reason.find("unica fecha"), std::string::npos) << reason;
+    EXPECT_EQ(reason.find("no esta cubierta por hessian_capabilities()"), std::string::npos)
+        << "el motivo debe ser el especifico de multi-fecha, no el generico -- vio: " << reason;
+}
+
 TEST(GreeksHessianTest, ComputeHessianRequestingAFactorOutsideSpotVolatilityGoesToSkippedForThatEntryOnly) {
     Registries registries;
     register_builtins(registries);
