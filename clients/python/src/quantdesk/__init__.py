@@ -1,4 +1,4 @@
-"""`engine_typed`: fachada Python tipada sobre `engine` (PLAN_REAPI.md, propuestas 1-3).
+"""`quantdesk`: fachada Python tipada sobre `engine` (PLAN_REAPI.md, propuestas 1-3).
 
 Paquete Python puro, aditivo: traduce objetos `pydantic` (`TradeSpec`/`IRSwap`, `Model`/
 `HullWhite1F`/`HullWhite2F`, `Market`, `PricingContext`, `ExecutionContext`, y en fases
@@ -6,7 +6,7 @@ siguientes `Measure`) al mismo `Params`/dict que ya consume `engine.Engine` -- n
 fachada dinámica (dict/Excel/C ABI), es una fachada más sobre el mismo registry C++
 (PLAN_REAPI.md §2, mismo patrón que el segundo constructor de `MarketSnapshot`).
 
-    import engine, engine_typed as q
+    import engine, quantdesk as q
 
     trade = q.IRSwap(
         notional=1_000_000.0, fixed_rate=q.PAR,
@@ -25,13 +25,13 @@ fachada dinámica (dict/Excel/C ABI), es una fachada más sobre el mismo registr
     eng_execution = engine.ExecutionContext(execution.to_params())
 """
 
-from engine_typed import greeks
-from engine_typed.context import ExecutionContext, PricingContext
-from engine_typed.greeks import Greek
-from engine_typed.market import Market
-from engine_typed.measure import PV, DV01, ExposureProfile, Measure, UnilateralCVA
-from engine_typed.model import GbmBasket, HullWhite1F, HullWhite2F, ModelSpec
-from engine_typed.payoff import (
+from quantdesk import greeks
+from quantdesk.context import ExecutionContext, PricingContext
+from quantdesk.greeks import Greek
+from quantdesk.market import Market
+from quantdesk.measure import PV, DV01, ExposureProfile, Measure, UnilateralCVA
+from quantdesk.model import GbmBasket, HullWhite1F, HullWhite2F, ModelSpec
+from quantdesk.payoff import (
     Contract,
     PayoffProduct,
     Predicate,
@@ -88,7 +88,7 @@ from engine_typed.payoff import (
     when,
     zero,
 )
-from engine_typed.trade import PAR, IRSwap, TradeSpec
+from quantdesk.trade import PAR, IRSwap, TradeSpec
 
 __all__ = [
     "PAR",

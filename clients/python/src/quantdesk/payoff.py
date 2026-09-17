@@ -1,4 +1,4 @@
-"""`engine_typed.payoff`: AST de payoff tipado (PLAN_PRODUCTS.md §7.3, adelantado de Fase 10).
+"""`quantdesk.payoff`: AST de payoff tipado (PLAN_PRODUCTS.md §7.3, adelantado de Fase 10).
 
 Modelos Pydantic discriminados por `type`, mismos nombres de campo snake_case que
 `docs/schema/engine.payoff/v1.schema.json` (fuente de verdad) y mismos nombres de builder que
@@ -6,7 +6,7 @@ Modelos Pydantic discriminados por `type`, mismos nombres de campo snake_case qu
 `TradeSpec` más: `to_params()` produce `{"spec": json_canonico}`, que `Engine.create_product`
 ya consume genéricamente (SS7.2) -- ningún cambio en `engine_py_ext.cpp` hizo falta.
 
-    import engine, engine_typed as q
+    import engine, quantdesk as q
 
     call = q.when(
         1.0,
@@ -27,7 +27,7 @@ from typing import Annotated, ClassVar, List, Literal, Union
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from engine_typed.trade import TradeSpec
+from quantdesk.trade import TradeSpec
 
 
 def _as_scalar(x: object) -> "ScalarExprBase":

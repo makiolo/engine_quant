@@ -1,8 +1,8 @@
-"""`engine_typed.greeks`: fachada tipada sobre la medida generica "Greek" (PLAN_GREEKS.md
+"""`quantdesk.greeks`: fachada tipada sobre la medida generica "Greek" (PLAN_GREEKS.md
 §8.1/§8.2/§8.4). `Greek` traduce `metric`/`risk_factor`/`order`/`method`/`bump` (mas los
 parametros propios de la metrica interior, via la convencion de prefijo `metric.*`) al mismo
 `Params`/dict que ya consume `Engine.price`/`price_batch`/`price_many`/`price_grid` -- igual
-patron `.to_spec()` que `engine_typed.measure.PV`/`DV01`. Los builders `delta`/`vega`/`rho`/
+patron `.to_spec()` que `quantdesk.measure.PV`/`DV01`. Los builders `delta`/`vega`/`rho`/
 `gamma`/`dv01`/`theta`/`hazard_rate`/`recovery_rate` son azucar sobre `Greek` para los
 `RiskFactor` mas comunes (§8.4: "greeks.delta('spot')", etc.), no una API distinta -- todos
 aceptan `bump`/`method` opcionales ademas de los parametros propios de la metrica interior.
@@ -12,8 +12,8 @@ el BARRIDO automatico de todas las Greeks aplicables a una metrica (§8.5, sin e
 parametro de modelo/curva/credito/tiempo a mano) es `Engine.all_greeks(...)`, no esta clase --
 ver PLAN_GREEKS.md §9.1 para el flujo completo autoria -> price -> all_greeks.
 
-    import engine, engine_typed as q
-    from engine_typed import greeks
+    import engine, quantdesk as q
+    from quantdesk import greeks
 
     eng = engine.Engine()
     ...
@@ -22,7 +22,7 @@ ver PLAN_GREEKS.md §9.1 para el flujo completo autoria -> price -> all_greeks.
 
 from typing import ClassVar, Optional
 
-from engine_typed.measure import Measure
+from quantdesk.measure import Measure
 
 
 class Greek(Measure):

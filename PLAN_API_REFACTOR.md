@@ -211,6 +211,67 @@ actualizar los imports cruzados internos (`from engine_typed.X import Y` →
 **Criterio de aceptación.** `import quantdesk as q` expone exactamente lo mismo que hoy expone
 `import engine_typed as q`; `engine_typed` deja de existir en el árbol (no queda como alias).
 
+**Estado verificado / decisiones tomadas (sesión de implementación de esta fase).**
+
+- `git mv clients/python/src/engine_typed clients/python/src/quantdesk` preserva historia (8
+  ficheros `.py` detectados como `R` — rename — por `git status`; los `__pycache__/*.pyc`
+  presentes en el árbol de trabajo no estaban trackeados por git, así que no aparecen en el
+  `mv` y desaparecen del directorio nuevo sin acción adicional).
+- Búsqueda exhaustiva (`grep -rn engine_typed` sobre todo `clients/python/src/quantdesk/`, no
+  solo los tres ficheros que nombraba el plan) encontró referencias en **5** ficheros, dos más
+  de los explícitamente citados (`payoff.py`, `greeks.py`, `__init__.py`): también `market.py`
+  (docstring, "consistente con el resto de `engine_typed`") y `model.py` (docstring, dos citas:
+  "`TradeSpec` (`engine_typed.trade`)" y "Sin depender de `numpy` (`engine_typed` no lo importa
+  hoy...)"). `trade.py`, `context.py` y `measure.py` no tenían ninguna referencia interna —
+  confirmado por grep, no por inspección visual únicamente.
+- Todas las referencias eran o bien imports (`from engine_typed.X import Y` → `from quantdesk.X
+  import Y`, incluido `from engine_typed import greeks` → `from quantdesk import greeks` en
+  `__init__.py` y `greeks.py`) o bien prosa de docstring/comentario citando el nombre del
+  paquete (incluidos los ejemplos `import engine, engine_typed as q` dentro de docstrings de
+  `__init__.py`, `payoff.py`, `greeks.py`) — no había nombres de logger, variables de entorno ni
+  literales de string usados en lógica (p.ej. para introspección) que dependieran del nombre
+  `engine_typed`, así que no hubo ninguna decisión ambigua real: todo lo encontrado por grep se
+  cambió 1:1 a `quantdesk` sin excepción, sin necesidad de criterio adicional.
+- No se tocó nada fuera de `clients/python/src/quantdesk/` en esta fase, tal y como pide el
+  alcance. Confirmado por `grep -rn engine_typed` sobre el resto del árbol tras el rename: sigue
+  habiendo referencias en (grupos, sin modificar ninguno, para que las fases correspondientes
+  las recojan) — `pyproject.toml` (Fase 3); `.github/workflows/ci.yml` (Fase 3);
+  `clients/python/tests/test_engine_typed_{model,payoff,greeks,trade,measure,context}.py`,
+  `clients/python/tests/test_portfolio.py`, `clients/python/tests/test_market_products_realistic.py`
+  (Fase 6, siguen fallando el import ahora mismo y es lo esperado); los 10 notebooks de
+  `clients/python/notebooks/` + su `README.md` (Fase 5); `clients/python/examples/{price_flow,
+  price_flow_typed,price_batch_flow,greeks_flow}.py` + `examples/README.md` (Fase 4);
+  `README.md`, `clients/python/README_PYPI.md`, `docs/schema/engine.payoff/cookbook.md`,
+  `clients/excel/README.md`, `clients/excel/tests/test_xloper.cpp`,
+  `.claude/skills/execute-plan/SKILL.md` (Fase 7); `PLAN.md`, `PLAN_REAPI.md`, `PLAN_GREEKS.md` y
+  demás `PLAN_*.md` históricos + citas cruzadas en `rust/crates/engine-core/src/payoff/{mod,
+  compile,ir,basket_api}.rs`, `rust/crates/engine-core/src/models/gbm_basket.rs`,
+  `rust/crates/engine-ffi/src/lib.rs`, `cpp/engine/tests/payoff/test_payoff_fixtures_cross_layer.cpp`
+  (explícitamente fuera de alcance de todo el plan, Fase 7).
+  - **Hallazgo no cubierto explícitamente por ninguna fase nombrada del plan:**
+    `clients/python/src/engine_py_ext.cpp` (el binding nanobind del módulo `engine`, que el plan
+    dice no tocar en su superficie pública) tiene **5** comentarios/docstrings C++ que citan
+    `engine_typed` como referencia textual (líneas ~56, ~100, ~177, ~627, ~1011 en el momento de
+    esta sesión — p.ej. `">>> from engine_typed import greeks\n"` dentro de un docstring
+    embebido, y un comentario que cita un futuro `engine_typed/portfolio.py`). El plan (§5, fila
+    "Documentación", y Fase 7) no lista este fichero entre los afectados. Se deja intacto en esta
+    fase (fuera de `quantdesk/`, y ninguna fase posterior lo nombra tampoco) — el orquestador
+    debería decidir si se cuela en Fase 7 (mismo criterio que el resto de comentarios de
+    documentación) o si es una omisión del plan a corregir explícitamente antes de darlo por
+    cerrado, porque si no se toca, el criterio de aceptación de Fase 7 ("`grep -rn engine_typed`
+    ... no devuelve nada" salvo la lista explícita de exclusiones) fallaría por este fichero.
+- Verificación de import: con el intérprete `S:\Projects\engine_quant\venv\Scripts\python.exe`,
+  `sys.path.insert(0, 'clients/python/src'); import quantdesk as q; sorted(dir(q))` ejecuta sin
+  error (no requiere el módulo nativo `engine` compilado: ningún fichero de `quantdesk/` hace
+  `import engine` a nivel de módulo, solo lo mencionan en docstrings). `q.__all__` tras el rename
+  es literalmente idéntico, elemento a elemento y en el mismo orden, al `__all__` de
+  `git show HEAD:clients/python/src/engine_typed/__init__.py` (mismos 70 símbolos: `PAR`,
+  `TradeSpec`, `IRSwap`, `ModelSpec`, `HullWhite1F`, `HullWhite2F`, `GbmBasket`, `Market`,
+  `PricingContext`, `ExecutionContext`, `Measure`, `PV`, `DV01`, `ExposureProfile`,
+  `UnilateralCVA`, `Greek`, `greeks`, `PayoffProduct`, `ScalarExpr`, `Predicate`, `Contract`, y
+  todo el DSL de `payoff.py`). No se compararon los tests existentes (`test_engine_typed_*.py`)
+  a propósito — siguen importando `engine_typed` y es esperado que fallen hasta la Fase 6.
+
 ### Fase 1 — `quantdesk.Engine` + `PriceResult`
 
 Implementar la clase de §3.2 (constructor + `price`) y `PriceResult` de §3.3, en un módulo nuevo

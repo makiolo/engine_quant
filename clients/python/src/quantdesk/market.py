@@ -1,7 +1,7 @@
 """`Market` tipado (PLAN_REAPI.md §6 Fase 2): replica en Python la validación que ya hace
 `engine::Curve`/`MarketSnapshot` en C++ (pillars estrictamente creciente, mismo tamaño que
 zero_rates) -- redundante con el constructor tipado que `MarketSnapshot` ya tiene, pero da
-JSON schema/validación `pydantic` consistente con el resto de `engine_typed`. La validación de
+JSON schema/validación `pydantic` consistente con el resto de `quantdesk`. La validación de
 aquí no sustituye la de C++: `engine.MarketSnapshot(**market.to_params())` la repite (mismos
 invariantes, mismos mensajes de error en la práctica).
 """

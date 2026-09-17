@@ -1,5 +1,5 @@
 """`Model` tipados (PLAN_REAPI.md §6 Fase 2): mismo patrón `BaseModel` + `.to_params()` +
-`.model_type` que `TradeSpec` (`engine_typed.trade`). Todos los campos son requeridos, igual
+`.model_type` que `TradeSpec` (`quantdesk.trade`). Todos los campos son requeridos, igual
 que en C++ (`HullWhite1FModel`/`HullWhite2FModel`, `get_double` sin default) -- no hay
 sentinel de "por defecto" que replicar aquí.
 """
@@ -61,7 +61,7 @@ def _cholesky_lower(matrix: List[List[float]]) -> List[List[float]]:
     `payoff::hedge::cholesky_decompose` en Rust (`rust/crates/engine-core/src/payoff/hedge.rs`),
     reutilizado aqui solo para VALIDAR que `correlation` es semidefinida positiva
     (PLAN_IMPROVE_NOTEBOOK.md Fase 3, último punto: "validación de la matriz de correlación en
-    Python ... simetría y semidefinida-positiva (PSD)"). Sin depender de `numpy` (`engine_typed`
+    Python ... simetría y semidefinida-positiva (PSD)"). Sin depender de `numpy` (`quantdesk`
     no lo importa hoy en ningún otro sitio) solo para esta comprobación de tamaño de matriz
     pequeño (unos pocos activos como mucho). `ValueError` con un pivote no positivo en vez de
     devolver `NaN`/`None` en silencio -- misma disciplina que el `Err` de Rust.
