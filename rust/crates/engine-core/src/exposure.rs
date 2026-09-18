@@ -10,6 +10,10 @@
 //! se reduce a `Vec<f64>` en Rust plano para EE/PFE, sin necesidad de mantener el grafo
 //! de cómputo de Burn más allá de ese punto.
 
+// La API cuantitativa enumera explícitamente parámetros de modelo y simulación para
+// mantener llamadas reproducibles y sin configuración global implícita.
+#![allow(clippy::too_many_arguments)]
+
 use crate::models::hull_white::HullWhite1F;
 use crate::models::hull_white_2f::HullWhite2F;
 use crate::products::irs::IrSwap;

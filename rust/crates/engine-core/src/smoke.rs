@@ -10,6 +10,10 @@
 //! motor — eso es el registry de Fase 2 (§5.4) — solo confirman que el pipeline completo
 //! sigue funcionando de punta a punta con lógica de negocio real detrás, no solo `ping()`.
 
+// Estas funciones son adaptadores planos de smoke-test para el ABI C++; cada argumento
+// corresponde a un parámetro observable del modelo o de la simulación.
+#![allow(clippy::too_many_arguments)]
+
 use crate::backend::{Autodiff, CpuBackend};
 use crate::exposure::{expected_exposure_profile, unilateral_cva};
 use crate::models::hull_white::HullWhite1F;

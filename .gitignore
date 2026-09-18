@@ -12,10 +12,15 @@
 __pycache__/
 *.pyc
 .venv/
+/venv/
 *.egg-info/
 /dist/
 /dist_*/
 /wheelhouse/
+
+# Jupyter
+.ipynb_checkpoints/
+**/.ipynb_checkpoints/
 
 # Instalador (PLAN.md §7.9): payload montado por release.yml/build-installer a partir de los
 # artefactos de build-wheels/build-xll, no es codigo fuente.

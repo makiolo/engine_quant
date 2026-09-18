@@ -1,7 +1,7 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    Instala `engine-quant` en los interpretes de Python de 64 bits que tengan una rueda
+    Instala `quantdesk` en los interpretes de Python de 64 bits que tengan una rueda
     compatible en esta carpeta: por defecto, en todos los detectados; con -TargetPythonsFile,
     solo en los indicados ahi.
 .DESCRIPTION
@@ -29,11 +29,11 @@
     autodetecta como siempre.
 .PARAMETER DiscoverOnly
     En vez de instalar, solo detecta los interpretes candidatos y escribe una linea por cada
-    uno en -DiscoverOutputPath con el formato "ruta|major.minor|bits|version_de_engine_quant_ya_instalada_o_vacio",
+    uno en -DiscoverOutputPath con el formato "ruta|major.minor|bits|version_de_quantdesk_ya_instalada_o_vacio",
     y termina. Pensado para que el asistente del instalador .exe rellene la lista de
     interpretes entre los que elegir (ver EngineQuantSetup.iss) sin duplicar la logica de
     deteccion en Pascal Script. El cuarto campo deja ver, por interprete, si ya tiene
-    engine-quant instalado y que version, para saber cuales hace falta actualizar.
+    quantdesk instalado y que version, para saber cuales hace falta actualizar.
 .PARAMETER DiscoverOutputPath
     Fichero de salida para -DiscoverOnly.
 .PARAMETER ExtraCandidatesFile
@@ -110,13 +110,13 @@ function Get-CandidateInterpreters {
 }
 
 # Una sola llamada a Python devuelve tanto version/arquitectura como -- si esta instalado -- la
-# version de engine-quant ya instalada en ese interprete (para -DiscoverOnly: saber que
+# version de quantdesk ya instalada en ese interprete (para -DiscoverOnly: saber que
 # interpretes hace falta actualizar sin lanzar un segundo proceso de Python por cada uno).
 # Comillas simples adentro a proposito (no dobles): al pasar este script multilinea como
 # argumento -c de un proceso nativo, PowerShell no escapa comillas dobles embebidas para la
 # linea de comandos de Win32 -- se "comen" y rompen la sintaxis de Python (probado: con
 # struct.calcsize("P") y print("") aqui, python.exe fallaba con "SyntaxError: unterminated
-# string literal" en TODOS los interpretes, incluido uno que si tenia engine-quant instalado,
+# string literal" en TODOS los interpretes, incluido uno que si tenia quantdesk instalado,
 # y por tanto no se instalaba nada en ningun lado sin ningun error visible, porque el paso se
 # ejecuta oculto con runhidden).
 $InterpreterInfoScript = @'
@@ -126,7 +126,7 @@ print(sys.version_info[1])
 print(struct.calcsize('P') * 8)
 try:
     import importlib.metadata as m
-    print(m.version('engine-quant'))
+    print(m.version('quantdesk'))
 except Exception:
     print('')
 '@

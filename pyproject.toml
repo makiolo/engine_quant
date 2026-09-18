@@ -3,13 +3,17 @@ requires = ["scikit-build-core>=0.10"]
 build-backend = "scikit_build_core.build"
 
 [project]
-name = "engine-quant"
+name = "quantdesk"
+# Nombre de distribucion PyPI alineado con el nombre del paquete Python recomendado
+# (PLAN_API_REFACTOR.md Fase 10; antes "engine-quant", desalineado con `import quantdesk`
+# desde la Fase 0). Cambia el nombre de fichero de las wheels que produce
+# .github/workflows/release.yml: quantdesk-X.Y.Z-cpNN-cpNN-win_amd64.whl.
 # Sobrescrita por el workflow de release (.github/workflows/release.yml) a partir del tag
 # de la release; "0.0.0" es solo el valor para builds locales/de desarrollo.
 version = "0.0.0"
 description = "Motor de calculo XVA (CVA/DVA/FVA/MVA/KVA): cliente Python (import engine) sobre el registry C++/Rust del motor."
 readme = "clients/python/README_PYPI.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 # `pydantic` es dependencia obligatoria desde PLAN_REAPI.md §6 Fase 1 (engine_typed): renuncia
 # deliberada a la promesa anterior "sin dependencias Python en tiempo de ejecución"
 # (README_PYPI.md) a cambio de la fachada tipada q.IRSwap/q.HullWhite1F/... -- la extensión
@@ -26,8 +30,9 @@ build.verbose = true
 cmake.build-type = "Release"
 cmake.define = { ENGINE_QUANT_BUILD_TESTS = "OFF", ENGINE_QUANT_BUILD_EXCEL = "OFF" }
 # El unico artefacto instalado por CMake es engine.pyd (nanobind, OUTPUT_NAME "engine") vía el
-# install(TARGETS engine_py_ext ...) de clients/python/CMakeLists.txt. `engine_typed`
-# (PLAN_REAPI.md §6 Fase 1) es un paquete Python puro aditivo -- no pasa por CMake, se
-# autocopia desde clients/python/src/engine_typed al layout de la wheel.
-wheel.packages = ["clients/python/src/engine_typed"]
+# install(TARGETS engine_py_ext ...) de clients/python/CMakeLists.txt. `quantdesk`
+# (PLAN_REAPI.md §6 Fase 1; renombrado desde `engine_typed` en PLAN_API_REFACTOR.md Fase 0) es
+# un paquete Python puro aditivo -- no pasa por CMake, se autocopia desde
+# clients/python/src/quantdesk al layout de la wheel.
+wheel.packages = ["clients/python/src/quantdesk"]
 wheel.install-dir = "."

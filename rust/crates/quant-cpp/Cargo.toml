@@ -1,0 +1,18 @@
+[package]
+name = "quant-cpp"
+version.workspace = true
+edition.workspace = true
+links = "quant_cpp_bridge"
+
+[dependencies]
+cxx = "1"
+quant-engine = { path = "../quant-engine" }
+quant-domain = { path = "../quant-domain" }
+thiserror = "2"
+
+[build-dependencies]
+cxx-build = "1"
+
+[dev-dependencies]
+serde_json = "1"
+engine-core = { path = "../engine-core" }

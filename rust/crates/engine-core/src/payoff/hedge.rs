@@ -54,6 +54,13 @@
 //! con una seed distinta por ruta para que el ajuste de minimos cuadrados sea reproducible -- una
 //! aceptacion documentada, no una degradacion oculta.
 
+// Los índices coordinan matrices pequeñas del solver. Las comparaciones negadas con
+// floats son deliberadas: además de validar el rango, rechazan NaN de forma explícita.
+#![allow(
+    clippy::needless_range_loop,
+    clippy::neg_cmp_op_on_partial_ord
+)]
+
 use crate::backend::{resolve_backend, ComputeBackend, CpuBackend};
 use crate::models::gbm::Gbm;
 use crate::payoff::api::check_single_observable;
@@ -134,7 +141,12 @@ fn mat_at_b(design: &[Vec<f64>], target: &[f64], n_cols: usize) -> Vec<f64> {
 /// simetrica por construccion). `Err` explicito -- nunca `NaN`/`Inf` silencioso -- si algun pivote
 /// de la diagonal no sale estrictamente positivo: eso significa que `a` no es definida positiva
 /// (columnas de `design` linealmente dependientes y `ridge` insuficiente para compensarlo).
-fn cholesky_decompose(a: &[Vec<f64>]) -> Result<Vec<Vec<f64>>, String> {
+/// `pub(crate)` (en vez de privado a este modulo) desde PLAN_IMPROVE_NOTEBOOK.md Fase 3:
+/// `crate::models::gbm_basket::GbmBasket` reutiliza esta MISMA factorizacion para aplicar la
+/// matriz de correlacion entre activos a shocks normales independientes -- una unica
+/// implementacion de Cholesky en el crate, sin duplicarla ni anadir una dependencia de algebra
+/// lineal nueva (mismo criterio del doc-comment de este modulo: universos pequenos, `f64` puro).
+pub(crate) fn cholesky_decompose(a: &[Vec<f64>]) -> Result<Vec<Vec<f64>>, String> {
     let n = a.len();
     let mut l = vec![vec![0.0; n]; n];
     for j in 0..n {
@@ -1112,7 +1124,7 @@ mod tests {
         let result = synthesize_hedge_gbm_q(
             "cpu",
             &spec,
-            &[spec.clone()],
+            std::slice::from_ref(&spec),
             "EQ.SPOT.XYZ",
             100.0,
             0.05,
@@ -1325,7 +1337,7 @@ mod tests {
         let result = synthesize_hedge_gbm_q(
             "cpu",
             &spec,
-            &[spec.clone()],
+            std::slice::from_ref(&spec),
             "EQ.SPOT.XYZ",
             100.0,
             0.05,

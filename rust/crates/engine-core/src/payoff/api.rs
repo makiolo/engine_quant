@@ -22,6 +22,10 @@
 //! Longstaff-Schwartz, siguen siendo codigo escalar en `f64` puro sobre `Vec<f64>` ya
 //! materializados desde el tensor -- no hay nada de eso que vectorizar sobre backend.
 
+// Los bucles indexados recorren matrices path-major y acceden de forma coordinada a
+// varios buffers; convertirlos a iteradores ocultaría esa correspondencia de índices.
+#![allow(clippy::needless_range_loop)]
+
 use crate::backend::{resolve_backend, ComputeBackend, CpuBackend};
 use crate::exposure::ExposureProfile;
 use crate::mc::{self, McEstimate};
@@ -73,7 +77,10 @@ impl ObservablePath for SinglePath<'_> {
 /// es una fuente de aleatoriedad DELIBERADAMENTE independiente del RNG de Burn que genera la
 /// propia trayectoria (ver el doc-comment de `payoff::eval`) -- mezclar `seed`/`path_idx` con la
 /// constante de Weyl (splitmix64) evita que ambos flujos compartan estado o se correlacionen.
-fn bridge_seed_for_path(seed: u64, path_idx: usize) -> u64 {
+/// `pub(crate)` desde PLAN_IMPROVE_NOTEBOOK.md Fase 3: `payoff::basket_api` reutiliza esta MISMA
+/// derivacion de semilla por ruta para el mismo proposito (independencia del RNG de Brownian
+/// bridge respecto del RNG de Burn que genera la trayectoria), en vez de duplicarla.
+pub(crate) fn bridge_seed_for_path(seed: u64, path_idx: usize) -> u64 {
     seed.wrapping_add((path_idx as u64).wrapping_add(1).wrapping_mul(0x9E37_79B9_7F4A_7C15))
 }
 
@@ -1965,8 +1972,8 @@ mod tests {
     // europea de un unico paso), misma seed, `backend="cpu"` vs `backend="gpu"` -- ambos deben
     // ejecutar el MISMO `CompiledPayoff` (la interpretacion pathwise es identica, solo cambia el
     // backend Burn que genera las rutas GBM) y converger al mismo precio dentro de un margen
-    // estadistico generoso. Gateado tras `--features gpu`: no compila ni corre en el CI por
-    // defecto, igual que el resto de la infraestructura GPU de este crate.
+    // estadistico generoso. Gateado tras `--features gpu`: CI lo compila para detectar deriva
+    // de API, pero no lo ejecuta porque los runners no garantizan hardware GPU compatible.
     #[cfg(feature = "gpu")]
     #[test]
     fn cpu_and_gpu_backends_agree_on_the_same_barrier_payoff_within_statistical_tolerance() {
@@ -1977,7 +1984,7 @@ mod tests {
         let (n_paths, seed) = (200_000, 7);
 
         let cpu = price_payoff_gbm_q("cpu", &spec, "EQ.SPOT.XYZ", s0, r, q, sigma, n_paths, seed, 0.0).unwrap();
-        let gpu = price_payoff_gbm_q("gpu", &spec, "EQ.SPOT.XYZ", s0, r, q, sigma, n_paths, seed).unwrap();
+        let gpu = price_payoff_gbm_q("gpu", &spec, "EQ.SPOT.XYZ", s0, r, q, sigma, n_paths, seed, 0.0).unwrap();
 
         let tolerance = 8.0 * (cpu.std_error + gpu.std_error);
         assert!(

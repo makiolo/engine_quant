@@ -66,6 +66,13 @@ struct GreekOrder {
 // Pathwise/AadReverse explícitamente sobre una combinación no verificada (o sobre `order=2`/
 // `cross_factor`, que ninguna especialización cubre todavía) lanza std::invalid_argument
 // nombrando la razón exacta -- nunca degrada en silencio.
+// PLAN_IMPROVE_NOTEBOOK2.md Fase 0 (ADR-IN2-01): las tres especializaciones pathwise/likelihood
+// ratio de GBM/GBM_P (`try_pathwise`/`try_pathwise2`/`try_pathwise_cross`, más
+// `try_hessian_likelihood_ratio` de `compute_hessian`) tampoco aplican si
+// `PricingContext::pricing_date() != 0` -- ninguna de esas rutas Rust recibe `pricing_date`, así
+// que honrarlo en silencio daría un resultado incorrecto (el bug real que motivó esta fase: charm,
+// una diferencia finita de delta entre dos `pricing_date`, salía exactamente 0.0). `Auto` cae a
+// BumpAndReval (que SÍ reconstruye el `PricingContext` desplazado); `Pathwise` explícito lanza.
 // `LikelihoodRatioHessian` (PLAN_BACKWARD.md §9 Fase 1: Hessiano local del motor de payoff via
 // likelihood ratio, sin AD -- ver `compute_hessian`/`try_hessian_likelihood_ratio` en greeks.cpp)
 // y `AadForwardOverForward` (PLAN_BACKWARD.md §5, Fase 2/3: Hessiano cerrado de Hull-White vía
@@ -285,6 +292,15 @@ HvpReport compute_hvp(
 // `Params` anidado real. `evaluate` aplana el `GreekResult` (Fase 2: puede llevar `has_scalar`,
 // perfil `times`/`primary`/`secondary`, o ambos) a la misma forma de `MeasureResult` sin perder
 // ningún componente.
+//
+// `"cross_factor"` (PLAN_IMPROVE_NOTEBOOK2.md Fase 4, opcional, mismo formato namespaced que
+// `"risk_factor"`): puebla `GreekOrder::cross_factor`, alcanzando el estencil genérico de 4
+// puntos de `compute_greek` (Vanna/derivadas cruzadas) desde `Engine.price(...)` -- antes de esta
+// fase ese campo quedaba siempre `std::nullopt` aquí, el único camino era `Engine.hessian`
+// (`hessian_capabilities()`, tabla cerrada que no cubre GbmBasket). Esto habilita, sin código de
+// motor NUEVO por modelo, la cross-gamma real entre dos activos de un basket
+// (`d^2V/dS_i dS_j`, distinta de la vanna spot-vol de un único activo que ya calcula la Hessiana
+// existente): `risk_factor="model.spot_0"`, `cross_factor="model.spot_1"`, `order=1`.
 class GreekMeasure : public IMeasure {
 public:
     GreekMeasure(const Params& params, const Registries& registries);

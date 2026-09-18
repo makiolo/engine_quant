@@ -1,12 +1,16 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <tuple>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include <nanobind/nanobind.h>
 #include <nanobind/stl/optional.h>
 #include <nanobind/stl/shared_ptr.h>
 #include <nanobind/stl/string.h>
+#include <nanobind/stl/tuple.h>
 #include <nanobind/stl/unique_ptr.h>
 #include <nanobind/stl/vector.h>
 
@@ -14,7 +18,12 @@
 #include "engine/calibrator.hpp"
 #include "engine/engine.hpp"
 #include "engine/greeks.hpp"
+#include "engine/model.hpp"
+#include "engine/payoff/dependency_visitor.hpp"
+#include "engine/payoff/evaluation_context.hpp"
+#include "engine/payoff/market_path.hpp"
 #include "engine/payoff/payoff_product.hpp"
+#include "engine/payoff/scenario_evaluator.hpp"
 #include "engine/portfolio.hpp"
 
 namespace nb = nanobind;
@@ -39,7 +48,31 @@ engine::Params dict_to_params(const nb::dict& params) {
         } else if (nb::isinstance<nb::str>(value)) {
             result.emplace(std::move(key), nb::cast<std::string>(value));
         } else if (nb::isinstance<nb::list>(value) || nb::isinstance<nb::tuple>(value)) {
-            result.emplace(std::move(key), nb::cast<std::vector<double>>(value));
+            // PLAN_IMPROVE_NOTEBOOK.md Fase 3 §2 punto 4 (decision de diseno: Opcion A -- un
+            // unico string delimitado por comas, ParamValue NO gana un variante vector<string>,
+            // ver el doc-comment de engine::GbmBasketModel en model.hpp). list[str]/tuple[str]
+            // (p.ej. {"observables": ["EQ.SPOT.A", "EQ.SPOT.B"]} de GbmBasket en Python) se
+            // traduce aqui a "EQ.SPOT.A,EQ.SPOT.B" -- el unico punto del binding que sabe de esta
+            // convencion, para que quantdesk no tenga que reimplementar el join. Solo el
+            // PRIMER elemento decide la rama (mismo criterio que bool antes que double: una lista
+            // mixta str/numero no es un caso valido de ningun Params existente).
+            nb::sequence seq = nb::borrow<nb::sequence>(value);
+            bool is_string_list = false;
+            for (nb::handle elem : seq) {
+                is_string_list = nb::isinstance<nb::str>(elem);
+                break;
+            }
+            if (is_string_list) {
+                std::vector<std::string> items = nb::cast<std::vector<std::string>>(value);
+                std::string joined;
+                for (std::size_t i = 0; i < items.size(); ++i) {
+                    if (i > 0) joined += ",";
+                    joined += items[i];
+                }
+                result.emplace(std::move(key), std::move(joined));
+            } else {
+                result.emplace(std::move(key), nb::cast<std::vector<double>>(value));
+            }
         } else {
             result.emplace(std::move(key), nb::cast<double>(value));
         }
@@ -64,22 +97,38 @@ std::vector<engine::greeks::RiskFactor> parse_risk_factor_list(const std::vector
 // Traduce un elemento de la lista `measures` de Engine.price/price_batch/price_many/price_grid a
 // un engine::MeasureSpec (PLAN_REAPI.md §6 Fase 3): un string "pelado" (measure_names de
 // siempre, PLAN.md §7.15/§7.19) es MeasureSpec{name, {}}; una tupla (nombre, dict) es
-// MeasureSpec{name, dict_to_params(dict)} -- así engine_typed.DV01(bump=...).to_spec() (una
+// MeasureSpec{name, dict_to_params(dict)} -- así quantdesk.DV01(bump=...).to_spec() (una
 // tupla (str, dict)) y el ["PV", "DV01"] de siempre conviven en la misma llamada.
+//
+// PLAN_IMPROVE_NOTEBOOK2.md Fase 3 (opción (b)): una tupla de 3 elementos (nombre, dict, alias)
+// puebla además `MeasureSpec::alias` -- así varias entradas "Greek" (delta/vega/gamma/... de la
+// MISMA métrica) pueden convivir en una sola llamada a Engine.price(...)/price_grid(...) sin
+// pisarse en el dict de salida (antes de esta fase, colisionaban bajo la clave fija "Greek" --
+// ver el doc-comment de MeasureSpec::alias en cpp/engine/include/engine/price.hpp). `alias` es
+// SIEMPRE un string (nunca None/params vacíos con alias=None): omitir el alias es simplemente
+// usar la tupla de 2 elementos o el string pelado de siempre, no una tupla de 3 con alias=None.
 engine::MeasureSpec to_measure_spec(nb::handle item) {
     if (nb::isinstance<nb::str>(item)) {
         return engine::MeasureSpec{nb::cast<std::string>(item), engine::Params{}};
     }
     if (nb::isinstance<nb::tuple>(item)) {
         nb::tuple spec = nb::borrow<nb::tuple>(item);
-        if (spec.size() != 2) {
-            throw std::invalid_argument("Engine.price: una medida-tupla debe ser (nombre, params)");
+        if (spec.size() != 2 && spec.size() != 3) {
+            throw std::invalid_argument(
+                "Engine.price: una medida-tupla debe ser (nombre, params) o (nombre, params, alias)"
+            );
         }
         std::string name = nb::cast<std::string>(spec[0]);
         nb::dict params = nb::cast<nb::dict>(spec[1]);
-        return engine::MeasureSpec{std::move(name), dict_to_params(params)};
+        engine::MeasureSpec result{std::move(name), dict_to_params(params)};
+        if (spec.size() == 3) {
+            result.alias = nb::cast<std::string>(spec[2]);
+        }
+        return result;
     }
-    throw std::invalid_argument("Engine.price: cada medida debe ser un string o una tupla (nombre, params)");
+    throw std::invalid_argument(
+        "Engine.price: cada medida debe ser un string, una tupla (nombre, params) o (nombre, params, alias)"
+    );
 }
 
 std::vector<engine::MeasureSpec> to_measure_specs(const nb::list& measures) {
@@ -101,6 +150,37 @@ nb::dict params_to_dict(const engine::Params& params) {
         std::visit([&](const auto& v) { result[key.c_str()] = v; }, value);
     }
     return result;
+}
+
+// Traduce un engine::PriceResult (usado por Engine.price y dentro de BatchResult/GridResult) a
+// un dict {nombre_medida: MeasureResult} -- misma forma en las tres, extraída aquí para no
+// duplicarla (PLAN.md §7.19).
+//
+// PLAN_IMPROVE_NOTEBOOK2.md Fase 3 (opción (b)): `engine::PriceResult` es una LISTA ordenada
+// (`PriceResultEntry::measure_name` puede repetirse sin problema a ese nivel -- ver la nota de
+// diseño junto a `MeasureSpec::alias` en price.hpp), pero APLANARLA a un dict Python por nombre
+// SI puede pisar en silencio una entrada con otra si dos comparten `measure_name` -- exactamente
+// la friccion #5 de este plan ("varias 'Greek' se pisan entre si bajo la clave fija 'Greek'").
+// Esta es la capa correcta para rechazarlo explícito: antes de esta fase no había forma de
+// evitarlo (toda 'Greek' comparte measure_name="Greek", nunca configurable); ahora
+// `MeasureSpec::alias` (ver `to_measure_spec` arriba) permite dar a cada entrada un nombre de
+// salida distinto -- una colisión (con o sin alias) sigue siendo un error explícito, nunca un
+// overwrite silencioso.
+nb::dict calc_result_to_dict(const engine::PriceResult& result, const char* caller) {
+    nb::dict out;
+    std::unordered_set<std::string> seen;
+    for (const auto& entry : result) {
+        if (!seen.insert(entry.measure_name).second) {
+            throw std::invalid_argument(
+                std::string(caller) + ": dos medidas resuelven al mismo nombre de salida '" + entry.measure_name +
+                "' -- se pisarian en silencio en el dict de salida; dales un alias distinto "
+                "(tupla (nombre, params, alias), o Measure.to_spec(alias=...) en quantdesk, "
+                "PLAN_IMPROVE_NOTEBOOK2.md Fase 3)"
+            );
+        }
+        out[entry.measure_name.c_str()] = entry.result;
+    }
+    return out;
 }
 
 // engine::Portfolio::price/hessian/hvp (PLAN_BACKWARD.md §9 Fase 6) toman `const Registries&`
@@ -165,11 +245,7 @@ public:
     ) const {
         engine::PriceResult result =
             engine::price(registries_, product, to_measure_specs(measures), model, market, pricing, execution);
-        nb::dict out;
-        for (const auto& entry : result) {
-            out[entry.measure_name.c_str()] = entry.result;
-        }
-        return out;
+        return calc_result_to_dict(result, "Engine.price");
     }
 
     // Nivel 3, lote homogéneo (PLAN.md §7.17/§7.19): `products` debe ser del mismo tipo
@@ -296,20 +372,163 @@ public:
         );
     }
 
+    // Diagnostico de trayectorias Monte Carlo (PLAN_IMPROVE_NOTEBOOK.md Fase 0): matriz cruda
+    // de trayectorias simuladas, NO una medida de Engine.price (nunca pasa por
+    // Registry<IMeasure>) -- devuelve (times, paths) ya como np.ndarray, paths.shape ==
+    // (n_paths, n_steps+1). `T` (horizonte de simulacion) es SIEMPRE market.pillars().back()
+    // (el ultimo pillar de la curva) -- mismo criterio que el notebook 07 ya usaba a mano
+    // (market = MarketSnapshot(pillars=[T], ...)); n_steps/n_paths/seed vienen de `pricing`.
+    // Dispatch por tipo de modelo: GBM (medida Q, r/q) o GBM_P (medida fisica P, mu) -- ver
+    // engine::GbmModel/engine::GbmPModel. Cualquier otro modelo (p.ej. HullWhite1F, que no
+    // genera un spot observable) lanza std::invalid_argument explicito, mismo criterio que
+    // PayoffExposureProfileQMeasure/PayoffSensitivityQMeasure en measure.cpp. Backend siempre
+    // "cpu" (herramienta de notebook/diagnostico, sin parametro ExecutionContext -- misma firma
+    // de tres argumentos (model, market, pricing) que pide PLAN_IMPROVE_NOTEBOOK.md Fase 0).
+    nb::tuple simulate_paths(
+        const engine::IModel& model,
+        const engine::MarketSnapshot& market,
+        const engine::PricingContext& pricing
+    ) const {
+        const auto& pillars = market.pillars();
+        if (pillars.empty()) {
+            throw std::invalid_argument(
+                "Engine.simulate_paths: market.pillars() esta vacio -- se necesita al menos un "
+                "pillar para deducir el horizonte de simulacion T (market.pillars().back())"
+            );
+        }
+        double maturity = pillars.back();
+
+        // GbmBasketModel (PLAN_IMPROVE_NOTEBOOK2.md Fase 4): rama SEPARADA de GBM/GBM_P porque su
+        // resultado tiene una dimension extra (n_assets) -- ver el reshape de mas abajo, distinto
+        // del de dos ejes que usan GBM/GBM_P.
+        if (const auto* basket = dynamic_cast<const engine::GbmBasketModel*>(&model)) {
+            engine::BasketPathMatrix result = engine::simulate_paths_gbm_basket_q(
+                "cpu", basket->s0(), basket->r(), basket->q(), basket->sigma(), basket->correlation(),
+                maturity, pricing.n_steps(), pricing.n_paths(), pricing.seed()
+            );
+            nb::module_ np = nb::module_::import_("numpy");
+            nb::object times_arr = np.attr("array")(result.times);
+            nb::object paths_arr = np.attr("array")(result.paths_flat)
+                                        .attr("reshape")(
+                                            static_cast<std::size_t>(result.n_paths),
+                                            static_cast<std::size_t>(result.n_steps + 1),
+                                            static_cast<std::size_t>(result.n_assets)
+                                        );
+            return nb::make_tuple(times_arr, paths_arr);
+        }
+
+        engine::PathMatrix result;
+        if (const auto* gbm = dynamic_cast<const engine::GbmModel*>(&model)) {
+            result = engine::simulate_paths_gbm_q(
+                "cpu", gbm->s0(), gbm->r(), gbm->q(), gbm->sigma(), maturity,
+                pricing.n_steps(), pricing.n_paths(), pricing.seed()
+            );
+        } else if (const auto* gbm_p = dynamic_cast<const engine::GbmPModel*>(&model)) {
+            result = engine::simulate_paths_gbm_p(
+                "cpu", gbm_p->s0(), gbm_p->mu(), gbm_p->sigma(), maturity,
+                pricing.n_steps(), pricing.n_paths(), pricing.seed()
+            );
+        } else {
+            throw std::invalid_argument(
+                "Engine.simulate_paths: modelo no soportado: " + model.type_name() +
+                " (solo GBM/GBM_P/GbmBasket generan un observable simulable -- diagnostico fuera "
+                "de alcance para modelos de curva de tipos como HullWhite1F/2F)"
+            );
+        }
+
+        nb::module_ np = nb::module_::import_("numpy");
+        nb::object times_arr = np.attr("array")(result.times);
+        nb::object paths_arr = np.attr("array")(result.paths_flat)
+                                    .attr("reshape")(
+                                        static_cast<std::size_t>(result.n_paths),
+                                        static_cast<std::size_t>(result.n_steps + 1)
+                                    );
+        return nb::make_tuple(times_arr, paths_arr);
+    }
+
+    // Evaluacion determinista de un PayoffProduct sobre un ESCENARIO de mercado fijo
+    // (PLAN_IMPROVE_NOTEBOOK2.md Fase 1): utilidad de autoria/notebook, NO una IMeasure (mismo
+    // criterio que simulate_paths arriba: no ensucia Registry<IMeasure> con algo que no admite
+    // price_batch/price_many/price_grid).
+    //
+    // Decision de diseno (ScenarioEvaluator nativo C++ vs evaluacion sobre CompiledPayoff de
+    // Rust con n_paths=1): se eligio ScenarioEvaluator
+    // (engine/payoff/scenario_evaluator.hpp) porque ya existe exactamente para esto
+    // ("interpreta el contrato sobre una unica ruta conocida", PLAN_PRODUCTS.md §5.1/§5.2) y
+    // opera directamente sobre el AST C++ que ya construye PayoffProduct -- cero cambios en
+    // Rust/el bridge cxx. La ruta Rust habria significado serializar el AST a un CompiledPayoff
+    // y fingir una "simulacion" Monte Carlo de un unico paso para un calculo que es, por
+    // definicion, determinista y sin modelo: un rodeo mas caro para llegar al mismo resultado
+    // que ScenarioEvaluator ya da hoy (es el mismo evaluador que usa
+    // market_snapshot_bridge.hpp/PresentValueMeasure para IrSwapProduct, aqui expuesto
+    // directamente sin el paso de descuento que ese puente le anade).
+    //
+    // `scenario`: dict {observable: spot} -- SIN fecha explicita. El spot dado se registra en
+    // TODAS las fechas de fixing que el contrato requiere para ese observable
+    // (DependencyVisitor::fixing_dates): suficiente para las 14 estrategias de
+    // 09_option_strategies_and_greeks.ipynb (un unico observable, una o dos fechas de
+    // vencimiento) y para cualquier contrato de un unico observable con varias fechas (p.ej. un
+    // calendar spread: el mismo spot en T_NEAR y T_FAR -- exactamente lo que ya asumia
+    // `intrinsic_value` en NumPy al aplicar el mismo `spot_grid[i]` a todas las patas de la
+    // estrategia sin importar su vencimiento). LIMITACION conocida para contratos futuros con
+    // MAS DE UN observable que requieran spots DISTINTOS por observable en fechas distintas
+    // (p.ej. un basket multi-activo con fixings escalonados): este disenio no lo distingue --
+    // aplicaria el spot de cada observable a TODAS las fechas del contrato, no solo a las
+    // suyas. Ningun caso de uso de esta fase lo necesita (ver notebooks 02/09, un unico
+    // observable por contrato); si una fase futura lo necesita, extender `scenario` a
+    // {(observable, time): spot} en vez de {observable: spot}.
+    //
+    // Un observable requerido que falte en `scenario` NO se aproxima: ScenarioEvaluator lanza
+    // EvaluationError explicito al intentar leerlo (nunca 0.0 silencioso).
+    //
+    // Devuelve el CashflowLedger crudo, SIN descontar a proposito (es el payoff a un instante
+    // fijo -- p.ej. a vencimiento -- no un valor presente; para eso ya existe
+    // PresentValueMeasure/PayoffPriceQ): lista de (time, currency, amount), mismo shape que
+    // market_snapshot_bridge.hpp usa internamente antes de descontar.
+    std::vector<std::tuple<double, std::string, double>> evaluate_scenario(
+        const engine::IProduct& product, const nb::dict& scenario
+    ) const {
+        const auto* payoff_product = dynamic_cast<const engine::payoff::PayoffProduct*>(&product);
+        if (!payoff_product) {
+            throw std::invalid_argument(
+                "Engine.evaluate_scenario: producto no soportado: " + product.type_name() +
+                " (solo PayoffProduct tiene un AST evaluable por ScenarioEvaluator)"
+            );
+        }
+        const engine::payoff::ContractPtr& root = payoff_product->payoff_program()->contract;
+
+        std::unordered_map<std::string, double> spot_by_observable;
+        for (auto item : scenario) {
+            spot_by_observable.emplace(nb::cast<std::string>(item.first), nb::cast<double>(item.second));
+        }
+
+        engine::payoff::DependencyReport deps = engine::payoff::DependencyVisitor().analyze(root);
+
+        engine::payoff::MarketPath path;
+        for (const engine::payoff::ObservableId& observable : deps.observables) {
+            auto it = spot_by_observable.find(observable.value);
+            if (it == spot_by_observable.end()) continue; // ScenarioEvaluator lo detectara si de verdad hace falta
+            for (engine::payoff::TimePoint t : deps.fixing_dates) {
+                path.set_fixing(observable, t, it->second);
+            }
+        }
+
+        engine::payoff::FixingStore historical;
+        engine::payoff::RuntimeState state;
+        engine::payoff::EvaluationContext context{path, historical, state};
+        engine::payoff::CashflowLedger ledger = engine::payoff::ScenarioEvaluator().evaluate(root, context);
+
+        std::vector<std::tuple<double, std::string, double>> result;
+        result.reserve(ledger.size());
+        for (const auto& entry : ledger) {
+            result.emplace_back(entry.payment_time.year_fraction, entry.currency.code, entry.amount);
+        }
+        return result;
+    }
+
 private:
     engine::Registries registries_;
 };
-
-// Traduce un engine::PriceResult (usado dentro de BatchResult/GridResult) a un dict
-// {nombre_medida: MeasureResult} -- misma forma que ya devuelve Engine.price, extraída aquí
-// para no duplicarla entre BatchResult y GridResult (PLAN.md §7.19).
-nb::dict calc_result_to_dict(const engine::PriceResult& result) {
-    nb::dict out;
-    for (const auto& entry : result) {
-        out[entry.measure_name.c_str()] = entry.result;
-    }
-    return out;
-}
 
 } // namespace
 
@@ -405,7 +624,7 @@ NB_MODULE(engine, m) {
     // --- Portfolio (PLAN_BACKWARD.md §6.4/§9 Fase 6) ----------------------------------------
     // Se expone `engine::Portfolio` DIRECTAMENTE (nb::class_, sin dataclass/fachada Python
     // intermedia): PLAN_BACKWARD.md §6.4 esboza una fachada de dataclass
-    // (`engine_typed/portfolio.py`), pero eso no es como funciona el resto de este fichero --
+    // (`quantdesk/portfolio.py`), pero eso no es como funciona el resto de este fichero --
     // `all_greeks`/`Engine.hessian`/`Engine.hvp` exponen sus tipos C++ tal cual, sin dataclasses
     // intermedias -- asi que Portfolio sigue el mismo patron real por consistencia (una fachada
     // Python fina no aporta nada aqui: Portfolio ya tiene una API mínima de 4 metodos, igual
@@ -506,6 +725,10 @@ NB_MODULE(engine, m) {
         .def_ro("secondary", &engine::MeasureResult::secondary)
         .def_ro("has_scalar", &engine::MeasureResult::has_scalar)
         .def_ro("scalar", &engine::MeasureResult::scalar)
+        // PLAN_IMPROVE_NOTEBOOK2.md Fase 5: None salvo que la medida evaluada sea "Greek" y el
+        // metodo realmente ejecutado haya usado un bump numerico (mismo patron que
+        // GreekResult.bump_used mas abajo).
+        .def_ro("bump_used", &engine::MeasureResult::bump_used)
         .def("__repr__", [](const engine::MeasureResult& self) {
             return "<MeasureResult times=" + std::to_string(self.times.size()) +
                    " has_scalar=" + (self.has_scalar ? std::string("True") : std::string("False")) + ">";
@@ -613,7 +836,8 @@ NB_MODULE(engine, m) {
     nb::class_<engine::PriceBatchResultEntry>(m, "BatchResult")
         .def_ro("trade_index", &engine::PriceBatchResultEntry::trade_index)
         .def_prop_ro(
-            "measures", [](const engine::PriceBatchResultEntry& self) { return calc_result_to_dict(self.measures); }
+            "measures",
+            [](const engine::PriceBatchResultEntry& self) { return calc_result_to_dict(self.measures, "BatchResult.measures"); }
         )
         .def("__repr__", [](const engine::PriceBatchResultEntry& self) {
             return "<BatchResult trade_index=" + std::to_string(self.trade_index) + ">";
@@ -624,7 +848,8 @@ NB_MODULE(engine, m) {
         .def_ro("model_index", &engine::PriceGridResultEntry::model_index)
         .def_ro("market_index", &engine::PriceGridResultEntry::market_index)
         .def_prop_ro(
-            "measures", [](const engine::PriceGridResultEntry& self) { return calc_result_to_dict(self.measures); }
+            "measures",
+            [](const engine::PriceGridResultEntry& self) { return calc_result_to_dict(self.measures, "GridResult.measures"); }
         )
         .def("__repr__", [](const engine::PriceGridResultEntry& self) {
             return "<GridResult trade_index=" + std::to_string(self.trade_index) +
@@ -773,7 +998,21 @@ NB_MODULE(engine, m) {
             "product/model/market/pricing/execution de una vez. Devuelve un dict {nombre: "
             "MeasureResult} en el mismo orden que measure_names.\n\n"
             ">>> eng.price(trade, ['PV', 'DV01', 'ExpectedExposure', 'PFE95', 'UnilateralCVA'],\n"
-            "...          model, market, pricing, execution)"
+            "...          model, market, pricing, execution)\n\n"
+            "Cada elemento de measure_names es un string pelado, una tupla (nombre, params) o "
+            "-- PLAN_IMPROVE_NOTEBOOK2.md Fase 3 -- una tupla (nombre, params, alias): varias "
+            "entradas 'Greek' (que de otro modo colisionarian bajo la misma clave 'Greek' en el "
+            "dict de salida) pueden convivir en una sola llamada dandole a cada una un alias "
+            "distinto. No comparte simulacion Monte Carlo entre ellas (cada 'Greek' sigue "
+            "disparando su propio calculo interno) -- es una mejora de ERGONOMIA de API (menos "
+            "round-trips Python<->motor), no de rendimiento; ver el ADR de esa fase. Dos medidas "
+            "que resuelvan al mismo nombre de salida (con o sin alias) lanzan ValueError en vez "
+            "de pisarse en silencio.\n\n"
+            ">>> from quantdesk import greeks\n"
+            ">>> eng.price(trade, [\n"
+            "...     greeks.delta('PayoffPriceQ', 'spot').to_spec(alias='delta'),\n"
+            "...     greeks.vega('PayoffPriceQ').to_spec(alias='vega'),\n"
+            "... ], model, market, pricing, execution)  # {'delta': ..., 'vega': ...}"
         )
         .def(
             "price_batch",
@@ -787,7 +1026,8 @@ NB_MODULE(engine, m) {
             "Nivel 3 (PLAN.md §7.17/§7.19): calcula measure_names para una LISTA de trades del "
             "mismo tipo/calendario, vectorizado sin bucle -- cada trade de IRSwap debe traer "
             "fixed_rate explicito (sin use_par_rate). Devuelve list[BatchResult], una fila por "
-            "trade en el mismo orden que products."
+            "trade en el mismo orden que products. measure_names acepta el mismo alias opcional "
+            "por entrada que price() (PLAN_IMPROVE_NOTEBOOK2.md Fase 3)."
         )
         .def(
             "price_many",
@@ -800,7 +1040,8 @@ NB_MODULE(engine, m) {
             nb::arg("execution"),
             "Nivel 2 (PLAN.md §7.17/§7.19): igual que price_batch pero products puede mezclar "
             "tipos/calendarios distintos -- se agrupan internamente (nunca falla por "
-            "heterogeneidad) y el resultado se devuelve en el orden de entrada original."
+            "heterogeneidad) y el resultado se devuelve en el orden de entrada original. Mismo "
+            "alias opcional por entrada que price() (PLAN_IMPROVE_NOTEBOOK2.md Fase 3)."
         )
         .def(
             "price_grid",
@@ -813,7 +1054,8 @@ NB_MODULE(engine, m) {
             nb::arg("execution"),
             "Explosion de combinaciones Trades x Models x Markets (PLAN.md §7.19): por cada "
             "par (modelo, mercado), llama a price_many sobre products entero. pricing/execution "
-            "son compartidos, no forman parte de la rejilla. Devuelve list[GridResult]."
+            "son compartidos, no forman parte de la rejilla. Devuelve list[GridResult]. Mismo "
+            "alias opcional por entrada que price() (PLAN_IMPROVE_NOTEBOOK2.md Fase 3)."
         )
         .def(
             "all_greeks",
@@ -878,5 +1120,61 @@ NB_MODULE(engine, m) {
             ">>> report = eng.hvp(trade, 'HullWhiteModelNpv', model, market, pricing, execution, "
             "{'model.a': 1.0, 'model.sigma': 0.5})\n"
             ">>> for c in report.components: print(c.factor, c.value, c.method_used)"
+        )
+        .def(
+            "simulate_paths",
+            &Engine::simulate_paths,
+            nb::arg("model"),
+            nb::arg("market"),
+            nb::arg("pricing"),
+            "Diagnostico de trayectorias Monte Carlo (PLAN_IMPROVE_NOTEBOOK.md Fase 0) -- NO es "
+            "una medida de Engine.price, es una herramienta de notebook/diagnostico que expone "
+            "la matriz completa de trayectorias que el simulador ya calcula por dentro para las "
+            "medidas Payoff*Q/Payoff*P. Devuelve (times, paths): times es np.ndarray 1D de "
+            "longitud n_steps+1 (times[0] == 0.0, S0 conocido sin simular); paths es np.ndarray "
+            "de forma (n_paths, n_steps+1), paths[:, 0] == model.s0() para todas las rutas. El "
+            "horizonte T es SIEMPRE market.pillars()[-1] (el ultimo pillar de la curva); "
+            "n_steps/n_paths/seed vienen de pricing. Modelos GBM (medida Q), GBM_P (medida "
+            "fisica P) y GbmBasket (PLAN_IMPROVE_NOTEBOOK2.md Fase 4, N activos correlacionados) "
+            "generan un observable simulable -- cualquier otro modelo (p.ej. HullWhite1F/2F) "
+            "lanza ValueError. Sobre GbmBasket, paths tiene una dimension EXTRA: forma "
+            "(n_paths, n_steps+1, n_assets), paths[:, 0, :] == model.s0() (broadcast por activo) "
+            "para todas las rutas -- convencion elegida para que baste un unico reshape, ver el "
+            "docstring de engine::BasketPathMatrix (C++)/ffi::BasketPathMatrixResult (Rust). "
+            "Tope duro de n_paths x n_steps (50000 x 500, PLAN_IMPROVE_NOTEBOOK.md Fase 0) para "
+            "no agotar memoria -- herramienta de diagnostico, no un pricer de produccion; excede "
+            "el tope y lanza ValueError.\n\n"
+            ">>> times, paths = eng.simulate_paths(model_q, market, pricing)\n"
+            ">>> paths.shape\n"
+            "(pricing.n_paths, pricing.n_steps + 1)\n"
+            ">>> times, paths = eng.simulate_paths(basket_model, market, pricing)\n"
+            ">>> paths.shape\n"
+            "(pricing.n_paths, pricing.n_steps + 1, len(basket_spec.observables))"
+        )
+        .def(
+            "evaluate_scenario",
+            &Engine::evaluate_scenario,
+            nb::arg("product"),
+            nb::arg("scenario"),
+            "Evaluacion DETERMINISTA de un PayoffProduct sobre un escenario de mercado fijo "
+            "(PLAN_IMPROVE_NOTEBOOK2.md Fase 1) -- SIN modelo, SIN Monte Carlo, SIN descuento: "
+            "ejecuta el AST ya construido (ScenarioEvaluator) sobre una unica ruta conocida, "
+            "igual que hace market_snapshot_bridge.hpp/PresentValueMeasure internamente, pero "
+            "devolviendo el ledger crudo en vez de un valor presente. Util para dibujar el "
+            "payoff a un instante fijo (p.ej. el payoff intrinseco a vencimiento de una "
+            "estrategia de opciones) sin reimplementar max(S-K,0)/max(K-S,0) a mano en NumPy.\n\n"
+            "`scenario` es un dict {observable: spot}: el spot dado se registra en TODAS las "
+            "fechas de fixing que el contrato requiere para ese observable -- suficiente para "
+            "cualquier contrato de un unico observable (una o varias fechas, p.ej. un calendar "
+            "spread). Un observable requerido que falte en `scenario` lanza ValueError "
+            "explicito (ScenarioEvaluator), nunca 0.0 silencioso. LIMITACION: un contrato con "
+            "MAS DE UN observable, cada uno con sus propias fechas, aplicaria el spot de cada "
+            "observable a TODAS las fechas del contrato, no solo a las suyas -- ningun caso de "
+            "uso de esta fase lo necesita.\n\n"
+            "Devuelve list[tuple[float, str, float]] -- (time, currency, amount) por cashflow "
+            "generado, SIN descontar (a proposito: es el payoff en ese instante, no un valor "
+            "presente).\n\n"
+            ">>> eng.evaluate_scenario(product, {\"EQ.SPOT\": 105.0})\n"
+            "[(1.0, 'USD', 5.0)]"
         );
 }

@@ -64,11 +64,17 @@ def test_register_builtins_populates_all_registries():
     # "HullWhiteModelNpv" se sumo en PLAN_GREEKS.md Fase 7 (NPV de Hull-White que SI depende
     # del modelo, distinto de "PV" -- ver measure.cpp::HullWhiteModelNpvMeasure): faltaba aqui
     # desde esa fase, corregido de paso en la Fase 9 (bindings) al notar la discrepancia.
+    # "PayoffUnilateralCvaQ" se sumo en PLAN_IMPROVE_NOTEBOOK.md Fase 5: CVA unilateral nativo
+    # para un PayoffProduct (opcionalidad real bajo GbmModel), compone PayoffExposureProfileQ
+    # internamente + la misma formula de integracion de supervivencia que UnilateralCVA usa
+    # para IRS, pero descontando por la curva de MarketSnapshot en vez de la dinamica analitica
+    # de Hull-White (measure.cpp::compute_cva_from_exposure_market) -- antes se integraba a
+    # mano en el notebook 06 (`manual_cva`).
     assert set(eng.list_measures()) == {
         "PV", "DV01", "ExposureProfile", "ExpectedExposure", "PFE95", "UnilateralCVA",
         "PayoffPriceQ", "PayoffExerciseQ", "PayoffHitProbabilityQ", "PayoffExposureProfileQ",
         "PayoffForecastP", "PayoffHitProbabilityP", "PayoffPnlDistributionP", "PayoffSensitivityQ",
-        "Greek", "HullWhiteModelNpv",
+        "PayoffUnilateralCvaQ", "Greek", "HullWhiteModelNpv",
     }
 
 

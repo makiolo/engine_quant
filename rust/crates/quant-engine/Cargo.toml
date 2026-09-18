@@ -1,0 +1,18 @@
+[package]
+name = "quant-engine"
+version.workspace = true
+edition.workspace = true
+
+[features]
+default = []
+# GPU support is deliberately opt-in.  The public routing/scheduling API remains
+# available in a CPU-only build; only the Burn WGPU probe and kernels are gated.
+gpu = ["engine-core/gpu", "dep:burn"]
+
+[dependencies]
+engine-core = { path = "../engine-core" }
+quant-domain = { path = "../quant-domain" }
+burn = { version = "0.21.0", default-features = false, features = ["std", "wgpu"], optional = true }
+serde_json = "1"
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"

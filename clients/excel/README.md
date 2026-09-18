@@ -84,7 +84,7 @@ trade — ya no es un parámetro que haya que pasar a mano.
 `ENGINE.PRICE` ya no está limitado a esta lista curada: acepta cualquier nombre presente en el
 registry de medidas del motor (PLAN_REAPI.md §6 Fase 3) — `ENGINE.LIST_MEASURES()` sigue
 siendo la forma de descubrirlos. Configurar una medida (p.ej. el `bump` de `DV01`) no está
-expuesto todavía desde Excel/C ABI -- solo desde Python (`engine_typed`, ver
+expuesto todavía desde Excel/C ABI -- solo desde Python (`quantdesk`, ver
 `clients/python/README_PYPI.md`); `ENGINE.PRICE` con solo nombres sigue funcionando igual.
 
 `ENGINE.PRICE` devuelve una tabla en **formato largo**: columnas `[MeasureName, Time, Value]`

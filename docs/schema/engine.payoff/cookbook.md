@@ -1,7 +1,7 @@
 # Cookbook de `engine.payoff/v1`
 
-Recetas para construir los patrones de PLAN_PRODUCTS.md §4/§9 con `engine_typed.payoff`
-(`import engine_typed as q`), más el catálogo de errores reales que produce `ValidationVisitor`
+Recetas para construir los patrones de PLAN_PRODUCTS.md §4/§9 con `quantdesk.payoff`
+(`import quantdesk as q`), más el catálogo de errores reales que produce `ValidationVisitor`
 (`cpp/engine/src/payoff/validation_visitor.cpp`) cuando un contrato no es válido. Todos los
 ejemplos tienen un fixture JSON equivalente en `docs/schema/engine.payoff/examples/`.
 

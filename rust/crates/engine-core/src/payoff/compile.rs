@@ -188,6 +188,51 @@ impl Compiler {
                 let observable = self.observable_slot(str_field(node, "observable")?);
                 ScalarOp::EventValue { event, observable }
             }
+            // Misma forma EXACTA que el AST de autoria ya existente (cpp/engine/include/engine/
+            // payoff/expression.hpp, docs/schema/engine.payoff/v1.schema.json,
+            // engine_typed.payoff.average/running_min/running_max en Python) -- ver el
+            // doc-comment de ScalarOp::Average/RunningMin en ir.rs para el porque.
+            "average" => {
+                let observable = self.observable_slot(str_field(node, "observable")?);
+                let schedule = array_field(node, "schedule")?
+                    .iter()
+                    .map(|v| v.as_f64().ok_or_else(|| "payoff: 'schedule' debe contener solo numeros".to_string()))
+                    .collect::<Result<Vec<f64>, String>>()?;
+                let weights = array_field(node, "weights")?
+                    .iter()
+                    .map(|v| v.as_f64().ok_or_else(|| "payoff: 'weights' debe contener solo numeros".to_string()))
+                    .collect::<Result<Vec<f64>, String>>()?;
+                // Mismo criterio que 'ValidationVisitor::check_schedule_ascending_and_finite' en
+                // C++ (valida el mismo campo del mismo AST): 'schedule' no vacio y estrictamente
+                // ascendente; ademas 'schedule'/'weights' de igual longitud (mismo chequeo que
+                // 'ScalarEvalVisitor::visit(Average)', que fallaria en evaluacion si no
+                // coincidieran -- aqui se adelanta a preflight, "Err es siempre un error de
+                // preflight", ver el doc-comment de compile()).
+                if schedule.is_empty() {
+                    return Err("payoff: 'average' requiere al menos un instante en 'schedule'".to_string());
+                }
+                if schedule.len() != weights.len() {
+                    return Err(format!(
+                        "payoff: 'average': 'schedule' ({} elementos) y 'weights' ({} elementos) deben tener la misma longitud",
+                        schedule.len(),
+                        weights.len()
+                    ));
+                }
+                for w in schedule.windows(2) {
+                    if w[1] <= w[0] {
+                        return Err("payoff: 'schedule' de 'average' debe ser estrictamente ascendente".to_string());
+                    }
+                }
+                ScalarOp::Average { observable, schedule, weights }
+            }
+            "running_min" => {
+                let observable = self.observable_slot(str_field(node, "observable")?);
+                ScalarOp::RunningMin { observable }
+            }
+            "running_max" => {
+                let observable = self.observable_slot(str_field(node, "observable")?);
+                ScalarOp::RunningMax { observable }
+            }
             other => return Err(unsupported_node("escalar", other)),
         };
         Ok(self.intern_scalar(op))
@@ -357,9 +402,10 @@ impl Compiler {
 fn unsupported_node(category: &str, node_type: &str) -> String {
     format!(
         "payoff: nodo de {category} '{node_type}' no soportado en CompiledPayoff v{COMPILED_PAYOFF_VERSION} \
-         (PLAN_PRODUCTS.md §12): requiere un agregado sobre schedule (Average/RunningMin/RunningMax) o un \
-         observable de mercado (DiscountFactor/FxConversion/Parameter/EventTime/Before/After) que ningun \
-         modelo Q de esta fase evalua todavia"
+         (PLAN_PRODUCTS.md §12, PLAN_IMPROVE_NOTEBOOK.md Fase 2): requiere un observable de mercado \
+         (DiscountFactor/FxConversion/Parameter/EventTime/Before/After) que ningun modelo Q de esta fase \
+         evalua todavia -- Average/RunningMin/RunningMax SI estan soportados desde la Fase 2 de \
+         PLAN_IMPROVE_NOTEBOOK.md"
     )
 }
 
@@ -450,13 +496,94 @@ mod tests {
 
     #[test]
     fn rejects_unsupported_node_before_evaluating_anything() {
-        let average_json = r#"{
+        // 'average' YA se soporta como nodo ESCALAR desde PLAN_IMPROVE_NOTEBOOK.md Fase 2 (ver
+        // los tests dedicados mas abajo) -- lo que sigue sin soportarse es un nodo de CONTRATO
+        // inexistente, para seguir ejercitando el camino de error de 'unsupported_node'.
+        let unsupported_contract_json = r#"{
             "schema": "engine.payoff/v1",
             "id": "x",
-            "contract": {"type": "average"}
+            "contract": {"type": "discount_factor"}
         }"#;
-        let err = compile(average_json).expect_err("Average no deberia soportarse todavia (fuera de alcance Fase 5-9)");
-        assert!(err.contains("average"));
+        let err = compile(unsupported_contract_json)
+            .expect_err("'discount_factor' no es un nodo de contrato valido, deberia rechazarse en preflight");
+        assert!(err.contains("discount_factor"));
+    }
+
+    // PLAN_IMPROVE_NOTEBOOK.md Fase 2: Average/RunningMin/RunningMax como nodos ESCALARES, misma
+    // forma EXACTA que el AST de autoria C++/Python/docs/schema ya establecido (ver el
+    // doc-comment de ScalarOp::Average/RunningMin en ir.rs). 'average' es una suma PONDERADA
+    // (schedule+weights), no una media aritmetica con divisor implicito; 'running_min'/
+    // 'running_max' solo llevan 'observable' (sin schedule propio).
+    const AVERAGE_JSON: &str = r#"{
+        "schema": "engine.payoff/v1",
+        "id": "x",
+        "contract": {
+            "type": "when",
+            "time": 1.0,
+            "child": {
+                "type": "cashflow",
+                "currency": "USD",
+                "amount": {
+                    "type": "average",
+                    "observable": "EQ.SPOT.AAPL",
+                    "schedule": [0.25, 0.5, 0.75, 1.0],
+                    "weights": [0.25, 0.25, 0.25, 0.25]
+                }
+            }
+        }
+    }"#;
+
+    #[test]
+    fn compiles_average_with_schedule_in_required_times() {
+        let compiled = compile(AVERAGE_JSON).expect("'average' deberia compilar (Fase 2)");
+        assert_eq!(compiled.observable_slots, vec!["EQ.SPOT.AAPL".to_string()]);
+        assert_eq!(compiled.required_times(), vec![0.25, 0.5, 0.75, 1.0]);
+        assert!(matches!(
+            compiled.scalar_ops.iter().find(|op| matches!(op, ScalarOp::Average { .. })),
+            Some(ScalarOp::Average { schedule, weights, .. })
+                if schedule == &vec![0.25, 0.5, 0.75, 1.0] && weights == &vec![0.25, 0.25, 0.25, 0.25]
+        ));
+    }
+
+    #[test]
+    fn rejects_average_with_empty_schedule() {
+        let json = AVERAGE_JSON.replace(r#""schedule": [0.25, 0.5, 0.75, 1.0],"#, r#""schedule": [],"#)
+            .replace(r#""weights": [0.25, 0.25, 0.25, 0.25]"#, r#""weights": []"#);
+        let err = compile(&json).expect_err("'average' con 'schedule' vacio deberia rechazarse");
+        assert!(err.contains("schedule"), "err={err}");
+    }
+
+    #[test]
+    fn rejects_average_with_non_ascending_schedule() {
+        let json = AVERAGE_JSON.replace(r#""schedule": [0.25, 0.5, 0.75, 1.0],"#, r#""schedule": [0.5, 0.25, 0.75, 1.0],"#);
+        let err = compile(&json).expect_err("'average' con 'schedule' no ascendente deberia rechazarse");
+        assert!(err.contains("ascendente"), "err={err}");
+    }
+
+    #[test]
+    fn rejects_average_with_mismatched_schedule_and_weights_length() {
+        let json = AVERAGE_JSON.replace(r#""weights": [0.25, 0.25, 0.25, 0.25]"#, r#""weights": [0.5, 0.5]"#);
+        let err = compile(&json).expect_err("'average' con longitudes distintas deberia rechazarse");
+        assert!(err.contains("misma longitud"), "err={err}");
+    }
+
+    // 'running_min'/'running_max' solo llevan 'observable' -- sin 'schedule' propio (ver el
+    // doc-comment de ScalarOp::RunningMin): no contribuyen nada a required_times() por si
+    // mismos, consultan en evaluacion lo que YA este ahi por otro camino, filtrado por cursor
+    // (ver los tests de paridad en eval.rs).
+    #[test]
+    fn compiles_running_min_and_running_max_contributing_nothing_to_required_times_on_their_own() {
+        for node_type in ["running_min", "running_max"] {
+            let json = format!(
+                r#"{{"schema": "engine.payoff/v1", "id": "x", "contract": {{"type": "when", "time": 1.0,
+                    "child": {{"type": "cashflow", "currency": "USD",
+                        "amount": {{"type": "{node_type}", "observable": "EQ.SPOT.AAPL"}}}}}}}}"#
+            );
+            let compiled = compile(&json).unwrap_or_else(|e| panic!("'{node_type}' deberia compilar (Fase 2): {e}"));
+            assert_eq!(compiled.observable_slots, vec!["EQ.SPOT.AAPL".to_string()]);
+            // El unico instante requerido viene del 'when' envolvente, no de running_min/max.
+            assert_eq!(compiled.required_times(), vec![1.0]);
+        }
     }
 
     // PLAN_PRODUCTS.md §10, Fase 9: derecho de ejercicio americano/bermuda.

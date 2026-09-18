@@ -98,6 +98,65 @@ std::string risk_factor_name_for_param_key(const std::string& model_type, const 
     return param_key;
 }
 
+// Alias "amigable" -> clave de VECTOR de `GbmBasketModel::to_params()` por activo
+// (PLAN_IMPROVE_NOTEBOOK2.md Fase 4): "model.spot_0"/"model.rate_1"/"model.dividend_yield_0"/
+// "model.volatility_1" -- MISMOS alias que GBM (spot/rate/dividend_yield/volatility, ver
+// `gbm_risk_factor_to_param_key`), con sufijo "_<indice de activo>", resuelto contra los
+// parametros VECTOR de `to_params()` ("s0"/"r"/"q"/"sigma", uno por activo, mismo orden que
+// "observables"). A diferencia de GBM/GBM_P (parametros escalares), un basket no tiene una clave
+// `double` propia por activo en `to_params()` -- se resuelve la clave del VECTOR y el indice
+// DENTRO de ese vector, nunca se inventan N*4 claves sinteticas que `GbmBasketModel`/su
+// constructor jamas reconocerian.
+struct BasketIndexedParam {
+    std::string vector_key;
+    std::size_t asset_index;
+};
+
+std::optional<BasketIndexedParam> resolve_basket_indexed_param(const std::string& risk_factor_name) {
+    static const std::vector<std::pair<std::string, std::string>> prefix_to_vector_key = {
+        {"spot_", "s0"}, {"rate_", "r"}, {"dividend_yield_", "q"}, {"volatility_", "sigma"}
+    };
+    for (const auto& [prefix, vector_key] : prefix_to_vector_key) {
+        if (risk_factor_name.rfind(prefix, 0) != 0) continue;
+        const std::string idx_str = risk_factor_name.substr(prefix.size());
+        if (idx_str.empty()) return std::nullopt;
+        std::size_t consumed = 0;
+        long idx = 0;
+        try {
+            idx = std::stol(idx_str, &consumed);
+        } catch (...) {
+            return std::nullopt;
+        }
+        if (idx < 0 || consumed != idx_str.size()) return std::nullopt;
+        return BasketIndexedParam{vector_key, static_cast<std::size_t>(idx)};
+    }
+    return std::nullopt;
+}
+
+// Lee `params[vector_key][asset_index]` con el mismo mensaje de error auto-explicativo (nombra el
+// factor pedido) tanto si falta la clave, no es un vector, o el indice esta fuera de rango --
+// compartido por `resolve_bump`/`bump_state` para no duplicar la validacion.
+double basket_indexed_param_value(
+    const IModel& model, const Params& params, const RiskFactor& risk_factor, const BasketIndexedParam& indexed
+) {
+    auto it = params.find(indexed.vector_key);
+    if (it == params.end() || !std::holds_alternative<std::vector<double>>(it->second)) {
+        throw std::invalid_argument(
+            "compute_greek: el modelo '" + model.type_name() + "' no tiene el parametro de riesgo '" +
+            to_string(risk_factor) + "'"
+        );
+    }
+    const std::vector<double>& vec = std::get<std::vector<double>>(it->second);
+    if (indexed.asset_index >= vec.size()) {
+        throw std::invalid_argument(
+            "compute_greek: '" + to_string(risk_factor) + "' referencia el activo " +
+            std::to_string(indexed.asset_index) + ", pero el modelo '" + model.type_name() + "' solo declara " +
+            std::to_string(vec.size()) + " activos"
+        );
+    }
+    return vec[indexed.asset_index];
+}
+
 // Política de bump por defecto (PLAN_GREEKS.md §4.3): relativo con piso absoluto para parámetros
 // de modelo. `GreekRequest::bump_override` la sustituye cuando está presente.
 double default_model_parameter_bump(double base_value) {
@@ -151,6 +210,24 @@ bool is_second_order_capable_kind(RiskFactorKind kind) {
 // `compute_greek`); el `cross_factor` siempre usa su propio default.
 double resolve_bump(const IModel& model, const MarketSnapshot& market, const RiskFactor& risk_factor, std::optional<double> override_h) {
     if (risk_factor.kind == RiskFactorKind::ModelParameter) {
+        // GbmBasketModel (PLAN_IMPROVE_NOTEBOOK2.md Fase 4): sus parametros por activo son
+        // VECTORES en to_params() ("s0"/"r"/"q"/"sigma"), no un `double` escalar como GBM/GBM_P --
+        // `resolve_model_parameter_key` (que solo sabe de claves escalares) no aplica aqui, se
+        // resuelve por separado via `resolve_basket_indexed_param`.
+        if (model.type_name() == "GbmBasket") {
+            std::optional<BasketIndexedParam> indexed = resolve_basket_indexed_param(risk_factor.name);
+            if (!indexed.has_value()) {
+                throw std::invalid_argument(
+                    "compute_greek: 'GbmBasket' no reconoce el factor de riesgo '" + to_string(risk_factor) +
+                    "' (validos: model.spot_<i>, model.rate_<i>, model.dividend_yield_<i>, "
+                    "model.volatility_<i>, con <i> el indice de activo -- 0-based, mismo orden que "
+                    "'observables')"
+                );
+            }
+            Params params = model.to_params();
+            double base_value = basket_indexed_param_value(model, params, risk_factor, *indexed);
+            return override_h.value_or(default_model_parameter_bump(base_value));
+        }
         const std::string param_key = resolve_model_parameter_key(model.type_name(), risk_factor.name);
         Params params = model.to_params();
         auto it = params.find(param_key);
@@ -201,6 +278,29 @@ BumpedState bump_state(
     BumpedState state(model, market);
     switch (risk_factor.kind) {
         case RiskFactorKind::ModelParameter: {
+            // GbmBasketModel (PLAN_IMPROVE_NOTEBOOK2.md Fase 4): igual que en `resolve_bump`, el
+            // parametro bumpeado vive DENTRO de un vector<double> ("s0"/"r"/"q"/"sigma") -- se
+            // reconstruye ese vector con solo el indice del activo desplazado, dejando el resto
+            // intacto, en vez de reasignar una clave escalar completa.
+            if (model.type_name() == "GbmBasket") {
+                std::optional<BasketIndexedParam> indexed = resolve_basket_indexed_param(risk_factor.name);
+                if (!indexed.has_value()) {
+                    throw std::invalid_argument(
+                        "compute_greek: 'GbmBasket' no reconoce el factor de riesgo '" + to_string(risk_factor) +
+                        "' (validos: model.spot_<i>, model.rate_<i>, model.dividend_yield_<i>, "
+                        "model.volatility_<i>, con <i> el indice de activo -- 0-based, mismo orden que "
+                        "'observables')"
+                    );
+                }
+                Params params = model.to_params();
+                basket_indexed_param_value(model, params, risk_factor, *indexed); // valida existencia/rango
+                std::vector<double> vec = std::get<std::vector<double>>(params[indexed->vector_key]);
+                vec[indexed->asset_index] += h;
+                params[indexed->vector_key] = std::move(vec);
+                state.owned_model = registries.models.create(model.type_name(), params);
+                state.model = state.owned_model.get();
+                break;
+            }
             const std::string param_key = resolve_model_parameter_key(model.type_name(), risk_factor.name);
             Params params = model.to_params();
             auto it = params.find(param_key);
@@ -346,6 +446,14 @@ std::optional<std::array<HessianEntry, 3>> try_hessian_likelihood_ratio(
 
     const auto* payoff_product = dynamic_cast<const payoff::PayoffProduct*>(&product);
     if (!payoff_product) return std::nullopt;
+
+    // PLAN_IMPROVE_NOTEBOOK2.md Fase 0 (ADR-IN2-01, mismo criterio que `try_pathwise` mas abajo):
+    // `payoff_local_hessian_gbm[_p]` (Rust) nunca recibe `pricing.pricing_date()`, solo n_paths/seed
+    // -- bajo `pricing_date() != 0` el Hessiano LRM seria SILENCIOSAMENTE identico al de
+    // pricing_date=0. Se rechaza aqui explicito: `compute_hessian` cae a `skipped` con el motivo
+    // exacto (no hay fallback bump-and-reval generico de segundo orden todavia, ver Fase 2 de
+    // PLAN_IMPROVE_NOTEBOOK2.md) en vez de devolver un numero incorrecto.
+    if (pricing.pricing_date() != 0.0) return std::nullopt;
 
     payoff::LocalHessianResult hessian;
     if (model_type == "GBM") {
@@ -527,6 +635,19 @@ std::optional<GreekResult> try_pathwise(
 
     if (payoff::payoff_contains_exercise(*payoff_product->payoff_program())) return std::nullopt;
 
+    // PLAN_IMPROVE_NOTEBOOK2.md Fase 0 (ADR-IN2-01): `payoff_sensitivity_gbm[_p]` (Rust) nunca
+    // recibe `pricing.pricing_date()`, a diferencia de `risk_neutral_price_gbm` (que SI la honra
+    // desde PLAN_GREEKS.md §7.2/Fase 5, ver `PayoffPriceQMeasure::evaluate` en measure.cpp) -- bajo
+    // `pricing_date() != 0` esta ruta pathwise devolveria SILENCIOSAMENTE el mismo valor que a
+    // pricing_date=0 (el bug real que motiva esta fase: se descubrio porque charm, una diferencia
+    // finita de delta entre dos pricing_date, salia exactamente 0.0). Se rechaza aqui explicito:
+    // bajo method=Auto, `compute_greek` cae al estencil de bump-and-reval generico (que SI
+    // reconstruye el `MeasureResult` con `pricing_date` desplazado, porque llama directamente a
+    // `metric->evaluate(..., pricing, ...)` y `PayoffPriceQMeasure::evaluate` ya reenvia
+    // `pricing.pricing_date()`); bajo method=Pathwise EXPLICITO, `compute_greek` lanza un error
+    // claro via `pathwise_unsupported_reason` en vez de aproximar en silencio.
+    if (pricing.pricing_date() != 0.0) return std::nullopt;
+
     payoff::SensitivityResult sensitivity;
     if (model_type == "GBM") {
         sensitivity = payoff::payoff_sensitivity_gbm(
@@ -568,6 +689,11 @@ std::optional<GreekResult> try_pathwise2(
 
     const auto* payoff_product = dynamic_cast<const payoff::PayoffProduct*>(&product);
     if (!payoff_product) return std::nullopt;
+
+    // PLAN_IMPROVE_NOTEBOOK2.md Fase 0 (ADR-IN2-01): mismo motivo que `try_pathwise` --
+    // `payoff_sensitivity2_gbm[_p]` tampoco recibe `pricing.pricing_date()`. Bajo method=Auto cae
+    // al estencil generico de 3 puntos (Gamma), que SI honra `pricing_date` via `metric->evaluate`.
+    if (pricing.pricing_date() != 0.0) return std::nullopt;
 
     payoff::SensitivityResult sensitivity;
     if (model_type == "GBM") {
@@ -614,6 +740,12 @@ std::optional<GreekResult> try_pathwise_cross(
 
     const auto* payoff_product = dynamic_cast<const payoff::PayoffProduct*>(&product);
     if (!payoff_product) return std::nullopt;
+
+    // PLAN_IMPROVE_NOTEBOOK2.md Fase 0 (ADR-IN2-01): mismo motivo que `try_pathwise`/
+    // `try_pathwise2` -- `payoff_sensitivity_cross_gbm[_p]` tampoco recibe `pricing.pricing_date()`.
+    // Bajo method=Auto cae al estencil generico de 4 puntos (Vanna/cross-gamma), que SI honra
+    // `pricing_date` via `metric->evaluate`.
+    if (pricing.pricing_date() != 0.0) return std::nullopt;
 
     payoff::SensitivityResult sensitivity;
     if (model_type == "GBM") {
@@ -700,7 +832,9 @@ std::optional<GreekResult> try_aad_reverse(
 
 // Mensaje explícito para `method='pathwise'` pedido a mano sobre una combinación no soportada
 // (§4.5/§5.1: nunca aproxima en silencio, siempre nombra la razón exacta).
-std::string pathwise_unsupported_reason(const GreekRequest& request, const IModel& model, const IProduct& product) {
+std::string pathwise_unsupported_reason(
+    const GreekRequest& request, const IModel& model, const IProduct& product, const PricingContext& pricing
+) {
     if (indicator_type_metrics().count(request.metric_name) != 0) {
         return "compute_greek: metodo 'pathwise' no soportado para '" + request.metric_name +
                "' (metrica de tipo indicador/probabilidad -- su derivada pathwise exacta es 0 en casi todo "
@@ -717,12 +851,22 @@ std::string pathwise_unsupported_reason(const GreekRequest& request, const IMode
                "(re-decidir Longstaff-Schwartz bajo el parametro perturbado no es pathwise-diferenciable, "
                "PLAN_GREEKS.md §5.1; usa method='auto' o 'bump_and_reval')";
     }
+    if (pricing.pricing_date() != 0.0) {
+        return "compute_greek: metodo 'pathwise' no soportado para (modelo='" + model.type_name() + "', metrica='" +
+               request.metric_name + "') con PricingContext::pricing_date() != 0 (recibido " +
+               std::to_string(pricing.pricing_date()) + ") -- la ruta pathwise simula siempre desde 'hoy'=0 "
+               "(payoff_sensitivity_gbm[_p], Rust) y ese desplazamiento se perderia en silencio "
+               "(PLAN_IMPROVE_NOTEBOOK2.md Fase 0); usa method='auto' (cae a bump_and_reval, que SI honra "
+               "pricing_date) o method='bump_and_reval' explicito";
+    }
     return "compute_greek: metodo 'pathwise' no soportado para (modelo='" + model.type_name() + "', metrica='" +
            request.metric_name + "')";
 }
 
 // Equivalente de `pathwise_unsupported_reason` para Gamma via likelihood ratio (order=2 puro).
-std::string pathwise2_unsupported_reason(const GreekRequest& request, const IModel& model, const IProduct& product) {
+std::string pathwise2_unsupported_reason(
+    const GreekRequest& request, const IModel& model, const IProduct& product, const PricingContext& pricing
+) {
     if (request.risk_factor.name != "spot") {
         return "compute_greek: metodo 'pathwise' de segundo orden solo soportado para 'model.spot' (Gamma) -- "
                "recibido 'model." + request.risk_factor.name + "', PLAN_HYPERDUAL.md §5";
@@ -740,12 +884,21 @@ std::string pathwise2_unsupported_reason(const GreekRequest& request, const IMod
                "path-dependiente (Gamma via likelihood ratio solo aplica a una unica fecha terminal, "
                "PLAN_HYPERDUAL.md §5; usa method='auto' o 'bump_and_reval')";
     }
+    if (pricing.pricing_date() != 0.0) {
+        return "compute_greek: metodo 'pathwise' de segundo orden no soportado para (modelo='" + model.type_name() +
+               "', metrica='" + request.metric_name + "') con PricingContext::pricing_date() != 0 (recibido " +
+               std::to_string(pricing.pricing_date()) + ") -- mismo motivo que la Gamma via likelihood ratio "
+               "nunca recibe `pricing.pricing_date()` (PLAN_IMPROVE_NOTEBOOK2.md Fase 0); usa method='auto' "
+               "(cae al estencil generico de bump-and-reval de 3 puntos) o method='bump_and_reval' explicito";
+    }
     return "compute_greek: metodo 'pathwise' de segundo orden no soportado para (modelo='" + model.type_name() +
            "', metrica='" + request.metric_name + "')";
 }
 
 // Equivalente de `pathwise2_unsupported_reason` para Vanna (order=1 con cross_factor).
-std::string pathwise_cross_unsupported_reason(const GreekRequest& request, const IModel& model, const IProduct& product) {
+std::string pathwise_cross_unsupported_reason(
+    const GreekRequest& request, const IModel& model, const IProduct& product, const PricingContext& pricing
+) {
     const std::string cross_name = request.order.cross_factor.has_value() ? request.order.cross_factor->name : "";
     const bool is_vanna_pair = (request.risk_factor.name == "spot" && cross_name == "volatility") ||
                                (request.risk_factor.name == "volatility" && cross_name == "spot");
@@ -767,6 +920,14 @@ std::string pathwise_cross_unsupported_reason(const GreekRequest& request, const
         return "compute_greek: metodo 'pathwise' de derivada cruzada no soportado para un contrato "
                "path-dependiente (Vanna via likelihood ratio solo aplica a una unica fecha terminal, "
                "PLAN_HYPERDUAL.md §5; usa method='auto' o 'bump_and_reval')";
+    }
+    if (pricing.pricing_date() != 0.0) {
+        return "compute_greek: metodo 'pathwise' de derivada cruzada no soportado para (modelo='" +
+               model.type_name() + "', metrica='" + request.metric_name + "') con "
+               "PricingContext::pricing_date() != 0 (recibido " + std::to_string(pricing.pricing_date()) +
+               ") -- mismo motivo que Vanna via likelihood ratio nunca recibe `pricing.pricing_date()` "
+               "(PLAN_IMPROVE_NOTEBOOK2.md Fase 0); usa method='auto' (cae al estencil generico de "
+               "bump-and-reval de 4 puntos) o method='bump_and_reval' explicito";
     }
     return "compute_greek: metodo 'pathwise' de derivada cruzada no soportado para (modelo='" + model.type_name() +
            "', metrica='" + request.metric_name + "')";
@@ -1020,7 +1181,7 @@ GreekResult compute_greek(
         if (request.method == GreekMethod::Pathwise) {
             std::optional<GreekResult> specialized = try_pathwise(request, model, product, pricing);
             if (specialized.has_value()) return *specialized;
-            throw std::invalid_argument(pathwise_unsupported_reason(request, model, product));
+            throw std::invalid_argument(pathwise_unsupported_reason(request, model, product, pricing));
         }
         if (request.method == GreekMethod::AadReverse) {
             std::optional<GreekResult> specialized = try_aad_reverse(request, model, product);
@@ -1046,7 +1207,7 @@ GreekResult compute_greek(
         if (request.method == GreekMethod::Pathwise) {
             std::optional<GreekResult> specialized = try_pathwise2(request, model, product, pricing);
             if (specialized.has_value()) return *specialized;
-            throw std::invalid_argument(pathwise2_unsupported_reason(request, model, product));
+            throw std::invalid_argument(pathwise2_unsupported_reason(request, model, product, pricing));
         }
         if (request.method == GreekMethod::Auto) {
             std::optional<GreekResult> specialized = try_pathwise2(request, model, product, pricing);
@@ -1064,7 +1225,7 @@ GreekResult compute_greek(
         if (request.method == GreekMethod::Pathwise) {
             std::optional<GreekResult> specialized = try_pathwise_cross(request, model, product, pricing);
             if (specialized.has_value()) return *specialized;
-            throw std::invalid_argument(pathwise_cross_unsupported_reason(request, model, product));
+            throw std::invalid_argument(pathwise_cross_unsupported_reason(request, model, product, pricing));
         }
         if (request.method == GreekMethod::Auto) {
             std::optional<GreekResult> specialized = try_pathwise_cross(request, model, product, pricing);
@@ -1298,6 +1459,15 @@ std::vector<RiskFactor> distinct_factors_in(const std::vector<HessianEntry>& ent
 // importa. La enumeracion automatica (`factors` vacio) es exactamente el conjunto de factores que
 // la especializacion aplicable produjo (documentado explicitamente aqui: {spot,volatility} para
 // GBM/GBM_P, {a,b,sigma,r0} para HullWhite1F, {a,b,sigma,eta,r0} para HullWhite2F).
+//
+// PLAN_IMPROVE_NOTEBOOK2.md Fase 2 (decision (b), ver el doc-comment junto a `!applied` mas abajo
+// para el detalle): un contrato GBM/GBM_P que no depende de una unica fecha terminal (p.ej. un
+// calendar spread, `payoff_supports_second_order_lrm[_p]` en `false`) tiene su PROPIA entrada de
+// `skipped` distinguible del caso generico "(modelo, metrica) no cubierta" -- nunca queda
+// completamente ausente ni se confunde con "esta combinacion de (modelo, metrica) nunca fue
+// cableada". No existe fallback bump-and-reval generico de segundo orden/cruzado para este caso
+// (mas caro: 3-4 revaluaciones por entrada -- ver el texto de la fase); queda como "Fase 2b"
+// explicitamente pendiente si en el futuro se quiere el numero real en vez de solo el motivo.
 HessianReport compute_hessian(
     const Registries& registries, const std::string& metric_name, const Params& metric_params,
     const IModel& model, const IProduct& product, const MarketSnapshot& market,
@@ -1327,6 +1497,57 @@ HessianReport compute_hessian(
     }
 
     if (!applied) {
+        // PLAN_IMPROVE_NOTEBOOK2.md Fase 0 (ADR-IN2-01): si la combinacion (modelo, metrica) SI
+        // esta en `hessian_capabilities()` via likelihood ratio pero `pricing.pricing_date() != 0`,
+        // `try_hessian_likelihood_ratio` ya devolvio `nullopt` por ese motivo especifico (no por no
+        // estar cubierta) -- mensaje mas preciso que el generico de abajo. No hay fallback
+        // bump-and-reval generico de segundo orden todavia (eso es la Fase 2 de este mismo plan).
+        const bool capability_present = (model.type_name() == "GBM" || model.type_name() == "GBM_P") &&
+            capability_listed(hessian_capabilities(), model.type_name(), metric_name);
+        if (capability_present && pricing.pricing_date() != 0.0) {
+            report.skipped.push_back(
+                "Hessiano local: (" + model.type_name() + ", " + metric_name + ") via likelihood ratio no "
+                "soporta PricingContext::pricing_date() != 0 (recibido " + std::to_string(pricing.pricing_date()) +
+                ") -- payoff_local_hessian_gbm[_p] (Rust) nunca recibe pricing_date, honrarlo en silencio daria "
+                "un Hessiano incorrecto (PLAN_IMPROVE_NOTEBOOK2.md Fase 0); no existe fallback bump-and-reval "
+                "generico de segundo orden todavia (ver Fase 2 de PLAN_IMPROVE_NOTEBOOK2.md)"
+            );
+            return report;
+        }
+        // PLAN_IMPROVE_NOTEBOOK2.md Fase 2: (modelo, metrica) SI esta en `hessian_capabilities()`
+        // y `pricing_date() == 0`, pero `try_hessian_likelihood_ratio` igual devolvio `nullopt` --
+        // el UNICO motivo restante posible con esas dos condiciones ya descartadas es que el
+        // contrato no depende de una unica fecha terminal (`payoff_supports_second_order_lrm[_p]`
+        // en `false`, p.ej. un calendar spread con patas en T distintas sobre el mismo
+        // observable -- mismo criterio estructural que excluye `ContractOp::Exercise`). Antes de
+        // esta fase, este caso caia en el mensaje generico de abajo ("no esta cubierta por
+        // hessian_capabilities()"), que es enganoso: la combinacion SI esta cubierta, solo que
+        // este contrato concreto no cumple la condicion dinamica de una unica fecha. Decision
+        // (b) de esta fase (ver PLAN_IMPROVE_NOTEBOOK2.md): no se implementa un fallback
+        // bump-and-reval generico de segundo orden/cruzado para este caso (alcance "esfuerzo
+        // alto", fuera de esta fase de "esfuerzo medio") -- se deja como Fase 2b pendiente. Aqui
+        // solo se nombra el motivo exacto en `skipped`, nunca se omite en silencio.
+        if (capability_present) {
+            const auto* payoff_product = dynamic_cast<const payoff::PayoffProduct*>(&product);
+            if (payoff_product != nullptr) {
+                const bool supports_lrm = model.type_name() == "GBM"
+                    ? payoff::payoff_supports_second_order_lrm(*payoff_product->payoff_program())
+                    : payoff::payoff_supports_second_order_lrm_p(*payoff_product->payoff_program());
+                if (!supports_lrm) {
+                    report.skipped.push_back(
+                        "Hessiano local: (" + model.type_name() + ", " + metric_name + ") via likelihood ratio "
+                        "solo cubre contratos que dependen de una unica fecha terminal (mismo criterio "
+                        "estructural que excluye ContractOp::Exercise, ver payoff_supports_second_order_lrm" +
+                        std::string(model.type_name() == "GBM" ? "" : "_p") + "); este contrato depende de mas "
+                        "de una fecha (p.ej. un calendar spread con patas en T distintas sobre el mismo "
+                        "observable) -- no existe fallback bump-and-reval generico de segundo orden/cruzado "
+                        "para este caso todavia (PLAN_IMPROVE_NOTEBOOK2.md Fase 2, decision (b): solo skip "
+                        "explicito con el motivo exacto, sin fallback numerico -- ver Fase 2b pendiente)"
+                    );
+                    return report;
+                }
+            }
+        }
         report.skipped.push_back(
             "Hessiano local: (" + model.type_name() + ", " + metric_name + ") no esta cubierta por "
             "hessian_capabilities() ({GBM,PayoffPriceQ}/{GBM_P,PayoffForecastP} via likelihood ratio, "
@@ -1458,6 +1679,16 @@ GreekMeasure::GreekMeasure(const Params& params, const Registries& registries) :
 
     request_.risk_factor = greeks::parse_risk_factor(get_string(params, "risk_factor"));
     request_.order = greeks::GreekOrder{static_cast<int>(get_double(params, "order", 1.0)), std::nullopt};
+    // PLAN_IMPROVE_NOTEBOOK2.md Fase 4: "cross_factor" (opcional, mismo formato namespaced que
+    // "risk_factor") habilita la derivada cruzada (Vanna, o para GbmBasket la CROSS-GAMMA real
+    // entre dos activos d^2V/dS_i dS_j) desde la medida "Greek" expuesta via Engine.price(...) --
+    // antes de esta fase, `request_.order.cross_factor` quedaba SIEMPRE en `std::nullopt` aqui
+    // (el unico camino a `compute_greek` con `cross_factor` poblado era `Engine.hessian`, que
+    // exige (modelo,metrica) en `hessian_capabilities()`, una tabla cerrada que GbmBasket no
+    // integra). Ausente = comportamiento identico al de antes de esta fase (order=1 puro).
+    if (contains(params, "cross_factor")) {
+        request_.order.cross_factor = greeks::parse_risk_factor(get_string(params, "cross_factor"));
+    }
     request_.method = greeks::parse_greek_method(get_string(params, "method", "auto"));
     if (contains(params, "bump")) {
         request_.bump_override = get_double(params, "bump");
@@ -1475,6 +1706,10 @@ MeasureResult GreekMeasure::evaluate(
     result.times = out.times;
     result.primary = out.primary;
     result.secondary = out.secondary;
+    // PLAN_IMPROVE_NOTEBOOK2.md Fase 5: propaga el bump efectivo tal cual lo dejó
+    // `compute_greek` -- `std::nullopt` si el método realmente ejecutado no usó bump numérico
+    // (AAD/pathwise), nunca un valor inventado.
+    result.bump_used = out.bump_used;
     return result;
 }
 

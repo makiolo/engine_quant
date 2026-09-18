@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://engine-quant.local/schema/benchmark-case/v1",
+  "title": "Engine Quant benchmark case",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "case_id", "size", "trades", "scenarios", "paths", "market_bytes", "purpose"],
+  "properties": {
+    "schema": { "const": "quant.benchmark-case/v1" },
+    "case_id": { "type": "string", "pattern": "^[SML]$" },
+    "size": { "enum": ["small", "medium", "large"] },
+    "trades": { "type": "integer", "minimum": 1 },
+    "scenarios": { "type": "integer", "minimum": 1 },
+    "paths": { "type": "integer", "minimum": 0 },
+    "steps": { "type": "integer", "minimum": 0 },
+    "market_bytes": { "type": "integer", "minimum": 0 },
+    "purpose": { "type": "string", "minLength": 1 },
+    "materialize_cartesian_product": { "type": "boolean", "const": false },
+    "notes": { "type": "string" }
+  }
+}

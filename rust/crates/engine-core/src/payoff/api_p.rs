@@ -16,6 +16,10 @@
 //! `n_paths > 0`) reutilizando `check_single_observable` -- esa funcion no depende de la medida,
 //! solo del `CompiledPayoff` y del nombre de observable que el modelo genera.
 
+// Las firmas mantienen explícitos modelo y simulación, y los índices coordinan buffers
+// path-major. Ambas formas son parte deliberada de esta frontera numérica.
+#![allow(clippy::needless_range_loop, clippy::too_many_arguments)]
+
 use crate::backend::CpuBackend;
 use crate::mc::{self, McEstimate};
 use crate::models::gbm_p::GbmP;

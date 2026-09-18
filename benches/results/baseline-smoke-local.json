@@ -1,0 +1,75 @@
+{
+  "benchmarks": [
+    {
+      "cases": [
+        {
+          "bytes": 0,
+          "copy_ms": 9.999999999999999e-05,
+          "elements": 0,
+          "preallocated_output_ms": 9.999999999999999e-05,
+          "sum_ms": 0.0
+        },
+        {
+          "bytes": 64,
+          "copy_ms": 9.999999999999999e-05,
+          "elements": 8,
+          "preallocated_output_ms": 9.999999999999999e-05,
+          "sum_ms": 0.0
+        },
+        {
+          "bytes": 8192,
+          "copy_ms": 0.00039999999999999996,
+          "elements": 1024,
+          "preallocated_output_ms": 0.00039999999999999996,
+          "sum_ms": 0.0007
+        },
+        {
+          "bytes": 8388608,
+          "copy_ms": 2.5506,
+          "elements": 1048576,
+          "preallocated_output_ms": 2.2281,
+          "sum_ms": 0.7517999999999999
+        }
+      ],
+      "description": "Rust slice/vector copy costs; no CXX call is made",
+      "limitation": "Replace with engine-ffi CXX no-op/scalar/vector cases before treating as bridge overhead",
+      "name": "bridge_copy",
+      "status": "measured_proxy"
+    },
+    {
+      "batch_ms": 0.07289999999999999,
+      "name": "pricing_batch",
+      "operation": "Hull-White 1F IRS PV",
+      "scalar_ms": 0.7019,
+      "speedup": 9.628257887517147,
+      "status": "measured",
+      "trades": 8
+    },
+    {
+      "backend": "cpu",
+      "elapsed_ms": 0.7503,
+      "name": "monte_carlo_baseline",
+      "operation": "engine_core::api::simulate_paths_gbm_q",
+      "paths": 1000,
+      "seed": 7,
+      "status": "measured",
+      "steps": 20,
+      "terminal_mean": 104.1597228259052
+    }
+  ],
+  "harness": "rust/crates/engine-core/examples/phase0_baseline.rs",
+  "platform": {
+    "arch": "x86_64",
+    "available_parallelism": 8,
+    "os": "windows"
+  },
+  "profile": "smoke",
+  "runner_environment": {
+    "git_commit": "797650df24222f3346ade54985ee96e0c5794e58",
+    "platform": "Windows-10-10.0.19045-SP0",
+    "processor": "Intel64 Family 6 Model 60 Stepping 3, GenuineIntel",
+    "python": "3.12.3"
+  },
+  "schema": "quant.baseline-result/v1",
+  "status": "measured"
+}

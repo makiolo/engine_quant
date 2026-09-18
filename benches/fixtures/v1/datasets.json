@@ -1,0 +1,42 @@
+{
+  "schema": "quant.benchmark-datasets/v1",
+  "cases": [
+    {
+      "schema": "quant.benchmark-case/v1",
+      "case_id": "S",
+      "size": "small",
+      "trades": 1,
+      "scenarios": 1,
+      "paths": 10000,
+      "steps": 50,
+      "market_bytes": 4096,
+      "purpose": "latencia interactiva",
+      "materialize_cartesian_product": false
+    },
+    {
+      "schema": "quant.benchmark-case/v1",
+      "case_id": "M",
+      "size": "medium",
+      "trades": 1000,
+      "scenarios": 100,
+      "paths": 100000,
+      "steps": 250,
+      "market_bytes": 1048576,
+      "purpose": "servicio normal",
+      "materialize_cartesian_product": false
+    },
+    {
+      "schema": "quant.benchmark-case/v1",
+      "case_id": "L",
+      "size": "large",
+      "trades": 100000,
+      "scenarios": 1000,
+      "paths": 0,
+      "steps": 0,
+      "market_bytes": 104857600,
+      "purpose": "capacidad y memoria por chunks",
+      "materialize_cartesian_product": false,
+      "notes": "paths/steps se definen por chunks; no ejecutar el producto cartesiano completo"
+    }
+  ]
+}

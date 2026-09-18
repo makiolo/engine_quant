@@ -37,6 +37,37 @@ El AST debe ser un **IR de datos**, no una jerarquía de objetos virtuales ejecu
 bucle Monte Carlo. Los nodos pueden ser ricos semánticamente, pero el hot path debe operar sobre
 arrays contiguos y kernels de Rust.
 
+### Estado actualizado: vertical REST en Rust
+
+La frontera propuesta ya tiene una primera implementación ejecutable. `quant-api` es el
+composition root HTTP con Axum; `quant-domain` contiene `QuantContext`, specs, refs y
+resultados serializables; `quant-engine` planifica y admite trabajos en una cola acotada.
+Tokio coordina I/O y espera, mientras los workers dedicados ejecutan el cálculo. El camino
+actual es:
+
+```text
+Python quantdesk.rest ─┐
+                       ├─ HTTP/JSON ─► quant-api ─► quant-domain
+Excel/C++/C ABI ───────┘                         └─► quant-engine
+                                                        ├─ kernels Rust
+                                                        └─ adapters legacy C++
+```
+
+La API REST es stateless: el cliente conserva y reenvía el `QuantContext` completo, con
+`revision`, `parent_hash`, `context_hash` y `ResourceRef` versionadas. El servidor reconstruye
+los handles para cada request; caches y workers son únicamente optimizaciones descartables.
+Las rutas implementadas son `context:apply`, `prices`, `portfolios:price`, `scenarios:run`,
+`risk:calculate`, `xva:calculate` y los endpoints de health. El contrato está versionado en
+[`docs/api/openapi.v1.yaml`](docs/api/openapi.v1.yaml) y el detalle operativo en
+[`docs/api/rest.md`](docs/api/rest.md).
+
+Este estado no sustituye el camino nativo: Python, Excel y la C ABI siguen consumiendo la
+orquestación C++ embebida, mientras Python también ofrece el cliente remoto. La regla de
+evolución es que un objeto de primera clase debe tener spec/registry en Rust, constructor y
+serialización en Python, handle/UDF en Excel y comando/schema en REST, con fixtures de
+paridad entre capas. Un spec JSON abierto permite compatibilidad hacia delante, pero no
+declara ejecutable un tipo para el que todavía no exista un kernel.
+
 ## 2. Qué existe actualmente
 
 ### 2.1 Componentes consolidados
@@ -50,7 +81,7 @@ arrays contiguos y kernels de Rust.
 | Monte Carlo | Euler-Maruyama, paths vectorizados y perfiles EE/PFE | `rust/crates/engine-core/src/kernel.rs`, `exposure.rs` |
 | Sensibilidades | Autodiff de Burn y comparación contra bump-and-reval | `rust/crates/engine-core/src/backend.rs`, `tests/aad_vs_bump_reval.rs` |
 | Batching | `price_batch`, `price_many` y `price_grid` | `cpp/engine/include/engine/price.hpp`, `src/price.cpp` |
-| Clientes | Python tipado/dinámico, C ABI, C++ y Excel | `clients/`, `cpp/engine/include/engine/abi.h` |
+| Clientes | Python tipado/dinámico, C ABI, C++, Excel y SDK REST | `clients/`, `cpp/engine/include/engine/abi.h`, `rust/crates/quant-api` |
 | Distribución | CMake + Corrosion + Cargo; CI Windows/Linux | `CMakeLists.txt`, `.github/workflows/ci.yml` |
 
 Es una base adecuada para el objetivo. En particular, la genericidad `B: Backend` permite

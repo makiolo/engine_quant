@@ -6,8 +6,8 @@
 
 [![CI](https://github.com/makiolo/engine_quant/actions/workflows/ci.yml/badge.svg)](https://github.com/makiolo/engine_quant/actions/workflows/ci.yml)
 [![Rust 1.97.1](https://img.shields.io/badge/Rust-1.97.1-000000?logo=rust)](rust/rust-toolchain.toml)
-[![Python 3.9+](https://img.shields.io/badge/Python-3.9%2B-3776AB?logo=python&logoColor=white)](pyproject.toml)
 [![C++17](https://img.shields.io/badge/C%2B%2B-17-00599C?logo=cplusplus)](CMakeLists.txt)
+[![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)](pyproject.toml)
 
 Research-oriented pricing, exposure, and counterparty-credit analytics built around a
 single registry-driven domain model.
@@ -18,67 +18,6 @@ single registry-driven domain model.
 > Engine Quant is an active research prototype, not a production-ready risk system. Its
 > current scope is deliberately narrow: short-rate models, vanilla interest-rate swaps,
 > exposure profiles, and unilateral CVA.
-
-## Why Engine Quant?
-
-Quant engines often grow into separate implementations for notebooks, spreadsheets, and
-production services. Engine Quant keeps the business semantics in one place:
-
-- models, products, measures, and calibrators are registered centrally;
-- Python, Excel, C++, and the public C ABI consume the same C++ orchestration layer;
-- compute-intensive pricing and Monte Carlo kernels live in Rust;
-- related measures can be calculated together and share the same simulation.
-
-The result is one vocabulary and one calculation path across every client.
-
-## Current capabilities
-
-| Area | Implemented |
-| --- | --- |
-| Models | `HullWhite1F`; `HullWhite2F` / G2++ |
-| Products | Vanilla interest-rate swap (`IRSwap`); generic composable payoff (`Payoff`) — vanilla, barrier, Asian, take-profit/stop-loss, and American/Bermuda-exercise contracts, plus `IRSwap`/`FXForward` templates that compile to the same AST |
-| Measures | `PV`, `DV01`, `ExpectedExposure`, `PFE95`, `UnilateralCVA` (via `Engine.price(...)`) |
-| Payoff valuation | Deterministic ledger PV and bump-and-reval Greeks for any `Payoff`; Monte Carlo GBM under the risk-neutral measure Q (price, barrier hit probability, exposure profile, Longstaff-Schwartz American/Bermuda exercise) and under a physical measure P (forecast, hit probability, P&L distribution/expected shortfall) — implemented and tested end-to-end in C++/Rust, not yet reachable from `Engine.price(...)` or any client (see [Scope and known limitations](#scope-and-known-limitations)) |
-| Payoff authoring | `engine_typed.payoff` builders, versioned JSON schema (`engine.payoff/v1`) with fixtures, and cross-layer `validate`/`explain` (Python, Excel, C ABI) that agree on the same canonical hash |
-| Calibration | Registry-based calibrators for both short-rate models, using damped Gauss-Newton and AAD Jacobians |
-| Compute | Burn tensor backend; CPU by default; opt-in WGPU backend |
-| Clients | Python extension, Excel XLL, native C++ API, and versioned C ABI |
-| Distribution | Windows wheels, Excel add-in package, and all-in-one Inno Setup installer produced by the release workflow |
-
-`Engine.price(...)` accepts a batch of measure names. `ExpectedExposure` and `PFE95`, for
-example, reuse one exposure simulation rather than running Monte Carlo twice. `price_batch`/
-`price_many`/`price_grid` extend that batching across trades, and across models and markets.
-Within a batch, they also deduplicate `Payoff` trades that share the same canonical AST hash
-(same id, same contract byte-for-byte): the measure is evaluated once and the result is shared
-rather than recomputed per duplicate trade. The Rust payoff compiler performs
-common-subexpression elimination on the AST before evaluation, and the Monte Carlo GBM pricer
-is generic over the Burn CPU/GPU backend (opt-in `gpu` feature) — though today the
-C++/Python/Excel/C ABI surface only ever requests the CPU backend for it.
-
-## Architecture
-
-```text
-┌────────────────────┐  ┌────────────────────┐  ┌────────────────────┐
-│ Python / Jupyter   │  │ Excel XLL          │  │ C ABI consumers    │
-│ nanobind module    │  │ worksheet UDFs     │  │ C/Rust/Python/...  │
-└─────────┬──────────┘  └─────────┬──────────┘  └─────────┬──────────┘
-          └───────────────────────┼───────────────────────┘
-                                  ▼
-              ┌───────────────────────────────────────┐
-              │ C++17 domain and orchestration layer │
-              │ registries · contexts · batched price │
-              └───────────────────┬───────────────────┘
-                                  │ cxx bridge
-                                  ▼
-              ┌───────────────────────────────────────┐
-              │ Rust numerical core                   │
-              │ pricing · Monte Carlo · AAD · Burn   │
-              └───────────────────────────────────────┘
-```
-
-The public C ABI is intentionally separate from the internal Rust/C++ `cxx` bridge. It
-exposes flat, versioned types and opaque handles so other languages can consume the engine
-without depending on C++ classes or nanobind.
 
 ## Installation
 
@@ -105,16 +44,16 @@ The installer can therefore set up both clients on the same machine:
   <path-to-selected-python.exe> -m jupyter lab
   ```
 
-  This makes `import engine` and `import engine_typed` available in the notebook kernel.
+  This makes `import engine` and `import quantdesk` available in the notebook kernel.
   See the [Jupyter notebook notes](clients/python/notebooks/README.md) for the example
-  notebook.
+  notebooks.
 
 ### Linux and macOS
 
 Linux and macOS currently provide the **Python client only**; the Windows installer and
 Excel add-in are not available there. Published wheels currently target Windows, so install
 the Python client from source. Install Git, CMake 3.24 or newer, Ninja, a C++17 toolchain,
-Rust/rustup, and Python 3.9 or newer, then run:
+Rust/rustup, and Python 3.10 or newer, then run:
 
 ```bash
 git clone https://github.com/makiolo/engine_quant.git
@@ -143,73 +82,70 @@ cd engine_quant
 python -m pip install .
 ```
 
-`engine-quant` installs two packages: the compiled `engine` extension, and `engine_typed` —
-a pure-Python, `pydantic`-backed facade for building `Trade`/`Model`/`Market`/
-`PricingContext`/`ExecutionContext` with real validation instead of raw dicts. It is the
-recommended way to use the engine from Python; see [Dynamic dict facade](#dynamic-dict-facade)
-below for the lower-level alternative that Excel and the C ABI use.
+`engine-quant` installs two packages: the compiled `engine` extension, and `quantdesk` — a
+pure-Python, `pydantic`-backed facade with a single `Engine` class that builds
+`Trade`/`Model`/`Market` and prices them in one call, with real validation instead of raw
+dicts. It is the recommended way to use the engine from Python; see
+[Dynamic dict facade](#dynamic-dict-facade) below for the lower-level facade that `quantdesk`
+uses internally, and that Excel and the C ABI also use.
 
 ```python
-import engine
-import engine_typed as q
+import quantdesk as qd
 
-eng = engine.Engine()
+model = qd.HullWhite1F(a=0.10, b=0.03, sigma=0.01, r0=0.02)
+trade = qd.IRSwap(notional=1_000_000.0, fixed_rate=0.02,
+                   payment_times=[1.0, 2.0, 3.0, 4.0, 5.0], accruals=[1.0] * 5)
+market = qd.Market(pillars=[1.0, 2.0], zero_rates=[0.02, 0.02],
+                    hazard_rate=0.02, recovery_rate=0.40)
 
-model = q.HullWhite1F(a=0.10, b=0.03, sigma=0.01, r0=0.02)
+engine = qd.Engine(backend="auto", n_paths=5_000, n_steps=208, seed=7)
 
-# Omitting fixed_rate is a validation error, not a par swap — use IRSwap.par(...) for that.
-trade = q.IRSwap(
-    notional=1_000_000.0,
-    fixed_rate=0.02,
-    payment_times=[1.0, 2.0, 3.0, 4.0, 5.0],
-    accruals=[1.0, 1.0, 1.0, 1.0, 1.0],
-)
-
-market = q.Market(
-    pillars=[1.0, 2.0],
-    zero_rates=[0.02, 0.02],
-    hazard_rate=0.02,
-    recovery_rate=0.40,
-)
-pricing = q.PricingContext(n_paths=5_000, n_steps=208, seed=7)
-execution = q.ExecutionContext(backend="auto")
-
-eng_model = eng.create_model(model.model_type, model.to_params())
-eng_trade = eng.create_product(trade.product_type, trade.to_params())
-eng_market = engine.MarketSnapshot(**market.to_params())
-eng_pricing = engine.PricingContext(pricing.to_params())
-eng_execution = engine.ExecutionContext(execution.to_params())
-
-results = eng.price(
-    eng_trade,
-    ["PV", "DV01", "ExpectedExposure", "PFE95", "UnilateralCVA"],
-    eng_model,
-    eng_market,
-    eng_pricing,
-    eng_execution,
-)
-
-print(results["PV"].scalar)
-print(results["ExpectedExposure"].times)
-print(results["ExpectedExposure"].primary)
-print(results["UnilateralCVA"].scalar)
+metrics = ["PV", "DV01", "ExpectedExposure", "PFE95", "UnilateralCVA"]
+results = engine.price(trade, model, market, metrics)
+print(results.PV.scalar)
 ```
 
-Discover the registered surface at runtime with `list_models()`, `list_products()`,
-`list_measures()`, and `list_calibrators()`.
+Discover the registered surface at runtime with `engine.list_models()`,
+`engine.list_products()`, `engine.list_measures()`, and `engine.list_calibrators()`.
+
+### Remote REST API
+
+The Rust REST server exposes the same declarative domain for remote clients. It is stateless:
+the client owns and resends the complete `QuantContext`; the server does not keep sessions or
+handles between requests.
+
+```bash
+cargo run --manifest-path rust/Cargo.toml -p quant-api
+```
+
+```python
+from quantdesk.rest import Context, HullWhite1F, IRSwap, Market, QuantRestClient
+
+client = QuantRestClient("http://127.0.0.1:8080")
+ctx = Context.new("notebook-1")
+ctx, market = client.add_market(ctx, "eur", Market(pillars=[1, 2], zero_rates=[.02, .021]))
+ctx, model = client.add_model(ctx, "hw", HullWhite1F(a=.1, b=.03, sigma=.01, r0=.02))
+ctx, swap = client.add_product(ctx, "swap", IRSwap(1_000_000, .025, [1, 2], [1, 1]))
+result = client.price(ctx, swap, model=model, market=market, measures=["PV"])
+```
+
+See [Rust REST architecture and extension rules](docs/api/rest.md) for the endpoint matrix,
+stateless context contract, limits, and the checklist for exposing new first-class objects in
+Rust, Python, Excel, and REST.
 
 ### Dynamic dict facade
 
-`engine_typed` translates to the same `Params`/dict that `engine.Engine` already accepts
-directly — the facade Excel and the C ABI use, and still valid from Python for quick scripts
-or raw JSON:
+`engine` (the compiled extension) is the low-level facade that `quantdesk` uses internally,
+and that Excel and the C ABI also use — still valid from Python directly for quick scripts or
+raw JSON, without going through `quantdesk`'s typed objects and without the batching/greeks/
+calibration convenience methods that `quantdesk.Engine` adds on top:
 
 ```python
 import engine
 
 eng = engine.Engine()
 model = eng.create_model("HullWhite1F", {"a": 0.10, "b": 0.03, "sigma": 0.01, "r0": 0.02})
-# Omitting fixed_rate here means "par swap" — the one ambiguity engine_typed.IRSwap removes.
+# Omitting fixed_rate here means "par swap" — the one ambiguity quantdesk.IRSwap removes.
 trade = eng.create_product(
     "IRSwap",
     {
@@ -228,60 +164,56 @@ print(results["PV"].scalar)
 
 ### Custom products from Python
 
-Custom products are represented by `engine_typed.PayoffProduct`: compose a contract from
+Custom products are represented by `quantdesk.PayoffProduct`: compose a contract from
 expressions, predicates, and timed cashflows, then register it with the generic `"Payoff"`
-product type. The typed builders validate the tree before it crosses into the native engine.
+product type. The typed builders validate the tree before it ever reaches the native engine —
+every custom contract registers under the same generic product type, and can be passed
+straight into `Engine.price(...)` like any other trade, with no separate construction step.
 
 For example, this creates a one-year European call on an observable named
 `EQ.SPOT.AAPL`:
 
 ```python
-import engine
-import engine_typed as q
+import quantdesk as qd
 
-eng = engine.Engine()
-
-call = q.when(
+call = qd.when(
     1.0,
-    q.cashflow(
+    qd.cashflow(
         "USD",
-        1_000 * q.maximum(q.fixing("EQ.SPOT.AAPL", 1.0) - 100.0, 0.0),
+        1_000 * qd.maximum(qd.fixing("EQ.SPOT.AAPL", 1.0) - 100.0, 0.0),
     ),
 )
-trade = q.PayoffProduct(id="AAPL_CALL_100", contract=call)
-product = eng.create_product(trade.product_type, trade.to_params())
+trade = qd.PayoffProduct(id="AAPL_CALL_100", contract=call)
 
-print(product.type_name())  # Payoff
+print(trade.product_type)  # Payoff
 ```
 
 The same contract nodes can be combined to create path-dependent products. For example, this
 adds a discrete up-and-in barrier and pays the call only if the barrier is hit:
 
 ```python
-barrier_call = q.trigger(
+barrier_call = qd.trigger(
     id="UP_AND_IN",
     monitoring_times=[0.25, 0.5, 0.75, 1.0],
-    condition=q.greater_equal(q.current("EQ.SPOT.AAPL"), 120.0),
+    condition=qd.greater_equal(qd.current("EQ.SPOT.AAPL"), 120.0),
     monitoring="discrete",
     settlement="at_scheduled_payment",
     priority=0,
     latch=True,
     on_hit=call,
-    on_miss=q.zero(),
+    on_miss=qd.zero(),
 )
-barrier_trade = q.PayoffProduct(id="AAPL_UP_AND_IN", contract=barrier_call)
-barrier_product = eng.create_product(
-    barrier_trade.product_type,
-    barrier_trade.to_params(),
-)
+barrier_trade = qd.PayoffProduct(id="AAPL_UP_AND_IN", contract=barrier_call)
 ```
 
-For integrations that already produce JSON, the lower-level facade accepts the same
-`engine.payoff/v1` envelope:
+For integrations that already produce JSON, the lower-level facade (see
+[Dynamic dict facade](#dynamic-dict-facade)) accepts the same `engine.payoff/v1` envelope:
 
 ```python
+import engine
 import json
 
+eng = engine.Engine()
 spec = {
     "schema": "engine.payoff/v1",
     "id": "FIXED_LEG_2Y",
@@ -331,21 +263,100 @@ a measure — it needs a target *and* a universe of N instruments at once, which
 `IMeasure`'s single-product shape — and isn't yet exposed to Python/Excel/the C ABI. See
 [PLAN_PRODUCTS.md](PLAN_PRODUCTS.md) for the full design and phased roadmap of the payoff engine.
 
+## Why Engine Quant?
+
+Quant engines often grow into separate implementations for notebooks, spreadsheets, and
+production services. Engine Quant keeps the business semantics in one place:
+
+- models, products, measures, and calibrators are registered centrally;
+- Python, Excel, C++, and the public C ABI consume the same C++ orchestration layer;
+- the Rust REST API and Python REST SDK consume the versioned `QuantContext` domain contract;
+- compute-intensive pricing and Monte Carlo kernels live in Rust;
+- related measures can be calculated together and share the same simulation.
+
+The result is one vocabulary and consistent calculation semantics across every client, with
+native embedding and remote REST as explicit transport paths.
+
+## Current capabilities
+
+| Area | Implemented |
+| --- | --- |
+| Models | `HullWhite1F`; `HullWhite2F` / G2++ |
+| Products | Vanilla interest-rate swap (`IRSwap`); generic composable payoff (`Payoff`) — vanilla, barrier, Asian, take-profit/stop-loss, and American/Bermuda-exercise contracts, plus `IRSwap`/`FXForward` templates that compile to the same AST |
+| Measures | `PV`, `DV01`, `ExpectedExposure`, `PFE95`, `UnilateralCVA` (via `Engine.price(...)`) |
+| Payoff valuation | Deterministic ledger PV and bump-and-reval Greeks for any `Payoff`; Monte Carlo GBM under the risk-neutral measure Q (price, barrier hit probability, exposure profile, Longstaff-Schwartz American/Bermuda exercise) and under a physical measure P (forecast, hit probability, P&L distribution/expected shortfall) — implemented and tested end-to-end in C++/Rust and reachable from the native Python, Excel, and C ABI clients |
+| Payoff authoring | `quantdesk.payoff` builders, versioned JSON schema (`engine.payoff/v1`) with fixtures, and cross-layer `validate`/`explain` (Python, Excel, C ABI) that agree on the same canonical hash |
+| Calibration | Registry-based calibrators for both short-rate models, using damped Gauss-Newton and AAD Jacobians |
+| Compute | Burn tensor backend; CPU by default; opt-in WGPU backend |
+| Clients | Python extension, Excel XLL, native C++ API, and versioned C ABI |
+| Remote API | Rust/Axum REST v1 with stateless `QuantContext`, portfolio/scenario/risk/XVA endpoints, and Python SDK |
+| Distribution | Windows wheels, Excel add-in package, and all-in-one Inno Setup installer produced by the release workflow |
+
+`Engine.price(...)` accepts a batch of measure names. `ExpectedExposure` and `PFE95`, for
+example, reuse one exposure simulation rather than running Monte Carlo twice. `price_batch`/
+`price_many`/`price_grid` extend that batching across trades, and across models and markets.
+Within a batch, they also deduplicate `Payoff` trades that share the same canonical AST hash
+(same id, same contract byte-for-byte): the measure is evaluated once and the result is shared
+rather than recomputed per duplicate trade. The Rust payoff compiler performs
+common-subexpression elimination on the AST before evaluation, and the Monte Carlo GBM pricer
+is generic over the Burn CPU/GPU backend (opt-in `gpu` feature) — though today the
+C++/Python/Excel/C ABI surface only ever requests the CPU backend for it.
+
+## Architecture
+
+```text
+ Native embedding path                         Remote path
+ ┌──────────────┐  ┌───────────┐  ┌─────────┐  ┌────────────────┐
+ │ Python       │  │ Excel XLL │  │ C ABI   │  │ Python REST SDK│
+ └──────┬───────┘  └─────┬─────┘  └────┬────┘  └───────┬────────┘
+        └─────────────────┼─────────────┘               │ HTTP/JSON
+                          ▼                             ▼
+              ┌──────────────────────┐       ┌──────────────────┐
+              │ C++17 orchestration  │       │ quant-api (Axum) │
+              │ registry · contexts  │       │ stateless REST v1│
+              └──────────┬───────────┘       └────────┬─────────┘
+                         │ cxx bridge                 │
+                         └──────────────┬─────────────┘
+                                        ▼
+                         ┌──────────────────────────┐
+                         │ quant-domain / quant-engine│
+                         │ context · planner · queue │
+                         └─────────────┬────────────┘
+                                       ▼
+                         ┌──────────────────────────┐
+                         │ Rust kernels + C++ legacy │
+                         │ pricing · MC · AAD · XVA │
+                         └──────────────────────────┘
+```
+
+The public C ABI is intentionally separate from the internal Rust/C++ `cxx` bridge. It
+exposes flat, versioned types and opaque handles so other languages can consume the engine
+without depending on C++ classes or nanobind.
+The REST adapter uses the same domain concepts but does not reuse server-side handles: every
+calculation request carries its client-owned `QuantContext`, and `quant-engine` rebuilds the
+temporary handles for that request.
+
 ## Calibration
 
 Calibrators use the same registry pattern as models and products. Their output can be
 passed directly to `create_model`:
 
 ```python
+import engine
+import quantdesk as qd
+
 pillars = [0.5, 1.0, 2.0, 3.0, 5.0, 7.0, 10.0]
-market = engine.MarketSnapshot.synthetic_from_hull_white(
+# synthetic_from_hull_white is a native-only helper (no quantdesk equivalent); wrap its
+# output back into a typed Market to keep using quantdesk.Engine for the rest of the flow.
+synthetic = engine.MarketSnapshot.synthetic_from_hull_white(
     a=0.15, b=0.025, sigma=0.008, r0=0.02, pillars=pillars,
 )
+market = qd.Market(pillars=list(synthetic.pillars), zero_rates=list(synthetic.zero_rates))
 
-initial_guess = q.HullWhite1F(a=0.30, b=0.01, sigma=0.008, r0=0.02)
-calibrator = eng.create_calibrator("HullWhite1F")
-fit = calibrator.calibrate(market, initial_guess.to_params())
-calibrated_model = eng.create_model("HullWhite1F", q.HullWhite1F(**fit.optimal_params).to_params())
+initial_guess = qd.HullWhite1F(a=0.30, b=0.01, sigma=0.008, r0=0.02)
+qeng = qd.Engine(backend="auto", n_paths=5_000, n_steps=208, seed=7)
+fit = qeng.calibrate("HullWhite1F", market, initial_guess.to_params())
+calibrated_model = qd.HullWhite1F(**fit.optimal_params)
 
 print(fit.rmse, fit.iterations, fit.converged)
 ```
@@ -375,13 +386,15 @@ All three return one row per trade (and, for `price_grid`, per model/market too)
 index attached explicitly — never a nested list:
 
 ```python
+import quantdesk as qd
+
 schedule = {"payment_times": [1.0, 2.0, 3.0, 4.0, 5.0], "accruals": [1.0] * 5}
 trades = [
-    eng.create_product("IRSwap", q.IRSwap(notional=1_000_000.0, fixed_rate=0.02, **schedule).to_params()),
-    eng.create_product("IRSwap", q.IRSwap(notional=2_500_000.0, fixed_rate=0.015, **schedule).to_params()),
+    qd.IRSwap(notional=1_000_000.0, fixed_rate=0.02, **schedule),
+    qd.IRSwap(notional=2_500_000.0, fixed_rate=0.015, **schedule),
 ]
 
-for row in eng.price_batch(trades, ["PV", "UnilateralCVA"], eng_model, eng_market, eng_pricing, eng_execution):
+for row in engine.price_batch(trades, model, market, ["PV", "UnilateralCVA"]):
     print(row.trade_index, row.measures["PV"].scalar, row.measures["UnilateralCVA"].scalar)
 ```
 
@@ -442,6 +455,7 @@ to be installed.
 ## Clients and examples
 
 - [Python package notes](clients/python/README_PYPI.md)
+- [Python REST client](clients/python/README_REST.md)
 - [Python calculation example](clients/python/examples/README.md)
 - [Jupyter notebook notes](clients/python/notebooks/README.md)
 - [Excel XLL guide](clients/excel/README.md)
@@ -465,6 +479,9 @@ Excel exposes the same object flow through handles and worksheet functions:
 ```text
 rust/crates/engine-core/   Numerical models, products, exposure, CVA, calibration, AAD
 rust/crates/engine-ffi/    Internal Rust ↔ C++ bridge
+rust/crates/quant-domain/  Versioned stateless context and REST domain types
+rust/crates/quant-engine/ Application planner, registry, scheduler, and XVA services
+rust/crates/quant-api/    Axum REST v1 composition root and HTTP error mapping
 cpp/engine/                C++ registries, contexts, batched calculation, public C ABI
 clients/python/            nanobind extension, tests, examples, and notebook
 clients/excel/             Excel XLL, bridge tests, and install scripts
@@ -497,10 +514,13 @@ PLAN_PRODUCTS.md           Universal payoff engine: AST, Q/P Monte Carlo, phased
   such as swaptions or caps is outside the present scope.
 - The Excel client and packaged release artifacts target 64-bit Windows. The Rust core and
   non-Excel CMake targets are designed to remain portable.
+- The REST server is implemented but is not included in the published installer or wheels.
+  Its current JSON contract is synchronous and bounded; it has no durable job store or remote
+  Excel transport. See [REST architecture](docs/api/rest.md).
 - GPU support is experimental and must be enabled explicitly. `backend="auto"` resolves to
   GPU only in a GPU-enabled build; otherwise it resolves to CPU.
 - Per-measure configuration (`DV01(bump=...)`/`DV01(bucketed=True)`) is only reachable from
-  Python (`engine_typed`, or a `(name, params)` tuple against `Engine.price`) — Excel and the
+  Python (`quantdesk`, or a `(name, params)` tuple against `Engine.price`) — Excel and the
   C ABI still take plain measure names.
 
 See [PLAN.md](PLAN.md) for the detailed architecture record, numerical-validation strategy,

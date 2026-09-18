@@ -1,0 +1,26 @@
+{
+  "schema": "quant.baseline-fixture/v1",
+  "fixture_id": "payoff-q-p-contract",
+  "kind": "payoff_q_p",
+  "version": 1,
+  "input": {
+    "measure_q": "risk_neutral_q",
+    "measure_p": "physical_p",
+    "s0": 100.0,
+    "rate": 0.05,
+    "dividend": 0.01,
+    "mu": 0.08,
+    "sigma": 0.2,
+    "maturity": 1.0,
+    "n_paths": 20000,
+    "n_steps": 20,
+    "seed": 7
+  },
+  "oracle": {
+    "q": "terminal_mean_close_to_s0_times_exp_rate_minus_dividend",
+    "p": "terminal_mean_close_to_s0_times_exp_mu",
+    "statistical_tolerance": "6 standard errors",
+    "units": "currency"
+  },
+  "provenance": "existing engine-core GBM tests; statistical oracle, not a bitwise golden"
+}

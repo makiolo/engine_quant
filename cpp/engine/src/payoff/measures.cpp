@@ -208,6 +208,34 @@ QValuationResult risk_neutral_price_gbm(
     }
 }
 
+QValuationResult risk_neutral_price_gbm(
+    const PayoffProgram& program, const GbmBasketModel& model, std::uint64_t n_paths, std::uint64_t seed
+) {
+    preflight_gbm_capabilities(program, model.capabilities(), ProbabilityMeasure::RiskNeutralQ);
+
+    std::string spec_json = CanonicalVisitor::to_json(program.id, program.contract);
+    std::vector<std::string> observable_names;
+    observable_names.reserve(model.observables().size());
+    for (const ObservableId& observable : model.observables()) observable_names.push_back(observable.value);
+
+    try {
+        ffi::PayoffQPriceResult result = ffi::price_payoff_basket_gbm_q(
+            spec_json, to_rust_string_vec(observable_names), to_rust_vec(model.s0()), to_rust_vec(model.r()),
+            to_rust_vec(model.q()), to_rust_vec(model.sigma()), to_rust_vec(model.correlation()), n_paths, seed
+        );
+        QValuationResult out;
+        out.mean = result.mean;
+        out.std_error = result.std_error;
+        out.ci_low = result.ci_low;
+        out.ci_high = result.ci_high;
+        out.n_paths = result.n_paths;
+        out.measure = ProbabilityMeasure::RiskNeutralQ;
+        return out;
+    } catch (const std::exception& e) {
+        throw EvaluationError(e.what(), NodePath::root());
+    }
+}
+
 ExercisePolicyResult exercise_price_gbm(
     const PayoffProgram& program, const GbmModel& model, std::uint64_t n_paths, std::uint64_t seed
 ) {

@@ -28,7 +28,7 @@ if len(sys.argv) > 1:
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import engine  # noqa: E402
-import engine_typed as q  # noqa: E402
+import quantdesk as q  # noqa: E402
 
 
 # -------------------------------------------------------------------------------------------
@@ -59,7 +59,7 @@ def _cpu_execution():
 # -------------------------------------------------------------------------------------------
 # Plantillas de contrato locales (mismos patrones que cpp/engine/include/engine/payoff/
 # barrier_templates.hpp / tp_sl.hpp / test_registry_wiring_payoff_measures.cpp::bermuda_put --
-# no existen todavia como builders de alto nivel en engine_typed.payoff, asi que se replican aqui
+# no existen todavia como builders de alto nivel en quantdesk.payoff, asi que se replican aqui
 # con los mismos nodos de AST/mismo criterio, en vez de esperar a que la libreria los exponga).
 # -------------------------------------------------------------------------------------------
 

@@ -12,6 +12,10 @@
 //! construye el `Dual` inicial (`variable`) -- modo "forward" de un solo hilo, suficiente porque
 //! cada llamada a `payoff::api::payoff_sensitivity_gbm_q` pide una sensibilidad a la vez.
 
+// En la implementación de Mul, las sumas y productos son exactamente la regla del
+// producto para derivadas duales; no representan aritmética sospechosa del operador.
+#![allow(clippy::suspicious_arithmetic_impl)]
+
 use std::ops::{Add, Div, Mul, Neg, Sub};
 
 /// Trait minimo de numero dual truncado (PLAN_HYPERDUAL.md §3.1/ADR-HD-01): exactamente las

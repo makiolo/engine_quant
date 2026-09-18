@@ -517,6 +517,42 @@ TEST(Price, Dv01BumpIsConfigurableViaMeasureSpec) {
     EXPECT_NEAR(result[1].result.scalar, result[0].result.scalar * 2.0, 0.01 * result[0].result.scalar); // ~1% de convexidad
 }
 
+// PLAN_IMPROVE_NOTEBOOK2.md Fase 3 (opción (b), MeasureSpec::alias): `engine::price()` etiqueta
+// `PriceResultEntry::measure_name` con el alias cuando está presente, dejando el resultado
+// numérico intacto -- verifica que el valor con alias coincide EXACTO (misma seed/pricing, DV01
+// es determinista) con el mismo cálculo sin alias, y que `measure_name` refleja el alias, no el
+// nombre "pelado". `alias` NO participa en el cache_key: dos specs con el mismo name+params pero
+// distinto alias comparten la evaluación subyacente (verificado indirectamente: mismo resultado
+// numérico exacto).
+TEST(Price, MeasureSpecAliasLabelsTheOutputEntryWithoutChangingTheComputedValue) {
+    Registries registries;
+    register_builtins(registries);
+
+    auto model = registries.models.create("HullWhite1F", hull_white_params());
+    auto product = registries.products.create("IRSwap", irs_5y_params(1'000'000.0, 0.02));
+    MarketSnapshot market = market_with_credit(0.0, 0.0);
+    PricingContext pricing = golden_pricing(1, 1);
+    ExecutionContext execution = cpu_execution();
+
+    engine::PriceResult plain =
+        engine::price(registries, *product, std::vector<engine::MeasureSpec>{{"DV01", {}}}, *model, market, pricing, execution);
+    engine::PriceResult aliased = engine::price(
+        registries, *product,
+        std::vector<engine::MeasureSpec>{
+            {"DV01", {{"bump", 0.0002}}, std::string("dv01_wide")},
+            {"DV01", {}, std::string("dv01_default")},
+        },
+        *model, market, pricing, execution
+    );
+
+    ASSERT_EQ(aliased.size(), 2u);
+    EXPECT_EQ(aliased[0].measure_name, "dv01_wide");
+    EXPECT_EQ(aliased[1].measure_name, "dv01_default");
+    ASSERT_TRUE(aliased[1].result.has_scalar);
+    ASSERT_TRUE(plain[0].result.has_scalar);
+    EXPECT_DOUBLE_EQ(aliased[1].result.scalar, plain[0].result.scalar); // mismo calculo, solo cambia la etiqueta
+}
+
 // Sanity check recomendado explícitamente por PLAN_REAPI.md §6 Fase 4: un swap con
 // fixed_rate EXPLÍCITO (no el sentinel PAR/use_par_rate) igual al par rate calculado a mano
 // con la MISMA fórmula que usa el motor (P(start)-P(end)) / Σ accrual_i·P(Ti)) sobre una

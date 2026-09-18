@@ -276,6 +276,18 @@ std::vector<MeasureSpec> to_measure_specs(const std::vector<std::string>& measur
     return measures;
 }
 
+// Nombre de salida efectivo de una MeasureSpec (PLAN_IMPROVE_NOTEBOOK2.md Fase 3, opción (b)):
+// `alias` si está presente, si no `name` -- exactamente lo que termina en
+// `PriceResultEntry::measure_name`. `PriceResult`/`PriceBatchResult`/`PriceGridResult` son
+// LISTAS ordenadas (no dicts) a este nivel -- dos entradas con el mismo `measure_name` (con o
+// sin alias) son válidas aquí y ya lo eran antes de esta fase (p.ej. dos "DV01" con distinto
+// "bump", cada resultado accedido por posición, ver `Price.Dv01BumpIsConfigurableViaMeasureSpec`
+// en test_price.cpp) -- por eso esta capa NO valida unicidad. La colisión real que motiva esta
+// fase solo aparece cuando un binding aplana la lista a un dict por nombre (Python/C ABI/Excel);
+// esa validación vive en esa capa (ver `Engine::price`/`calc_result_to_dict` en
+// engine_py_ext.cpp), no aquí.
+const std::string& display_name(const MeasureSpec& spec) { return spec.alias.has_value() ? *spec.alias : spec.name; }
+
 } // namespace
 
 std::vector<std::string> price_measure_names(const Registries& registries) {
@@ -309,7 +321,8 @@ PriceResult price(
     // Evalúa cada (medida registrada, configuración) subyacente como mucho una vez, aunque
     // varios nombres de PRICE la pidan con la misma configuración (p.ej. "ExpectedExposure"+
     // "PFE95" comparten "ExposureProfile" -- una sola simulación Monte Carlo para ambas, no
-    // dos; dos DV01 con distinto "bump" sí se evalúan por separado).
+    // dos; dos DV01 con distinto "bump" sí se evalúan por separado). `alias` no participa en
+    // `cache_key` a propósito -- ver el doc-comment de MeasureSpec::alias en price.hpp.
     std::unordered_map<std::string, MeasureResult> computed;
     for (std::size_t i = 0; i < measures.size(); ++i) {
         const std::string cache_key = resolved[i].registered_type + "#" + params_cache_key(measures[i].params);
@@ -323,7 +336,7 @@ PriceResult price(
     result.reserve(measures.size());
     for (std::size_t i = 0; i < measures.size(); ++i) {
         const std::string cache_key = resolved[i].registered_type + "#" + params_cache_key(measures[i].params);
-        result.push_back(PriceResultEntry{measures[i].name, extract_field(computed.at(cache_key), resolved[i].field)});
+        result.push_back(PriceResultEntry{display_name(measures[i]), extract_field(computed.at(cache_key), resolved[i].field)});
     }
     return result;
 }
@@ -421,7 +434,7 @@ PriceBatchResult price_batch_generic(
                 auto measure = registries.measures.create(resolved[j].registered_type, measures[j].params);
                 computed.emplace(cache_key, measure->evaluate(model, *products[i], market, pricing, execution));
             }
-            row.push_back(PriceResultEntry{measures[j].name, extract_field(computed.at(cache_key), resolved[j].field)});
+            row.push_back(PriceResultEntry{display_name(measures[j]), extract_field(computed.at(cache_key), resolved[j].field)});
         }
         result.push_back(PriceBatchResultEntry{i, std::move(row)});
     }
@@ -499,7 +512,7 @@ PriceBatchResult price_batch(
         row.reserve(measures.size());
         for (std::size_t j = 0; j < measures.size(); ++j) {
             const std::string cache_key = resolved[j].registered_type + "#" + params_cache_key(measures[j].params);
-            row.push_back(PriceResultEntry{measures[j].name, extract_field(computed.at(cache_key)[i], resolved[j].field)});
+            row.push_back(PriceResultEntry{display_name(measures[j]), extract_field(computed.at(cache_key)[i], resolved[j].field)});
         }
         result.push_back(PriceBatchResultEntry{i, std::move(row)});
     }

@@ -24,6 +24,72 @@ pub struct McEstimate {
 /// las medidas de esta fase salvo que quien llama pida otro explicitamente con `aggregate`.
 pub const Z_95: f64 = 1.959_963_984_540_054;
 
+/// Versioned counter-based RNG. Path chunks can run in any order because each variate is keyed
+/// by `(seed, scenario_id, path_id, factor_id, step)` rather than by mutable global state.
+pub const RNG_ALGORITHM_VERSION: &str = "splitmix64-box-muller-v1";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RngVersion {
+    pub algorithm: &'static str,
+}
+
+impl Default for RngVersion {
+    fn default() -> Self {
+        Self {
+            algorithm: RNG_ALGORITHM_VERSION,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PartitionedRng {
+    seed: u64,
+    scenario_id: u64,
+    path_id: u64,
+}
+
+impl PartitionedRng {
+    pub fn new(seed: u64, scenario_id: u64, path_id: u64) -> Self {
+        Self {
+            seed,
+            scenario_id,
+            path_id,
+        }
+    }
+
+    pub fn version(&self) -> RngVersion {
+        RngVersion::default()
+    }
+
+    pub fn counter(&self, factor_id: u32, step: u32) -> u64 {
+        splitmix64(
+            self.seed
+                .wrapping_add(self.scenario_id.rotate_left(17))
+                .wrapping_add(self.path_id.rotate_left(33))
+                .wrapping_add((factor_id as u64) << 32)
+                .wrapping_add(step as u64),
+        )
+    }
+
+    pub fn uniform01(&self, factor_id: u32, step: u32) -> f64 {
+        ((self.counter(factor_id, step) >> 11) as f64) * (1.0 / ((1_u64 << 53) as f64))
+    }
+
+    pub fn normal(&self, factor_id: u32, step: u32) -> f64 {
+        let u1 = self.uniform01(factor_id, step).max(f64::MIN_POSITIVE);
+        let u2 = self.uniform01(factor_id ^ 0x9e37_79b9, step ^ 0x7f4a_7c15);
+        (-2.0 * u1.ln()).sqrt() * (std::f64::consts::TAU * u2).cos()
+    }
+}
+
+fn splitmix64(mut value: u64) -> u64 {
+    value = value.wrapping_add(0x9e37_79b9_7f4a_7c15);
+    let mut z = value;
+    z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    z ^ (z >> 31)
+}
+
 /// Agrega `samples` (una muestra independiente por ruta) en media + error estandar + intervalo de
 /// confianza `mean +/- z * std_error`. `samples` no puede estar vacio -- un Monte Carlo de cero
 /// rutas no es un caso de negocio valido, es un error de quien llama.
@@ -75,5 +141,25 @@ mod tests {
     #[should_panic(expected = "al menos una ruta")]
     fn aggregate_of_empty_samples_panics() {
         aggregate(&[], Z_95);
+    }
+
+    #[test]
+    fn partitioned_rng_is_stable_when_paths_are_rechunked() {
+        let left = (0..32)
+            .map(|path| PartitionedRng::new(7, 3, path).normal(1, 4))
+            .collect::<Vec<_>>();
+        let right = (0..8)
+            .flat_map(|chunk| {
+                let start = chunk * 4;
+                (start..start + 4)
+                    .map(|path| PartitionedRng::new(7, 3, path).normal(1, 4))
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(left, right);
+        assert_ne!(
+            PartitionedRng::new(7, 3, 0).counter(1, 4),
+            PartitionedRng::new(7, 3, 1).counter(1, 4)
+        );
     }
 }

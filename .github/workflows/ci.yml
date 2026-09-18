@@ -6,7 +6,7 @@ on:
 
 jobs:
   rust-tests:
-    name: Rust (engine-core, engine-ffi)
+    name: Rust workspace (including quant-cpp bridge)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -27,12 +27,37 @@ jobs:
         working-directory: rust
         run: cargo test --workspace --locked
 
+      # Lint de todos los crates y targets propios. `--no-deps` evita convertir warnings de
+      # terceros en fallos del repositorio; las excepciones de diseño viven documentadas junto
+      # al código concreto, no ocultas en el workflow.
+      - name: cargo clippy --workspace --all-targets --all-features
+        working-directory: rust
+        run: cargo clippy --workspace --all-targets --all-features --no-deps --locked -- -D warnings
+
       # PLAN.md §7.11 (Fase 5): la feature `gpu` (burn-wgpu) no se ejercita en CI porque
       # este runner no tiene adaptador GPU (eso se hace a mano con `examples/gpu_probe.rs`
       # y `examples/gpu_vs_cpu_bench.rs`), pero sí debe seguir compilando en cada cambio.
-      - name: cargo check --features gpu (compila, no requiere GPU)
+      - name: cargo check --workspace --all-targets --all-features (GPU solo compila)
         working-directory: rust
-        run: cargo check -p engine-core --features gpu --locked --examples
+        run: cargo check --workspace --all-targets --all-features --locked
+
+  rest-sdk-tests:
+    name: SDK REST Python + fixtures versionadas
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Instalar pytest
+        run: python -m pip install --upgrade pip pytest
+
+      - name: Tests del SDK REST y contratos de fixtures
+        env:
+          PYTHONPATH: clients/python/src
+        run: python -m pytest clients/python/tests/test_quantrest.py benches/test_fixtures.py -q
 
   build-and-smoke-test:
     name: Build completo (CMake + Corrosion + cxx + nanobind + gtest) + tests C++ + tests Python
@@ -147,23 +172,26 @@ jobs:
 
       # PLAN_REAPI.md §6 Fase 1: engine_typed es un paquete Python puro (no pasa por CMake),
       # así que solo necesita su dependencia (pydantic) instalada -- no un rebuild.
-      - name: Install engine_typed runtime dependency (pydantic)
+      - name: Install quantdesk runtime dependency (pydantic)
         run: pip install "pydantic>=2"
 
-      - name: Python engine_typed test (TradeSpec/IRSwap tipados)
-        run: python clients/python/tests/test_engine_typed_trade.py build/clients/python
+      - name: Python quantdesk test (TradeSpec/IRSwap tipados)
+        run: python clients/python/tests/test_quantdesk_trade.py build/clients/python
 
-      - name: Python engine_typed test (Model/Market/PricingContext/ExecutionContext tipados)
-        run: python clients/python/tests/test_engine_typed_context.py build/clients/python
+      - name: Python quantdesk test (Model/Market/PricingContext/ExecutionContext tipados)
+        run: python clients/python/tests/test_quantdesk_context.py build/clients/python
 
       # PLAN_REAPI.md §6 Fase 3: MeasureSpec en price.hpp -- tuplas (nombre, params) desde
       # Python, DV01(bump=...) con efecto real, price() resolviendo nombres directos del
-      # registry (p.ej. "ExposureProfile").
+      # registry (p.ej. "ExposureProfile"). Usa pytest.raises para la colision de nombres
+      # duplicados (PLAN_IMPROVE_NOTEBOOK2.md Fase 3), asi que necesita pytest instalado.
       - name: Python price test (MeasureSpec -- DV01 bump configurable, tuplas (nombre, params))
-        run: python clients/python/tests/test_price_measure_spec.py build/clients/python
+        run: |
+          pip install pytest
+          python clients/python/tests/test_price_measure_spec.py build/clients/python
 
-      - name: Python engine_typed test (Measure tipadas -- PV/DV01/ExposureProfile/UnilateralCVA)
-        run: python clients/python/tests/test_engine_typed_measure.py build/clients/python
+      - name: Python quantdesk test (Measure tipadas -- PV/DV01/ExposureProfile/UnilateralCVA)
+        run: python clients/python/tests/test_quantdesk_measure.py build/clients/python
 
       # PLAN_REAPI.md §6 Fase 4: PV/DV01 descuentan por la curva de MarketSnapshot (ya no por
       # el modelo) -- sanity check sobre una curva multi-pillar NO plana.
@@ -172,8 +200,8 @@ jobs:
 
       # PLAN_PRODUCTS.md SS12 Fase 3 (adelanta engine_typed.payoff de Fase 10): AST tipado
       # (Pydantic discriminado) -> Engine.create_product("Payoff", {"spec": json}) real.
-      - name: Python engine_typed test (payoff.PayoffProduct -- AST tipado -> Engine.create_product)
-        run: python clients/python/tests/test_engine_typed_payoff.py build/clients/python
+      - name: Python quantdesk test (payoff.PayoffProduct -- AST tipado -> Engine.create_product)
+        run: python clients/python/tests/test_quantdesk_payoff.py build/clients/python
 
       # PLAN_PRODUCTS.md SS12 Fase 0 (ADR-P0-09): schema estatico + ejemplos, sin motor
       # compilado -- por eso no recibe build/clients/python como los tests de arriba.

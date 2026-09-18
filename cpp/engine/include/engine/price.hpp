@@ -1,5 +1,6 @@
 #pragma once
 
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -25,9 +26,33 @@ using PriceResult = std::vector<PriceResultEntry>;
 // antes -- por eso las sobrecargas `vector<string>` de `price`/`price_batch`/`price_many`/
 // `price_grid` siguen existiendo (construyen `MeasureSpec{name, {}}` internamente) y no
 // rompen a ningún consumidor existente (`test_price.py`/`abi_c_smoke.c`/Excel/ejemplos).
+//
+// `alias` (PLAN_IMPROVE_NOTEBOOK2.md Fase 3, opción (b) -- "quick win de ergonomía de API",
+// ver el ADR en PLAN_IMPROVE_NOTEBOOK2.md junto a esta fase): nombre de salida alternativo
+// para `PriceResultEntry::measure_name`. Sin `alias` (default `std::nullopt`), el
+// comportamiento es idéntico al de siempre (`measure_name == name`). Con `alias`, el
+// resultado se etiqueta con ese alias en vez de `name` -- así varias entradas "Greek" (que de
+// otro modo colisionarían bajo la misma clave en el dict Python, ver `PriceResultEntry`)
+// pueden convivir en el mismo `price()`/`price_batch()`/`price_many()`/`price_grid()`, cada
+// una con su propio alias. `alias` NO participa en la clave de deduplicación interna
+// (`cache_key` en price.cpp): dos specs con el mismo `name`+`params` pero distinto `alias`
+// siguen compartiendo una única evaluación subyacente (mismo criterio que
+// "ExpectedExposure"/"PFE95" comparten "ExposureProfile" hoy) -- `alias` es puramente
+// cosmético/de presentación, nunca cambia qué se calcula.
+//
+// NOTA DE DISEÑO: `PriceResult`/`PriceBatchResult`/`PriceGridResult` son LISTAS ordenadas a
+// este nivel de C++, no dicts -- dos entradas con el mismo `measure_name` (con o sin alias)
+// son válidas aquí y ya lo eran antes de esta fase (p.ej. dos "DV01" con distinto "bump",
+// accedidas por posición, ver `Price.Dv01BumpIsConfigurableViaMeasureSpec` en
+// test_price.cpp), así que `price()`/`price_batch()`/etc. NO validan unicidad de
+// `alias.value_or(name)`. La colisión real que motiva esta fase solo aparece cuando un
+// binding aplana la lista a un dict por nombre -- esa validación (rechazar explícito en vez
+// de pisar en silencio) vive en esa capa, ver `Engine::price`/`calc_result_to_dict` en
+// `clients/python/src/engine_py_ext.cpp`.
 struct MeasureSpec {
     std::string name;
     Params params;
+    std::optional<std::string> alias = std::nullopt;
 };
 
 // Nombres de medida "de fábrica" (PLAN_REAPI.md §6 Fase 3): el `Registry<IMeasure>` completo
