@@ -25,73 +25,8 @@ fachada dinámica (dict/Excel/C ABI), es una fachada más sobre el mismo registr
     eng_execution = engine.ExecutionContext(execution.to_params())
 """
 
-import engine as _native
+import importlib.util
 
-from quantdesk import greeks
-from quantdesk.context import ExecutionContext, PricingContext
-from quantdesk.engine import BatchRow, Engine, GridRow, PriceResult
-from quantdesk.greeks import Greek
-from quantdesk.market import Market
-from quantdesk.measure import PV, DV01, ExposureProfile, Measure, UnilateralCVA
-from quantdesk.model import Gbm, GbmBasket, GbmP, HullWhite1F, HullWhite2F, ModelSpec
-from quantdesk.payoff import (
-    Contract,
-    PayoffProduct,
-    Predicate,
-    ScalarExpr,
-    abs,
-    add,
-    after,
-    all_of,
-    any_of,
-    average,
-    before,
-    between,
-    both,
-    call_leg,
-    cashflow,
-    clamp,
-    constant,
-    current,
-    custom_strategy,
-    discount_factor,
-    div,
-    eq,
-    european_call,
-    european_put,
-    event_occurred,
-    event_time,
-    event_value,
-    exercise,
-    exp,
-    fixing,
-    fx_conversion,
-    fx_forward,
-    give,
-    greater,
-    greater_equal,
-    if_,
-    irs,
-    less,
-    less_equal,
-    log,
-    maximum,
-    minimum,
-    mul,
-    neg,
-    negate,
-    parameter,
-    pow,
-    put_leg,
-    running_max,
-    running_min,
-    scale,
-    sub,
-    trigger,
-    when,
-    zero,
-)
-from quantdesk.trade import PAR, IRSwap, TradeSpec
 from quantdesk.rest import (
     Context,
     HullWhite1F as RestHullWhite1F,
@@ -105,14 +40,6 @@ from quantdesk.rest import (
     ResourceRef,
     ScenarioSet,
 )
-
-# `Portfolio` (PLAN_API_REFACTOR.md §3.2): ya "suficientemente pythónico" según su propio
-# comentario en `engine_py_ext.cpp` (cuatro métodos, sin dict de por medio) -- reexport directo
-# desde `engine.Portfolio`, sin envoltorio adicional (mismo criterio que ya aplica el binding
-# nativo hoy). No requiere que el módulo nativo esté importable a nivel de PAQUETE quantdesk
-# (import engine as _native, como ya hace quantdesk.engine) -- se resuelve al mismo módulo
-# nanobind compilado, nunca a quantdesk.engine.
-Portfolio = _native.Portfolio
 
 __all__ = [
     "Engine",
@@ -206,3 +133,37 @@ __all__ = [
     "RestHullWhite1F",
     "RestIRSwap",
 ]
+
+# Importar `quantdesk.rest` no debe exigir que la extensión nanobind `engine` esté instalada.
+# La fachada nativa se carga bajo demanda cuando alguien solicita uno de sus nombres públicos;
+# esto permite probar/usar el SDK REST puro en runners Linux sin compilar el módulo Windows.
+_REST_NAMES = {
+    "QuantRestClient",
+    "QuantContext",
+    "Context",
+    "ResourceRef",
+    "ProblemDetails",
+    "QuantRestError",
+    "MarketSpec",
+    "ScenarioSet",
+    "RestMarket",
+    "RestHullWhite1F",
+    "RestIRSwap",
+}
+_NATIVE_NAMES = frozenset(__all__) - _REST_NAMES
+
+# Mantén ``from quantdesk import *`` funcional en una instalación REST-only. Cuando la
+# extensión existe, los nombres nativos siguen resolviéndose perezosamente mediante
+# ``__getattr__``; cuando no existe, la superficie declarada es únicamente la del SDK REST.
+if importlib.util.find_spec("engine") is None:
+    __all__ = [name for name in __all__ if name in _REST_NAMES]
+
+
+def __getattr__(name: str):
+    if name not in _NATIVE_NAMES:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    from quantdesk import _native_init
+
+    value = getattr(_native_init, name)
+    globals()[name] = value
+    return value
