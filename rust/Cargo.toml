@@ -3,6 +3,10 @@ resolver = "2"
 members = [
     "crates/engine-core",
     "crates/engine-ffi",
+    "crates/quant-domain",
+    "crates/quant-engine",
+    "crates/quant-cpp",
+    "crates/quant-api",
 ]
 
 [workspace.package]

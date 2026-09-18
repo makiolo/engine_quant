@@ -1,0 +1,10 @@
+pydantic
+notebook
+itables
+jupysql
+ydata-profiling
+duckdb-engine
+plotly
+mplfinance
+seaborn
+yfinance

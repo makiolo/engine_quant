@@ -2,6 +2,10 @@
 //! Este crate no contiene lógica de negocio, solo la traducción de la API pública de
 //! `engine-core` a algo que `cxx` pueda exponer a C++.
 
+// Las firmas planas reflejan el contrato ABI estable con C++; agrupar argumentos
+// solo para satisfacer este lint rompería esa frontera pública.
+#![allow(clippy::too_many_arguments)]
+
 #[cxx::bridge(namespace = "engine::ffi")]
 mod ffi {
     /// Resultado plano de un perfil de exposición (PLAN.md §5.5: "los tipos complejos ...

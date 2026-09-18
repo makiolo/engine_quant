@@ -1,0 +1,26 @@
+{
+  "schema": "quant.baseline-fixture/v1",
+  "fixture_id": "irs-hull-white-1f-par-swap",
+  "kind": "irs_hull_white",
+  "version": 1,
+  "input": {
+    "a": 0.1,
+    "b": 0.03,
+    "sigma": 0.01,
+    "r0": 0.02,
+    "notional": 1000000.0,
+    "fixed_rate": 0.0,
+    "use_par_rate": true,
+    "start": 0.0,
+    "payment_times": [1.0, 2.0, 3.0, 4.0, 5.0],
+    "accruals": [1.0, 1.0, 1.0, 1.0, 1.0]
+  },
+  "oracle": {
+    "name": "par_swap_npv",
+    "expectation": "near_zero",
+    "absolute_tolerance": 0.000001,
+    "relative_tolerance": 0.000001,
+    "units": "currency"
+  },
+  "provenance": "existing engine-core API/test oracle; rerun before changing numerical code"
+}

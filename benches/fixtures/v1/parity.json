@@ -1,0 +1,14 @@
+{
+  "schema": "quant.baseline-fixture/v1",
+  "fixture_id": "cross-layer-parity-inventory",
+  "kind": "parity",
+  "version": 1,
+  "providers": ["rust-engine-core", "cpp-engine", "python-binding"],
+  "operations": ["hull_white_zero_coupon_bond", "irs_hull_white_npv", "irs_hull_white_exposure_profile", "unilateral_cva_from_exposure"],
+  "oracle": {
+    "method": "same input fixture and operation-specific tolerances",
+    "status": "existing cross-layer tests are the current authority",
+    "tolerance_policy": "absolute and relative tolerances are operation-specific; no universal epsilon"
+  },
+  "provenance": "cpp/engine tests, engine-core tests, and Python smoke/registry tests"
+}

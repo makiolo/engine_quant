@@ -12,6 +12,10 @@
 //! con un error claro) ya ocurrió antes, en `engine::ExecutionContext` (capa C++) — el mismo
 //! valor validado allí es el que llega aquí.
 
+// Esta capa conserva firmas numéricas planas para la frontera C++/Python. Agruparlas
+// cambiaría el contrato público que precisamente implementa este módulo.
+#![allow(clippy::too_many_arguments)]
+
 use crate::backend::{resolve_backend, ComputeBackend, CpuBackend};
 use crate::backend::Autodiff;
 use crate::exposure::{
@@ -1085,8 +1089,9 @@ pub fn calibrate_hull_white_2f(
 /// (PLAN_IMPROVE_NOTEBOOK.md Fase 0, línea 56-57: "no reventar memoria si alguien lo llama desde
 /// Excel/C ABI sin darse cuenta" -- aunque esta fase NO expone estas dos funciones a Excel/C ABI,
 /// el límite vive aquí, en el core Rust, para proteger a CUALQUIER llamante presente o futuro,
-/// no solo al binding Python de hoy). `SIMULATE_PATHS_MAX_PATHS * (SIMULATE_PATHS_MAX_STEPS + 1)
-/// * 8 bytes` = 50_000 * 501 * 8 ≈ 200 MB para la matriz aplanada -- generoso para explorar un
+/// no solo al binding Python de hoy). El producto `SIMULATE_PATHS_MAX_PATHS *
+/// (SIMULATE_PATHS_MAX_STEPS + 1) * 8 bytes` = 50_000 * 501 * 8 ≈ 200 MB para la matriz
+/// aplanada -- generoso para explorar un
 /// fan chart interactivo en un notebook, acotado para no agotar memoria de un proceso normal.
 pub const SIMULATE_PATHS_MAX_PATHS: u64 = 50_000;
 pub const SIMULATE_PATHS_MAX_STEPS: u64 = 500;
@@ -1282,8 +1287,9 @@ fn flatten_paths<B: Backend<FloatElem = f64>>(
 
 /// Matriz cruda de trayectorias de un `GbmBasket` de `n_assets` activos: `times.len() ==
 /// n_steps + 1` (incluye `t=0`, `S0` repetido sin simular, mismo criterio que `PathMatrix`).
-/// **Orden de aplanado: ROW-MAJOR POR (path, step, asset)** -- `paths_flat[path * (n_steps + 1)
-/// * n_assets + step * n_assets + asset]` es el valor del activo `asset` de la ruta `path` en
+/// **Orden de aplanado: ROW-MAJOR POR (path, step, asset)** -- el índice es
+/// `paths_flat[path * (n_steps + 1) * n_assets + step * n_assets + asset]`; contiene el valor
+/// del activo `asset` de la ruta `path` en
 /// `times[step]` -- convencion elegida para que la capa Python solo necesite un `reshape((n_paths,
 /// n_steps + 1, n_assets))` en vez de un `reshape` + `transpose`, MISMA convencion documentada en
 /// `ffi::BasketPathMatrixResult` (`engine-ffi/src/lib.rs`), `engine::BasketPathMatrix` (C++) y el

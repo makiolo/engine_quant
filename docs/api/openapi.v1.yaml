@@ -1,0 +1,490 @@
+openapi: 3.1.0
+info:
+  title: Engine Quant REST API
+  version: 0.1.0
+  description: >-
+    Vertical REST de Fases 1-9. Las operaciones son stateless: cada request de cálculo
+    transporta el ContextEnvelope completo y no existe un registry de sesiones por defecto.
+  x-contract-status: implemented
+  x-phase: 9
+servers:
+  - url: https://quant.example
+    description: Placeholder; no es un endpoint desplegado
+tags:
+  - name: context
+  - name: pricing
+  - name: risk
+  - name: xva
+  - name: scenarios
+  - name: health
+paths:
+  /v1/context:apply:
+    post:
+      tags: [context]
+      operationId: applyContextCommands
+      x-stateless: true
+      summary: Apply ordered typed mutations transactionally
+      requestBody: { $ref: '#/components/requestBodies/ContextOperation' }
+      responses:
+        '200': { $ref: '#/components/responses/ContextOperation' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '413': { $ref: '#/components/responses/Problem' }
+  /v1/prices:
+    post:
+      tags: [pricing]
+      operationId: price
+      x-stateless: true
+      summary: Price products synchronously when within the configured budget
+      requestBody: { $ref: '#/components/requestBodies/PricingOperation' }
+      responses:
+        '200': { $ref: '#/components/responses/Pricing' }
+        '400': { $ref: '#/components/responses/Problem' }
+        '413': { $ref: '#/components/responses/Problem' }
+        '429': { $ref: '#/components/responses/Problem' }
+  /v1/portfolios:price:
+    post:
+      tags: [pricing]
+      operationId: pricePortfolio
+      x-stateless: true
+      summary: Price a heterogeneous portfolio in bounded grouped batches
+      requestBody:
+        required: true
+        content:
+          application/json: { schema: { $ref: '#/components/schemas/PortfolioPriceRequest' } }
+      responses:
+        '200': { description: Portfolio result with explicit partial failures, content: { application/json: { schema: { $ref: '#/components/schemas/PortfolioPriceResponse' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '413': { $ref: '#/components/responses/Problem' }
+        '429': { $ref: '#/components/responses/Problem' }
+  /v1/scenarios:run:
+    post:
+      tags: [scenarios]
+      operationId: runScenarios
+      x-stateless: true
+      summary: Run a shared scenario set while the connection is alive
+      description: >-
+        Results are synchronous in this implementation. Streaming/backpressure can be negotiated
+        by a future media type; no durable job store or GET /jobs endpoint exists. continuation_token
+        is null because current kernels are not re-entrant.
+      requestBody:
+        required: true
+        content:
+          application/json: { schema: { $ref: '#/components/schemas/ScenarioRunRequest' } }
+      responses:
+        '200': { description: Scenario rows in stable order, content: { application/json: { schema: { $ref: '#/components/schemas/ScenarioRunResponse' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '413': { $ref: '#/components/responses/Problem' }
+        '429': { $ref: '#/components/responses/Problem' }
+  /v1/risk:calculate:
+    post:
+      tags: [risk]
+      operationId: calculateRisk
+      x-stateless: true
+      summary: Calculate dense portfolio Greeks with shared base valuations and bumps
+      requestBody:
+        required: true
+        content:
+          application/json: { schema: { $ref: '#/components/schemas/RiskRequest' } }
+      responses:
+        '200': { description: Dense indexed risk result, content: { application/json: { schema: { $ref: '#/components/schemas/RiskResult' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '413': { $ref: '#/components/responses/Problem' }
+        '429': { $ref: '#/components/responses/Problem' }
+  /v1/xva:calculate:
+    post:
+      tags: [xva]
+      operationId: calculateXva
+      x-stateless: true
+      summary: Calculate EE/PFE/CVA/DVA/FVA/MVA/KVA from a shared exposure graph
+      description: >-
+        Q exposure drives EE, PFE, CVA and funding measures. DVA uses the explicitly
+        tagged P exposure when supplied; otherwise the response records the fallback.
+        Exposure cubes are returned as bounded artifact references and are not required
+        to be materialized.
+      requestBody:
+        required: true
+        content:
+          application/json: { schema: { $ref: '#/components/schemas/XvaRequest' } }
+      responses:
+        '200': { description: XVA result and exposure artifact lineage, content: { application/json: { schema: { $ref: '#/components/schemas/XvaResult' } } } }
+        '400': { $ref: '#/components/responses/Problem' }
+        '413': { $ref: '#/components/responses/Problem' }
+        '429': { $ref: '#/components/responses/Problem' }
+  /health/live:
+    get:
+      tags: [health]
+      operationId: healthLive
+      responses:
+        '200': { description: Process is alive, content: { application/json: { schema: { $ref: '#/components/schemas/Health' } } } }
+  /health/ready:
+    get:
+      tags: [health]
+      operationId: healthReady
+      responses:
+        '200': { description: Process can accept work, content: { application/json: { schema: { $ref: '#/components/schemas/Health' } } } }
+        '503': { $ref: '#/components/responses/Problem' }
+components:
+  requestBodies:
+    ContextOperation:
+      required: true
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ContextOperation' }
+    PricingOperation:
+      required: true
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/PricingOperation' }
+  responses:
+    ContextOperation:
+      description: New client-owned context revision and optional resource reference
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ContextOperationResponse' }
+    Pricing:
+      description: Pricing/risk result; large outputs may negotiate Arrow IPC
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/PricingResponse' }
+        application/vnd.apache.arrow.stream: { schema: { type: string, format: binary } }
+    Problem:
+      description: RFC 9457-style stable error envelope
+      content:
+        application/problem+json:
+          schema: { $ref: '#/components/schemas/Problem' }
+  schemas:
+    ContextEnvelope:
+      type: object
+      required: [schema, context_id, revision, engine, markets, models, products, portfolios, pricing]
+      properties:
+        schema: { const: quant.context/v1 }
+        context_id: { type: string, minLength: 1 }
+        revision: { type: integer, minimum: 0 }
+        parent_hash: { type: [string, 'null'] }
+        context_hash: { type: [string, 'null'] }
+        engine: { type: object, additionalProperties: true }
+        markets: { type: object, additionalProperties: true }
+        models: { type: object, additionalProperties: true }
+        products: { type: object, additionalProperties: true }
+        portfolios: { type: object, additionalProperties: true }
+        pricing: { type: object, additionalProperties: true }
+        runs: { type: array, items: { type: object } }
+    ResourceRef:
+      type: object
+      required: [id, hash, kind, version]
+      properties:
+        id: { type: string }
+        hash: { type: string }
+        kind: { type: string }
+        version: { type: integer, minimum: 1 }
+    ContextOperation:
+      type: object
+      required: [context, operation_id]
+      properties:
+        context: { $ref: '#/components/schemas/ContextEnvelope' }
+        operation_id: { type: string, minLength: 1 }
+        commands:
+          type: array
+          maxItems: 1000
+          items:
+            oneOf:
+              - $ref: '#/components/schemas/AddMarketCommand'
+              - $ref: '#/components/schemas/AddModelCommand'
+              - $ref: '#/components/schemas/AddProductCommand'
+              - $ref: '#/components/schemas/AddPortfolioCommand'
+              - $ref: '#/components/schemas/RecordRunCommand'
+              - $ref: '#/components/schemas/RemoveCommand'
+        resource: { type: object, additionalProperties: true }
+    ContextOperationResponse:
+      type: object
+      required: [context]
+      properties:
+        context: { $ref: '#/components/schemas/ContextEnvelope' }
+        resource_ref: { $ref: '#/components/schemas/ResourceRef' }
+    PricingOperation:
+      type: object
+      required: [context, operation_id, products, measures]
+      properties:
+        context: { $ref: '#/components/schemas/ContextEnvelope' }
+        operation_id: { type: string, minLength: 1 }
+        market: { $ref: '#/components/schemas/ResourceRef' }
+        model: { $ref: '#/components/schemas/ResourceRef' }
+        products: { type: array, items: { $ref: '#/components/schemas/ResourceRef' }, maxItems: 100000 }
+        measures: { type: array, items: { type: object }, minItems: 1 }
+        pricing: { type: object, additionalProperties: true }
+        execution: { type: object, additionalProperties: true }
+        output: { type: object, additionalProperties: true }
+    PricingResponse:
+      type: object
+      required: [context, result, provenance]
+      properties:
+        context: { $ref: '#/components/schemas/ContextEnvelope' }
+        result: { type: object, additionalProperties: true }
+        provenance: { type: object, additionalProperties: true }
+    PortfolioPriceRequest:
+      type: object
+      required: [context, operation_id, portfolio_id, market, model]
+      properties:
+        context: { $ref: '#/components/schemas/ContextEnvelope' }
+        operation_id: { type: string, minLength: 1 }
+        portfolio_id: { type: string, minLength: 1 }
+        market: { $ref: '#/components/schemas/ResourceRef' }
+        model: { $ref: '#/components/schemas/ResourceRef' }
+        pricing: { type: object, additionalProperties: true }
+    PortfolioPriceResponse:
+      type: object
+      required: [operation_id, result, continuation_token]
+      properties:
+        operation_id: { type: string }
+        context_hash: { type: [string, 'null'] }
+        continuation_token: { type: [string, 'null'], description: Unsupported unless a resumable kernel is selected }
+        result:
+          type: object
+          required: [values, trade_ids, trades, failures, chunks]
+          properties:
+            values: { type: array, items: { type: number } }
+            trade_ids: { type: array, items: { type: string } }
+            trades: { type: array, items: { type: object } }
+            failures: { type: array, items: { $ref: '#/components/schemas/PartialFailure' } }
+            chunks: { type: integer, minimum: 0 }
+    ScenarioRunRequest:
+      type: object
+      required: [context, operation_id, portfolio_id, market, model, scenarios]
+      properties:
+        context: { $ref: '#/components/schemas/ContextEnvelope' }
+        operation_id: { type: string, minLength: 1 }
+        portfolio_id: { type: string, minLength: 1 }
+        market: { $ref: '#/components/schemas/ResourceRef' }
+        model: { $ref: '#/components/schemas/ResourceRef' }
+        scenarios: { $ref: '#/components/schemas/ScenarioSet' }
+        pricing: { type: object, additionalProperties: true }
+    ScenarioRunResponse:
+      type: object
+      required: [operation_id, result]
+      properties:
+        operation_id: { type: string }
+        context_hash: { type: [string, 'null'] }
+        result:
+          type: object
+          required: [scenarios, failures, chunks, continuation_token]
+          properties:
+            scenarios: { type: array, items: { type: object } }
+            failures: { type: array, items: { $ref: '#/components/schemas/PartialFailure' } }
+            chunks: { type: integer, minimum: 0 }
+            continuation_token: { type: [string, 'null'] }
+    RiskRequest:
+      type: object
+      required: [context, operation_id, portfolio_id, market, model]
+      properties:
+        context: { $ref: '#/components/schemas/ContextEnvelope' }
+        operation_id: { type: string, minLength: 1 }
+        portfolio_id: { type: string, minLength: 1 }
+        market: { $ref: '#/components/schemas/ResourceRef' }
+        model: { $ref: '#/components/schemas/ResourceRef' }
+        measures:
+          type: array
+          items: { enum: [pv, pv01, delta, rho, vega, all_greeks] }
+          default: [all_greeks]
+        factors:
+          type: array
+          items: { $ref: '#/components/schemas/RiskFactor' }
+        bump_scheme: { enum: [central, one_sided], default: central }
+        bump_size: { type: [number, 'null'], exclusiveMinimum: 0, default: 0.0001 }
+        tolerances: { type: object, additionalProperties: { type: number, minimum: 0 } }
+        pricing: { type: object, additionalProperties: true }
+    RiskFactor:
+      oneOf:
+        - type: object
+          required: [kind, name]
+          properties:
+            kind: { const: model_parameter }
+            name: { type: string, minLength: 1 }
+        - type: object
+          required: [kind, curve]
+          properties:
+            kind: { const: curve_parallel }
+            curve: { type: string, minLength: 1 }
+        - type: object
+          required: [kind, curve, bucket]
+          properties:
+            kind: { const: curve_bucket }
+            curve: { type: string, minLength: 1 }
+            bucket: { type: integer, minimum: 0 }
+        - type: object
+          required: [kind, curve, pillar]
+          properties:
+            kind: { const: curve_pillar }
+            curve: { type: string, minLength: 1 }
+            pillar: { type: integer, minimum: 0 }
+    RiskResult:
+      type: object
+      required: [operation_id, base_value, base_values, trade_ids, measure_index, factor_index, shape, values, provenance, artifacts]
+      properties:
+        operation_id: { type: string }
+        context_hash: { type: [string, 'null'] }
+        base_value: { type: number }
+        base_values: { type: array, items: { type: number } }
+        trade_ids: { type: array, items: { type: string } }
+        measure_index: { type: array, items: { type: string } }
+        factor_index: { type: array, items: { type: string } }
+        shape: { type: array, prefixItems: [{ type: integer }, { type: integer }], minItems: 2, maxItems: 2 }
+        values: { type: array, items: { type: number } }
+        provenance: { type: object, additionalProperties: { type: object } }
+        artifacts: { type: array, items: { type: object } }
+    XvaRequest:
+      type: object
+      required: [context, operation_id, portfolio_id, market, model]
+      properties:
+        context: { $ref: '#/components/schemas/ContextEnvelope' }
+        operation_id: { type: string, minLength: 1 }
+        portfolio_id: { type: string, minLength: 1 }
+        market: { $ref: '#/components/schemas/ResourceRef' }
+        model: { $ref: '#/components/schemas/ResourceRef' }
+        measures:
+          type: array
+          items: { enum: [ee, pfe, cva, dva, fva, mva, kva] }
+        confidence_level: { type: number, minimum: 0, maximum: 1, default: 0.95 }
+        netting_sets: { type: array, items: { $ref: '#/components/schemas/NettingSet' } }
+        collateral_agreements: { type: array, items: { $ref: '#/components/schemas/CollateralAgreement' } }
+        counterparty_default: { $ref: '#/components/schemas/DefaultSpec' }
+        own_default: { $ref: '#/components/schemas/DefaultSpec' }
+        funding: { $ref: '#/components/schemas/FundingSpec' }
+        q_exposure: { $ref: '#/components/schemas/ExposureCubeInput' }
+        p_exposure: { $ref: '#/components/schemas/ExposureCubeInput' }
+        materialize_exposure: { type: boolean, default: false }
+        memory_budget_bytes: { type: [integer, 'null'], minimum: 1 }
+        pricing: { type: object, additionalProperties: true }
+    NettingSet:
+      type: object
+      required: [id]
+      properties:
+        id: { type: string, minLength: 1 }
+        counterparty: { type: string }
+        legal_entity: { type: string }
+        closeout_netting: { type: boolean, default: true }
+        collateral_agreement_id: { type: [string, 'null'] }
+    CollateralAgreement:
+      type: object
+      required: [id]
+      properties:
+        id: { type: string, minLength: 1 }
+        currency: { type: string, default: USD }
+        threshold: { type: number, minimum: 0 }
+        minimum_transfer_amount: { type: number, minimum: 0 }
+        independent_amount: { type: number, minimum: 0 }
+        initial_margin: { type: number, minimum: 0 }
+        variation_margin: { type: boolean, default: true }
+        collateral_rate: { type: number }
+    DefaultSpec:
+      type: object
+      properties:
+        hazard_rate: { type: number, minimum: 0 }
+        recovery_rate: { type: number, minimum: 0, maximum: 1, default: 0.4 }
+        survival_probabilities: { type: array, items: { type: number, minimum: 0, maximum: 1 } }
+        measure: { enum: [Q, P], default: Q }
+    FundingSpec:
+      type: object
+      properties:
+        funding_spread: { type: number }
+        borrowing_spread: { type: number }
+        lending_spread: { type: number }
+        capital_factor: { type: number, minimum: 0, default: 0.08 }
+        margin_period_years: { type: number, minimum: 0 }
+    ExposureCubeInput:
+      type: object
+      required: [measure, times, paths]
+      properties:
+        measure: { enum: [Q, P] }
+        times: { type: array, items: { type: number }, minItems: 1 }
+        paths: { type: array, items: { type: array, items: { type: number }, minItems: 1 }, minItems: 1 }
+        discount_factors: { type: array, items: { type: number, minimum: 0 } }
+        source_hash: { type: [string, 'null'] }
+    XvaResult:
+      type: object
+      required: [operation_id, times, ee, pfe, cva, dva, fva, mva, kva, measures, provenance]
+      properties:
+        operation_id: { type: string }
+        context_hash: { type: [string, 'null'] }
+        times: { type: array, items: { type: number } }
+        ee: { type: array, items: { type: number } }
+        pfe: { type: array, items: { type: number } }
+        cva: { type: number }
+        dva: { type: number }
+        fva: { type: number }
+        mva: { type: number }
+        kva: { type: number }
+        measures: { type: object, additionalProperties: { type: number } }
+        exposure_cube: { type: [object, 'null'] }
+        artifacts: { type: array, items: { type: object } }
+        provenance: { type: object, additionalProperties: true }
+    ScenarioSet:
+      type: object
+      required: [id, scenarios]
+      properties:
+        id: { type: string, minLength: 1 }
+        chunk_size: { type: [integer, 'null'], minimum: 1 }
+        scenarios: { type: array, items: { type: object }, maxItems: 100000 }
+    PartialFailure:
+      type: object
+      required: [item_id, error]
+      properties:
+        item_id: { type: string }
+        error: { type: string }
+    Health:
+      type: object
+      required: [status]
+      properties:
+        status: { enum: [ok, ready, degraded] }
+    Problem:
+      type: object
+      required: [type, title, status, code, trace_id]
+      properties:
+        type: { type: string, format: uri-reference }
+        title: { type: string }
+        status: { type: integer, minimum: 400, maximum: 599 }
+        detail: { type: string }
+        code: { type: string }
+        trace_id: { type: string }
+        field_errors: { type: array, items: { type: object } }
+    AddMarketCommand:
+      type: object
+      required: [kind, id, spec]
+      properties:
+        kind: { const: add_market }
+        id: { type: string, minLength: 1 }
+        spec: { type: object, additionalProperties: true }
+    AddModelCommand:
+      type: object
+      required: [kind, id, spec]
+      properties:
+        kind: { const: add_model }
+        id: { type: string, minLength: 1 }
+        spec: { type: object, additionalProperties: true }
+    AddProductCommand:
+      type: object
+      required: [kind, id, spec]
+      properties:
+        kind: { const: add_product }
+        id: { type: string, minLength: 1 }
+        spec: { type: object, additionalProperties: true }
+    AddPortfolioCommand:
+      type: object
+      required: [kind, id, spec]
+      properties:
+        kind: { const: add_portfolio }
+        id: { type: string, minLength: 1 }
+        spec: { type: object, additionalProperties: true }
+    RecordRunCommand:
+      type: object
+      required: [kind, operation_id, record]
+      properties:
+        kind: { const: record_run }
+        operation_id: { type: string, minLength: 1 }
+        record: { type: object, additionalProperties: true }
+    RemoveCommand:
+      type: object
+      required: [kind, resource_kind, id]
+      properties:
+        kind: { const: remove }
+        resource_kind: { enum: [market, model, product, portfolio] }
+        id: { type: string, minLength: 1 }

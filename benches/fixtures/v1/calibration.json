@@ -1,0 +1,20 @@
+{
+  "schema": "quant.baseline-fixture/v1",
+  "fixture_id": "hull-white-calibration-synthetic",
+  "kind": "calibration",
+  "version": 1,
+  "input": {
+    "a": 0.15,
+    "b": 0.025,
+    "sigma": 0.008,
+    "r0": 0.02,
+    "pillars": [1.0, 2.0, 5.0, 10.0, 20.0]
+  },
+  "oracle": {
+    "converged": true,
+    "a_absolute_tolerance": 0.0001,
+    "b_absolute_tolerance": 0.0001,
+    "units": "rate"
+  },
+  "provenance": "existing engine-core calibration tests; synthetic curve oracle"
+}

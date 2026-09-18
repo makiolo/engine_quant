@@ -22,6 +22,10 @@
 //! Longstaff-Schwartz, siguen siendo codigo escalar en `f64` puro sobre `Vec<f64>` ya
 //! materializados desde el tensor -- no hay nada de eso que vectorizar sobre backend.
 
+// Los bucles indexados recorren matrices path-major y acceden de forma coordinada a
+// varios buffers; convertirlos a iteradores ocultaría esa correspondencia de índices.
+#![allow(clippy::needless_range_loop)]
+
 use crate::backend::{resolve_backend, ComputeBackend, CpuBackend};
 use crate::exposure::ExposureProfile;
 use crate::mc::{self, McEstimate};
@@ -1968,8 +1972,8 @@ mod tests {
     // europea de un unico paso), misma seed, `backend="cpu"` vs `backend="gpu"` -- ambos deben
     // ejecutar el MISMO `CompiledPayoff` (la interpretacion pathwise es identica, solo cambia el
     // backend Burn que genera las rutas GBM) y converger al mismo precio dentro de un margen
-    // estadistico generoso. Gateado tras `--features gpu`: no compila ni corre en el CI por
-    // defecto, igual que el resto de la infraestructura GPU de este crate.
+    // estadistico generoso. Gateado tras `--features gpu`: CI lo compila para detectar deriva
+    // de API, pero no lo ejecuta porque los runners no garantizan hardware GPU compatible.
     #[cfg(feature = "gpu")]
     #[test]
     fn cpu_and_gpu_backends_agree_on_the_same_barrier_payoff_within_statistical_tolerance() {
@@ -1980,7 +1984,7 @@ mod tests {
         let (n_paths, seed) = (200_000, 7);
 
         let cpu = price_payoff_gbm_q("cpu", &spec, "EQ.SPOT.XYZ", s0, r, q, sigma, n_paths, seed, 0.0).unwrap();
-        let gpu = price_payoff_gbm_q("gpu", &spec, "EQ.SPOT.XYZ", s0, r, q, sigma, n_paths, seed).unwrap();
+        let gpu = price_payoff_gbm_q("gpu", &spec, "EQ.SPOT.XYZ", s0, r, q, sigma, n_paths, seed, 0.0).unwrap();
 
         let tolerance = 8.0 * (cpu.std_error + gpu.std_error);
         assert!(

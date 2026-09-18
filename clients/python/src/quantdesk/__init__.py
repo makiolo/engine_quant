@@ -92,6 +92,19 @@ from quantdesk.payoff import (
     zero,
 )
 from quantdesk.trade import PAR, IRSwap, TradeSpec
+from quantdesk.rest import (
+    Context,
+    HullWhite1F as RestHullWhite1F,
+    IRSwap as RestIRSwap,
+    Market as RestMarket,
+    MarketSpec,
+    ProblemDetails,
+    QuantContext,
+    QuantRestClient,
+    QuantRestError,
+    ResourceRef,
+    ScenarioSet,
+)
 
 # `Portfolio` (PLAN_API_REFACTOR.md §3.2): ya "suficientemente pythónico" según su propio
 # comentario en `engine_py_ext.cpp` (cuatro métodos, sin dict de por medio) -- reexport directo
@@ -181,4 +194,15 @@ __all__ = [
     "custom_strategy",
     "irs",
     "fx_forward",
+    "QuantRestClient",
+    "QuantContext",
+    "Context",
+    "ResourceRef",
+    "ProblemDetails",
+    "QuantRestError",
+    "MarketSpec",
+    "ScenarioSet",
+    "RestMarket",
+    "RestHullWhite1F",
+    "RestIRSwap",
 ]

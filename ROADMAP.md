@@ -1,5 +1,7 @@
 # Future plans
 
+- PLAN_MULTICURVE.md: Market as a named-curve registry (discount vs projection per index),
+  curve bootstrapping from market instruments, multicurve calibration.
 - PLAN_PORTFOLIO.md: Design first class objects Deal/Trade, Portfolio ...
 - PLAN_PIPELINE.md: Design main pipeline. Simulation, Pnl, Greeks ...
 - PLAN_HEDGE.md: From one portfolio (current deals + previous hedges) calculate new alternative Portfolio for Hedge Gamma/Theta/Vega with options, and Delta with Forwards/Equity/Spot Market.

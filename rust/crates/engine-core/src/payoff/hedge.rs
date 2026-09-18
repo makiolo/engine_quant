@@ -54,6 +54,13 @@
 //! con una seed distinta por ruta para que el ajuste de minimos cuadrados sea reproducible -- una
 //! aceptacion documentada, no una degradacion oculta.
 
+// Los índices coordinan matrices pequeñas del solver. Las comparaciones negadas con
+// floats son deliberadas: además de validar el rango, rechazan NaN de forma explícita.
+#![allow(
+    clippy::needless_range_loop,
+    clippy::neg_cmp_op_on_partial_ord
+)]
+
 use crate::backend::{resolve_backend, ComputeBackend, CpuBackend};
 use crate::models::gbm::Gbm;
 use crate::payoff::api::check_single_observable;
@@ -1117,7 +1124,7 @@ mod tests {
         let result = synthesize_hedge_gbm_q(
             "cpu",
             &spec,
-            &[spec.clone()],
+            std::slice::from_ref(&spec),
             "EQ.SPOT.XYZ",
             100.0,
             0.05,
@@ -1330,7 +1337,7 @@ mod tests {
         let result = synthesize_hedge_gbm_q(
             "cpu",
             &spec,
-            &[spec.clone()],
+            std::slice::from_ref(&spec),
             "EQ.SPOT.XYZ",
             100.0,
             0.05,

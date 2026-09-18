@@ -1,0 +1,30 @@
+{
+  "schema": "quant.baseline-fixture/v1",
+  "fixture_id": "exposure-cva-1f",
+  "kind": "exposure_cva",
+  "version": 1,
+  "input": {
+    "a": 0.1,
+    "b": 0.03,
+    "sigma": 0.01,
+    "r0": 0.02,
+    "notional": 1000000.0,
+    "fixed_rate": 0.02,
+    "payment_times": [1.0, 2.0, 3.0, 4.0, 5.0],
+    "accruals": [1.0, 1.0, 1.0, 1.0, 1.0],
+    "monitoring_times": [0.0, 1.0, 2.0, 3.0, 4.0, 5.0],
+    "n_steps": 52,
+    "n_paths": 2000,
+    "seed": 7,
+    "hazard_rate": 0.02,
+    "recovery_rate": 0.4
+  },
+  "oracle": {
+    "ee_is_non_negative": true,
+    "pfe95_dominates_ee": true,
+    "cva_is_non_negative": true,
+    "zero_hazard_cva_is_zero": true,
+    "units": "currency"
+  },
+  "provenance": "existing engine-core exposure/CVA tests; invariant oracle"
+}
