@@ -8,7 +8,7 @@
 > **Estado verificable.** La implementación actual vive en `quant-domain`, `quant-engine` y
 > `quant-api`. Están operativos `POST /v1/context:apply`, `/v1/prices`,
 > `/v1/portfolios:price`, `/v1/scenarios:run`, `/v1/risk:calculate`, `/v1/xva:calculate`,
-> sus aliases documentados y los endpoints de health. `clients/python/quantdesk.rest` es el
+> sus aliases documentados y los endpoints de health. `clients/python/src/quantdesk/rest.py` es el
 > SDK stateless de referencia. Las secciones de fases describen gates y trabajo futuro; el
 > contrato vigente se resume en [`docs/api/rest.md`](docs/api/rest.md) y
 > [`docs/api/openapi.v1.yaml`](docs/api/openapi.v1.yaml).

@@ -218,10 +218,12 @@ production services. Engine Quant keeps the business semantics in one place:
 
 - models, products, measures, and calibrators are registered centrally;
 - Python, Excel, C++, and the public C ABI consume the same C++ orchestration layer;
+- the Rust REST API and Python REST SDK consume the versioned `QuantContext` domain contract;
 - compute-intensive pricing and Monte Carlo kernels live in Rust;
 - related measures can be calculated together and share the same simulation.
 
-The result is one vocabulary and one calculation path across every client.
+The result is one vocabulary and consistent calculation semantics across every client, with
+native embedding and remote REST as explicit transport paths.
 
 ## Current capabilities
 
