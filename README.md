@@ -19,6 +19,58 @@ single registry-driven domain model.
 > current scope is deliberately narrow: short-rate models, vanilla interest-rate swaps,
 > exposure profiles, and unilateral CVA.
 
+## Installation
+
+### Windows installer
+
+Download `engine_quant_setup.exe` from the latest GitHub release and run it. In the
+installer:
+
+1. Select the **Python package** component.
+2. On the **Python interpreters** page, keep selected the Python installation(s) where
+   `engine-quant` should be installed. You can deselect any interpreter or add a
+   `python.exe` manually.
+3. Select the **Excel add-in** component as well if you want to use the engine from Excel.
+
+The installer can therefore set up both clients on the same machine:
+
+- **Excel:** after installation, open a new Excel instance and use the `ENGINE.*` worksheet
+  functions. The Excel add-in is available only on 64-bit Windows.
+- **Jupyter:** the Python package is installed into the interpreter(s) selected above. If
+  Jupyter is not installed yet, install and launch it with one of those same interpreters:
+
+  ```powershell
+  <path-to-selected-python.exe> -m pip install jupyterlab
+  <path-to-selected-python.exe> -m jupyter lab
+  ```
+
+  This makes `import engine` and `import quantdesk` available in the notebook kernel.
+  See the [Jupyter notebook notes](clients/python/notebooks/README.md) for the example
+  notebooks.
+
+### Linux and macOS
+
+Linux and macOS currently provide the **Python client only**; the Windows installer and
+Excel add-in are not available there. Published wheels currently target Windows, so install
+the Python client from source. Install Git, CMake 3.24 or newer, Ninja, a C++17 toolchain,
+Rust/rustup, and Python 3.10 or newer, then run:
+
+```bash
+git clone https://github.com/makiolo/engine_quant.git
+cd engine_quant
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install .
+```
+
+To use it from Jupyter, install Jupyter in this same virtual environment:
+
+```bash
+python -m pip install jupyterlab
+python -m jupyter lab
+```
+
 ## Quick start with Python
 
 Building the Python extension from source requires Git, CMake 3.24+, Ninja, a C++17
