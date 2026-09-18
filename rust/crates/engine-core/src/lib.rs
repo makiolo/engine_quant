@@ -17,6 +17,10 @@ pub mod payoff;
 pub mod products;
 pub mod smoke;
 
+/// Version de la aplicacion distribuida. El workflow de release escribe `rust/VERSION`
+/// antes de compilar, de modo que el core Rust comparte la version con Python/C++/Excel.
+pub const VERSION: &str = env!("ENGINE_QUANT_VERSION");
+
 pub fn ping() -> f64 {
     42.0
 }

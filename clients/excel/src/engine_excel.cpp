@@ -16,6 +16,7 @@
 
 #include "xloper.hpp"
 #include "handles.hpp"
+#include "engine/version.hpp"
 
 #include <vector>
 
@@ -63,6 +64,10 @@ extern "C" __declspec(dllexport) LPXLOPER12 WINAPI xlEngineListModels() {
     return xlbridge::guarded([] {
         return xlbridge::new_string_column(xlbridge::shared().list_models());
     });
+}
+
+extern "C" __declspec(dllexport) LPXLOPER12 WINAPI xlEngineVersion() {
+    return xlbridge::guarded([] { return xlbridge::new_str(engine::VERSION); });
 }
 
 extern "C" __declspec(dllexport) LPXLOPER12 WINAPI xlEngineListProducts() {
@@ -333,6 +338,8 @@ extern "C" __declspec(dllexport) LPXLOPER12 WINAPI xlEngineCalibrate(
 // (no antes): ENGINE_XLL_ENTRY necesita verlas ya declaradas para el chequeo `void(&fn)`.
 namespace {
 constexpr FnSpec kFunctions[] = {
+    ENGINE_XLL_ENTRY(xlEngineVersion, L"U", L"ENGINE.VERSION", L"",
+                     L"Version de la distribucion del motor."),
     ENGINE_XLL_ENTRY(xlEngineListModels, L"U", L"ENGINE.LIST_MODELS", L"",
                       L"Lista los modelos registrados en el motor."),
     ENGINE_XLL_ENTRY(xlEngineListProducts, L"U", L"ENGINE.LIST_PRODUCTS", L"",

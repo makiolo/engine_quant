@@ -26,6 +26,15 @@ fachada dinámica (dict/Excel/C ABI), es una fachada más sobre el mismo registr
 """
 
 import importlib.util
+from importlib.metadata import PackageNotFoundError, version as _distribution_version
+
+try:
+    # En una wheel, la metadata de la distribucion es la fuente estandar de la version y se
+    # actualiza junto con pyproject.toml en cada release. En un checkout sin instalar usamos
+    # el valor de desarrollo para que `import quantdesk` siga funcionando.
+    __version__ = _distribution_version("quantdesk")
+except PackageNotFoundError:
+    __version__ = "0.0.0-dev"
 
 from quantdesk.rest import (
     Context,
@@ -132,12 +141,14 @@ __all__ = [
     "RestMarket",
     "RestHullWhite1F",
     "RestIRSwap",
+    "__version__",
 ]
 
 # Importar `quantdesk.rest` no debe exigir que la extensión nanobind `engine` esté instalada.
 # La fachada nativa se carga bajo demanda cuando alguien solicita uno de sus nombres públicos;
 # esto permite probar/usar el SDK REST puro en runners Linux sin compilar el módulo Windows.
 _REST_NAMES = {
+    "__version__",
     "QuantRestClient",
     "QuantContext",
     "Context",

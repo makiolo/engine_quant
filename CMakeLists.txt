@@ -4,6 +4,10 @@ cmake_minimum_required(VERSION 3.24)
 # solo "C++ que se parece a C" -- ningún otro target de este árbol necesita un compilador de C.
 project(engine_quant LANGUAGES CXX C)
 
+# Version visible desde C++ y el XLL. En releases el workflow la pasa con -D; el valor de
+# desarrollo mantiene funcionales los builds locales.
+set(ENGINE_QUANT_VERSION "0.0.0-dev" CACHE STRING "Version de la distribucion")
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)

@@ -50,13 +50,20 @@ jobs:
       - name: Calcular version/tag/publish
         id: compute
         shell: bash
+        env:
+          INPUT_PUBLISH: ${{ inputs.publish }}
+          INPUT_VERSION: ${{ inputs.version }}
         run: |
           if [[ "$GITHUB_REF" == refs/tags/* ]]; then
             version="${GITHUB_REF_NAME#v}"
             tag_name="$GITHUB_REF_NAME"
             publish=true
-          elif [[ "${{ inputs.publish }}" == "true" ]]; then
-            version="${{ inputs.version }}"
+          elif [[ "$INPUT_PUBLISH" == "true" ]]; then
+            version="$INPUT_VERSION"
+            # La UI de workflow_dispatch permite espacios accidentales al principio/final.
+            # Sin recortarlos, ISCC recibe `/DMyAppVersion=` y la version como dos argumentos.
+            version="${version#"${version%%[![:space:]]*}"}"
+            version="${version%"${version##*[![:space:]]}"}"
             if [[ -z "$version" ]]; then
               echo "::error::Con 'publish' marcado hace falta indicar 'version' (p.ej. 0.1.0)"
               exit 1
@@ -67,6 +74,10 @@ jobs:
             version="0.0.0.dev0+${GITHUB_SHA::8}"
             tag_name=""
             publish=false
+          fi
+          if [[ ! "$version" =~ ^[0-9]+([.][0-9]+){2}[A-Za-z0-9.+_-]*$ ]]; then
+            echo "::error::Version no valida: '$version'. Usa un valor como 0.13.0 o 0.13.0rc1"
+            exit 1
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "tag_name=$tag_name" >> "$GITHUB_OUTPUT"
@@ -79,6 +90,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Fijar version en Rust
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ needs.determine-version.outputs.version }}
+        run: printf '%s' "$RELEASE_VERSION" > rust/VERSION
 
       - uses: actions/setup-python@v5
         with:
@@ -128,6 +145,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Fijar version en Rust
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ needs.determine-version.outputs.version }}
+        run: printf '%s' "$RELEASE_VERSION" > rust/VERSION
+
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
@@ -153,9 +176,11 @@ jobs:
       # aqui se sobrescribe con la version calculada por determine-version.
       - name: Fijar la version del paquete
         shell: bash
+        env:
+          RELEASE_VERSION: ${{ needs.determine-version.outputs.version }}
         run: |
-          sed -i "s/^version = \"0.0.0\"/version = \"${{ needs.determine-version.outputs.version }}\"/" pyproject.toml
-          echo "Version fijada: ${{ needs.determine-version.outputs.version }}"
+          sed -i "s/^version = \"0.0.0\"/version = \"$RELEASE_VERSION\"/" pyproject.toml
+          echo "Version fijada: $RELEASE_VERSION"
 
       - name: Instalar herramientas de build
         run: python -m pip install --upgrade pip delvewheel
@@ -167,6 +192,7 @@ jobs:
       - name: Construir la wheel
         env:
           CMAKE_GENERATOR: Ninja
+          CMAKE_ARGS: -DENGINE_QUANT_VERSION=${{ needs.determine-version.outputs.version }}
         run: python -m pip wheel . -w wheelhouse --no-deps
 
       # La wheel enlaza dinamicamente MSVCP140.dll (runtime de C++); delvewheel lo detecta y
@@ -227,6 +253,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Fijar version en Rust
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ needs.determine-version.outputs.version }}
+        run: printf '%s' "$RELEASE_VERSION" > rust/VERSION
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -250,8 +282,11 @@ jobs:
 
       - name: Configure (CMake + Corrosion + cxx + nanobind)
         shell: bash
+        env:
+          RELEASE_VERSION: ${{ needs.determine-version.outputs.version }}
         run: |
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DENGINE_QUANT_VERSION="$RELEASE_VERSION" \
             -DPython_EXECUTABLE="$(python -c 'import sys; print(sys.executable)')"
 
       - name: Build
@@ -354,8 +389,14 @@ jobs:
       # [InstallDelete] limpia {app}\wheels/{app}\xll antes de copiar los ficheros nuevos, asi
       # que una wheel/xll de una version anterior no se queda a medias junto a la nueva.
       - name: Compilar el instalador
-        shell: cmd
-        run: '"C:\Program Files (x86)\Inno Setup 6\ISCC.exe" /DMyAppVersion=${{ needs.determine-version.outputs.version }} installer\EngineQuantSetup.iss'
+        shell: pwsh
+        env:
+          INSTALLER_VERSION: ${{ needs.determine-version.outputs.version }}
+        run: |
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" "/DMyAppVersion=$env:INSTALLER_VERSION" "installer\EngineQuantSetup.iss"
+          if ($LASTEXITCODE -ne 0) {
+              exit $LASTEXITCODE
+          }
 
       - uses: actions/upload-artifact@v4
         with:

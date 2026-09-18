@@ -47,6 +47,9 @@ pub use simd::{
 };
 pub use xva::estimate_memory_bytes;
 
+/// Version de la aplicacion compartida con el crate numerico interno.
+pub const VERSION: &str = engine_core::VERSION;
+
 #[derive(Debug, Clone)]
 pub struct EngineConfig {
     pub worker_count: usize,

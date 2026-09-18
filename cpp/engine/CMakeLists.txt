@@ -50,6 +50,10 @@ add_library(engine STATIC
     src/payoff/measures.cpp
 )
 
+# La macro queda disponible para todos los consumidores C++ que enlacen `engine` (incluido el
+# XLL de Excel), y puede consultarse mediante engine/version.hpp.
+target_compile_definitions(engine PUBLIC ENGINE_QUANT_VERSION="${ENGINE_QUANT_VERSION}")
+
 target_include_directories(engine PUBLIC include)
 
 target_link_libraries(engine PUBLIC engine-ffi-cxx)
