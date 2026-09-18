@@ -56,6 +56,31 @@ print(results.PV.scalar)
 Discover the registered surface at runtime with `engine.list_models()`,
 `engine.list_products()`, `engine.list_measures()`, and `engine.list_calibrators()`.
 
+### Remote REST API
+
+The Rust REST server exposes the same declarative domain for remote clients. It is stateless:
+the client owns and resends the complete `QuantContext`; the server does not keep sessions or
+handles between requests.
+
+```bash
+cargo run --manifest-path rust/Cargo.toml -p quant-api
+```
+
+```python
+from quantdesk.rest import Context, HullWhite1F, IRSwap, Market, QuantRestClient
+
+client = QuantRestClient("http://127.0.0.1:8080")
+ctx = Context.new("notebook-1")
+ctx, market = client.add_market(ctx, "eur", Market(pillars=[1, 2], zero_rates=[.02, .021]))
+ctx, model = client.add_model(ctx, "hw", HullWhite1F(a=.1, b=.03, sigma=.01, r0=.02))
+ctx, swap = client.add_product(ctx, "swap", IRSwap(1_000_000, .025, [1, 2], [1, 1]))
+result = client.price(ctx, swap, model=model, market=market, measures=["PV"])
+```
+
+See [Rust REST architecture and extension rules](docs/api/rest.md) for the endpoint matrix,
+stateless context contract, limits, and the checklist for exposing new first-class objects in
+Rust, Python, Excel, and REST.
+
 ### Dynamic dict facade
 
 `engine` (the compiled extension) is the low-level facade that `quantdesk` uses internally,
@@ -193,10 +218,12 @@ production services. Engine Quant keeps the business semantics in one place:
 
 - models, products, measures, and calibrators are registered centrally;
 - Python, Excel, C++, and the public C ABI consume the same C++ orchestration layer;
+- the Rust REST API and Python REST SDK consume the versioned `QuantContext` domain contract;
 - compute-intensive pricing and Monte Carlo kernels live in Rust;
 - related measures can be calculated together and share the same simulation.
 
-The result is one vocabulary and one calculation path across every client.
+The result is one vocabulary and consistent calculation semantics across every client, with
+native embedding and remote REST as explicit transport paths.
 
 ## Current capabilities
 
@@ -205,11 +232,12 @@ The result is one vocabulary and one calculation path across every client.
 | Models | `HullWhite1F`; `HullWhite2F` / G2++ |
 | Products | Vanilla interest-rate swap (`IRSwap`); generic composable payoff (`Payoff`) — vanilla, barrier, Asian, take-profit/stop-loss, and American/Bermuda-exercise contracts, plus `IRSwap`/`FXForward` templates that compile to the same AST |
 | Measures | `PV`, `DV01`, `ExpectedExposure`, `PFE95`, `UnilateralCVA` (via `Engine.price(...)`) |
-| Payoff valuation | Deterministic ledger PV and bump-and-reval Greeks for any `Payoff`; Monte Carlo GBM under the risk-neutral measure Q (price, barrier hit probability, exposure profile, Longstaff-Schwartz American/Bermuda exercise) and under a physical measure P (forecast, hit probability, P&L distribution/expected shortfall) — implemented and tested end-to-end in C++/Rust, not yet reachable from `Engine.price(...)` or any client (see [Scope and known limitations](#scope-and-known-limitations)) |
+| Payoff valuation | Deterministic ledger PV and bump-and-reval Greeks for any `Payoff`; Monte Carlo GBM under the risk-neutral measure Q (price, barrier hit probability, exposure profile, Longstaff-Schwartz American/Bermuda exercise) and under a physical measure P (forecast, hit probability, P&L distribution/expected shortfall) — implemented and tested end-to-end in C++/Rust and reachable from the native Python, Excel, and C ABI clients |
 | Payoff authoring | `quantdesk.payoff` builders, versioned JSON schema (`engine.payoff/v1`) with fixtures, and cross-layer `validate`/`explain` (Python, Excel, C ABI) that agree on the same canonical hash |
 | Calibration | Registry-based calibrators for both short-rate models, using damped Gauss-Newton and AAD Jacobians |
 | Compute | Burn tensor backend; CPU by default; opt-in WGPU backend |
 | Clients | Python extension, Excel XLL, native C++ API, and versioned C ABI |
+| Remote API | Rust/Axum REST v1 with stateless `QuantContext`, portfolio/scenario/risk/XVA endpoints, and Python SDK |
 | Distribution | Windows wheels, Excel add-in package, and all-in-one Inno Setup installer produced by the release workflow |
 
 `Engine.price(...)` accepts a batch of measure names. `ExpectedExposure` and `PFE95`, for
@@ -225,27 +253,36 @@ C++/Python/Excel/C ABI surface only ever requests the CPU backend for it.
 ## Architecture
 
 ```text
-┌────────────────────┐  ┌────────────────────┐  ┌────────────────────┐
-│ Python / Jupyter   │  │ Excel XLL          │  │ C ABI consumers    │
-│ nanobind module    │  │ worksheet UDFs     │  │ C/Rust/Python/...  │
-└─────────┬──────────┘  └─────────┬──────────┘  └─────────┬──────────┘
-          └───────────────────────┼───────────────────────┘
-                                  ▼
-              ┌───────────────────────────────────────┐
-              │ C++17 domain and orchestration layer │
-              │ registries · contexts · batched price │
-              └───────────────────┬───────────────────┘
-                                  │ cxx bridge
-                                  ▼
-              ┌───────────────────────────────────────┐
-              │ Rust numerical core                   │
-              │ pricing · Monte Carlo · AAD · Burn   │
-              └───────────────────────────────────────┘
+ Native embedding path                         Remote path
+ ┌──────────────┐  ┌───────────┐  ┌─────────┐  ┌────────────────┐
+ │ Python       │  │ Excel XLL │  │ C ABI   │  │ Python REST SDK│
+ └──────┬───────┘  └─────┬─────┘  └────┬────┘  └───────┬────────┘
+        └─────────────────┼─────────────┘               │ HTTP/JSON
+                          ▼                             ▼
+              ┌──────────────────────┐       ┌──────────────────┐
+              │ C++17 orchestration  │       │ quant-api (Axum) │
+              │ registry · contexts  │       │ stateless REST v1│
+              └──────────┬───────────┘       └────────┬─────────┘
+                         │ cxx bridge                 │
+                         └──────────────┬─────────────┘
+                                        ▼
+                         ┌──────────────────────────┐
+                         │ quant-domain / quant-engine│
+                         │ context · planner · queue │
+                         └─────────────┬────────────┘
+                                       ▼
+                         ┌──────────────────────────┐
+                         │ Rust kernels + C++ legacy │
+                         │ pricing · MC · AAD · XVA │
+                         └──────────────────────────┘
 ```
 
 The public C ABI is intentionally separate from the internal Rust/C++ `cxx` bridge. It
 exposes flat, versioned types and opaque handles so other languages can consume the engine
 without depending on C++ classes or nanobind.
+The REST adapter uses the same domain concepts but does not reuse server-side handles: every
+calculation request carries its client-owned `QuantContext`, and `quant-engine` rebuilds the
+temporary handles for that request.
 
 ## Calibration
 
@@ -366,6 +403,7 @@ to be installed.
 ## Clients and examples
 
 - [Python package notes](clients/python/README_PYPI.md)
+- [Python REST client](clients/python/README_REST.md)
 - [Python calculation example](clients/python/examples/README.md)
 - [Jupyter notebook notes](clients/python/notebooks/README.md)
 - [Excel XLL guide](clients/excel/README.md)
@@ -389,6 +427,9 @@ Excel exposes the same object flow through handles and worksheet functions:
 ```text
 rust/crates/engine-core/   Numerical models, products, exposure, CVA, calibration, AAD
 rust/crates/engine-ffi/    Internal Rust ↔ C++ bridge
+rust/crates/quant-domain/  Versioned stateless context and REST domain types
+rust/crates/quant-engine/ Application planner, registry, scheduler, and XVA services
+rust/crates/quant-api/    Axum REST v1 composition root and HTTP error mapping
 cpp/engine/                C++ registries, contexts, batched calculation, public C ABI
 clients/python/            nanobind extension, tests, examples, and notebook
 clients/excel/             Excel XLL, bridge tests, and install scripts
@@ -421,6 +462,9 @@ PLAN_PRODUCTS.md           Universal payoff engine: AST, Q/P Monte Carlo, phased
   such as swaptions or caps is outside the present scope.
 - The Excel client and packaged release artifacts target 64-bit Windows. The Rust core and
   non-Excel CMake targets are designed to remain portable.
+- The REST server is implemented but is not included in the published installer or wheels.
+  Its current JSON contract is synchronous and bounded; it has no durable job store or remote
+  Excel transport. See [REST architecture](docs/api/rest.md).
 - GPU support is experimental and must be enabled explicitly. `backend="auto"` resolves to
   GPU only in a GPU-enabled build; otherwise it resolves to CPU.
 - Per-measure configuration (`DV01(bump=...)`/`DV01(bucketed=True)`) is only reachable from

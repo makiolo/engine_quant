@@ -3,6 +3,8 @@
 `quantdesk.rest` is a small, stateless client for the implemented REST v1 contract in
 [`docs/api/openapi.v1.yaml`](../../docs/api/openapi.v1.yaml). The complete `QuantContext`
 is kept by the notebook (not by a server session) and is returned by each context mutation.
+The architecture, endpoint matrix, and first-class object propagation checklist are documented
+in [`docs/api/rest.md`](../../docs/api/rest.md).
 
 ```python
 from quantdesk.rest import Context, HullWhite1F, IRSwap, Market, QuantRestClient
@@ -32,3 +34,7 @@ invent the draft endpoint described in older plan text.
 HTTP errors with `application/problem+json` are raised as `QuantRestError` and expose a
 typed `ProblemDetails` instance through `.problem`. Tests can inject a transport with
 `request(method, path, payload)`; no `requests` or `httpx` dependency is required.
+
+The client is the reference remote surface for Python. Excel currently remains on the native
+C++/XLL path; new first-class objects must still be added to Python, Excel, and the REST
+schema/registry as one cross-layer change.

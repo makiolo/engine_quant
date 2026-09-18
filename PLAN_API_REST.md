@@ -1,9 +1,17 @@
 # PLAN_API_REST.md — API Rust de alto rendimiento para Engine Quant
 
-> Estado: propuesta de arquitectura e implementación.
+> Estado: vertical REST v1 implementada; este documento conserva el diseño, gates y roadmap para las siguientes fases.
 > Fecha: 2026-09-18.
 > Alcance: nueva API y nueva orquestación en Rust, reutilizando el motor existente y código C++ donde aporte valor.
 > Regla principal: ninguna decisión de este documento se considera validada por intuición; cada optimización relevante tiene un benchmark y un criterio de salida.
+
+> **Estado verificable.** La implementación actual vive en `quant-domain`, `quant-engine` y
+> `quant-api`. Están operativos `POST /v1/context:apply`, `/v1/prices`,
+> `/v1/portfolios:price`, `/v1/scenarios:run`, `/v1/risk:calculate`, `/v1/xva:calculate`,
+> sus aliases documentados y los endpoints de health. `clients/python/src/quantdesk/rest.py` es el
+> SDK stateless de referencia. Las secciones de fases describen gates y trabajo futuro; el
+> contrato vigente se resume en [`docs/api/rest.md`](docs/api/rest.md) y
+> [`docs/api/openapi.v1.yaml`](docs/api/openapi.v1.yaml).
 
 ## 0. Resumen ejecutivo
 

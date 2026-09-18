@@ -1,11 +1,14 @@
 # Informe Fase 0 — baseline, contratos y presupuestos
 
-**Estado:** artefactos preparados; resultados dependen del perfil ejecutado y de la máquina.
+**Estado:** informe histórico de baseline; los resultados dependen del perfil ejecutado y de la máquina.
+
+La vertical REST v1 ya está implementada después de este baseline. Para el contrato vigente,
+la arquitectura ejecutable y sus límites, véase [`docs/api/rest.md`](../api/rest.md).
 
 ## Alcance
 
-Fase 0 congela la matriz S/M/L, fixtures y oráculos antes de mover ownership. No añade servidor
-REST, endpoints estables, sesiones server-side ni job store. El OpenAPI en
+Fase 0 congeló la matriz S/M/L, fixtures y oráculos antes de mover ownership. En el momento de
+este informe no añadía servidor REST, endpoints estables, sesiones server-side ni job store. El OpenAPI en
 [`docs/api/openapi.v1.yaml`](../api/openapi.v1.yaml) es preliminar y lleva `x-contract-status:
 preliminary`.
 

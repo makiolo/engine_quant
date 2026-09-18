@@ -1,6 +1,10 @@
-# ADRs de la API REST — estado de Fase 0
+# ADRs de la API REST — decisiones de la vertical v1
 
-Estos ADRs documentan decisiones iniciales propuestas por `PLAN_API_REST.md`. Son decisiones de arquitectura, no una promesa de que el servidor REST ya exista. Cualquier cambio debe conservar el benchmark/fixture que motivó la revisión y actualizar el estado en el informe de Fase 0.
+Estos ADRs comenzaron como decisiones de Fase 0 y ahora documentan las invariantes de la
+vertical REST v1 implementada. No sustituyen el contrato ejecutable de
+[`docs/api/openapi.v1.yaml`](../api/openapi.v1.yaml): cualquier cambio debe conservar los
+benchmarks/fixtures que lo motivaron y actualizar el estado en
+[`docs/api/rest.md`](../api/rest.md).
 
 | ADR | Decisión |
 |---|---|
