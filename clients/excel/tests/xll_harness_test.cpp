@@ -121,13 +121,18 @@ int main() {
 
     int rc = auto_open();
     ok &= check(rc == 1, "xlAutoOpen devuelve 1");
+    // ENGINE.VERSION se registro en la tabla del XLL junto con la version de distribucion.
     // PLAN_PRODUCTS.md Fase 10: +2 (ENGINE.VALIDATE_PAYOFF_SPEC/ENGINE.EXPLAIN_PRODUCT) sobre
     // las 15 anteriores (PLAN.md §7.19: +3 ENGINE.PRICE_BATCH/CALC_MANY/CALC_GRID sobre las 12
     // previas). PLAN_GREEKS.md §9.2 Fase 9: +1 (ENGINE.ALL_GREEKS) sobre las 17 previas.
     // PLAN_BACKWARD.md §8.2/§9: +2 (ENGINE.HESSIAN/ENGINE.HVP) sobre las 18 previas.
     // PLAN_BACKWARD.md §6.4/§9 Fase 6: +4 (ENGINE.PORTFOLIO.CREATE/.PRICE/.HESSIAN/.HVP) sobre
     // las 20 previas.
-    ok &= check(g_register_calls == 24, "xlAutoOpen registra exactamente 24 UDFs via xlfRegister");
+    ok &= check(g_register_calls == 25, "xlAutoOpen registra exactamente 25 UDFs via xlfRegister");
+    ok &= check(
+        std::find(g_registered_names.begin(), g_registered_names.end(), "ENGINE.VERSION") != g_registered_names.end(),
+        "\"ENGINE.VERSION\" aparece entre las UDFs registradas"
+    );
     for (const auto& name : g_registered_names) {
         ok &= check(name.rfind("ENGINE.", 0) == 0, "cada UDF registrada se llama ENGINE.*");
     }
