@@ -37,6 +37,13 @@ FetchContent_MakeAvailable(Corrosion)
 
 corrosion_import_crate(MANIFEST_PATH ${CMAKE_SOURCE_DIR}/rust/Cargo.toml)
 
+# La wheel Linux enlaza el staticlib Rust dentro de una extension Python compartida. Aunque
+# rustc suele generar PIC por defecto en Linux, fijarlo explicitamente evita que una toolchain
+# o target distinto introduzca relocaciones absolutas en libengine_ffi.a.
+if(UNIX)
+    corrosion_add_target_rustflags(engine_ffi "-Crelocation-model=pic")
+endif()
+
 # Corrosion nombra el target CMake "engine_ffi" (guiones -> guiones bajos, ver comentario de
 # corrosion_add_cxxbridge más abajo). corrosion_set_features debe llamarse después de que el
 # target exista (corrosion_import_crate lo crea arriba).
@@ -51,6 +58,10 @@ corrosion_add_cxxbridge(engine-ffi-cxx
     CRATE engine_ffi
     FILES lib.rs
 )
+
+# corrosion_add_cxxbridge crea una libreria C++ estatica con el codigo generado por cxx. Ese
+# objeto tambien termina dentro de engine_py_ext.so y necesita compilarse como PIC en Linux.
+set_target_properties(engine-ffi-cxx PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 add_subdirectory(cpp/engine)
 add_subdirectory(clients/python)
