@@ -18,6 +18,7 @@
 #include "handles.hpp"
 #include "engine/version.hpp"
 
+#include <string>
 #include <vector>
 
 namespace {
@@ -34,9 +35,19 @@ XLOPER12 local_str(std::vector<XCHAR>& storage, const wchar_t* text) {
     return x;
 }
 
+DWORD base_type(const XLOPER12& x) {
+    return x.xltype & ~(xlbitXLFree | xlbitDLLFree);
+}
+
+enum class ReturnShape {
+    Scalar,
+    Table,
+};
+
 struct FnSpec {
     const wchar_t* procedure;    // nombre exportado, derivado de la funcion C++ (ver ENGINE_XLL_ENTRY)
-    const wchar_t* type_text;    // "U" = retorno XLOPER12, "Q" = argumento XLOPER12 (PLAN.md §7.8)
+    ReturnShape return_shape;    // distingue retornos escalares/string de tablas xltypeMulti
+    const wchar_t* argument_types; // codigos Q de argumentos XLOPER12
     const wchar_t* name;         // nombre visible en Excel (formula bar / asistente de funciones)
     const wchar_t* argument_text;
     const wchar_t* help;
@@ -49,8 +60,22 @@ struct FnSpec {
 // `void(&fn)` obliga a que `fn` exista con ese nombre exacto (error de compilacion, no un
 // #NAME? silencioso en Excel); el operador coma lo descarta y deja el FnSpec como valor de la
 // expresion, valido como inicializador de un elemento de kFunctions.
-#define ENGINE_XLL_ENTRY(fn, type_text, excel_name, argument_text, help) \
-    (void(&fn), FnSpec{ENGINE_XLL_WSTRINGIZE(fn), type_text, excel_name, argument_text, help})
+#define ENGINE_XLL_ENTRY(fn, return_shape, argument_types, excel_name, argument_text, help) \
+    (void(&fn), FnSpec{ENGINE_XLL_WSTRINGIZE(fn), return_shape, argument_types, excel_name, argument_text, help})
+
+std::wstring registration_type_text(const FnSpec& fn) {
+    std::wstring type_text;
+    switch (fn.return_shape) {
+    case ReturnShape::Scalar:
+    case ReturnShape::Table:
+        // Todas las UDF exportadas devuelven LPXLOPER12: Q es el codigo ABI
+        // de retorno XLOPER12. La forma se conserva como metadata explicita.
+        type_text = L"Q";
+        break;
+    }
+    type_text += fn.argument_types;
+    return type_text;
+}
 
 } // namespace
 
@@ -338,63 +363,63 @@ extern "C" __declspec(dllexport) LPXLOPER12 WINAPI xlEngineCalibrate(
 // (no antes): ENGINE_XLL_ENTRY necesita verlas ya declaradas para el chequeo `void(&fn)`.
 namespace {
 constexpr FnSpec kFunctions[] = {
-    ENGINE_XLL_ENTRY(xlEngineVersion, L"U", L"ENGINE.VERSION", L"",
+    ENGINE_XLL_ENTRY(xlEngineVersion, ReturnShape::Scalar, L"", L"ENGINE.VERSION", L"",
                      L"Version de la distribucion del motor."),
-    ENGINE_XLL_ENTRY(xlEngineListModels, L"U", L"ENGINE.LIST_MODELS", L"",
+    ENGINE_XLL_ENTRY(xlEngineListModels, ReturnShape::Table, L"", L"ENGINE.LIST_MODELS", L"",
                       L"Lista los modelos registrados en el motor."),
-    ENGINE_XLL_ENTRY(xlEngineListProducts, L"U", L"ENGINE.LIST_PRODUCTS", L"",
+    ENGINE_XLL_ENTRY(xlEngineListProducts, ReturnShape::Table, L"", L"ENGINE.LIST_PRODUCTS", L"",
                       L"Lista los productos registrados en el motor."),
-    ENGINE_XLL_ENTRY(xlEngineListMeasures, L"U", L"ENGINE.LIST_MEASURES", L"",
+    ENGINE_XLL_ENTRY(xlEngineListMeasures, ReturnShape::Table, L"", L"ENGINE.LIST_MEASURES", L"",
                       L"Lista las medidas registradas en el motor."),
-    ENGINE_XLL_ENTRY(xlEngineCreateModel, L"UQQ", L"ENGINE.CREATE_MODEL", L"nombre,params",
+    ENGINE_XLL_ENTRY(xlEngineCreateModel, ReturnShape::Scalar, L"QQ", L"ENGINE.CREATE_MODEL", L"nombre,params",
                       L"Crea un modelo (params: rango clave/valor) y devuelve su handle."),
-    ENGINE_XLL_ENTRY(xlEngineCreateProduct, L"UQQ", L"ENGINE.CREATE_PRODUCT", L"nombre,params",
+    ENGINE_XLL_ENTRY(xlEngineCreateProduct, ReturnShape::Scalar, L"QQ", L"ENGINE.CREATE_PRODUCT", L"nombre,params",
                       L"Crea un producto (params: rango clave/valor) y devuelve su handle."),
     ENGINE_XLL_ENTRY(
-        xlEngineValidatePayoffSpec, L"UQ", L"ENGINE.VALIDATE_PAYOFF_SPEC", L"spec_json",
+        xlEngineValidatePayoffSpec, ReturnShape::Table, L"Q", L"ENGINE.VALIDATE_PAYOFF_SPEC", L"spec_json",
         L"Valida un documento engine.payoff/v1 (JSON) sin crear ningun producto. Devuelve una "
         L"columna de mensajes de error, vacia si el spec es valido."
     ),
     ENGINE_XLL_ENTRY(
-        xlEngineExplainProduct, L"UQ", L"ENGINE.EXPLAIN_PRODUCT", L"producto",
+        xlEngineExplainProduct, ReturnShape::Scalar, L"Q", L"ENGINE.EXPLAIN_PRODUCT", L"producto",
         L"Arbol/cashflows legibles de un producto ya creado (ENGINE.CREATE_PRODUCT), o solo su "
         L"nombre de tipo para productos sin AST de payoff propio."
     ),
-    ENGINE_XLL_ENTRY(xlEngineCreateMarket, L"UQ", L"ENGINE.CREATE_MARKET", L"params",
+    ENGINE_XLL_ENTRY(xlEngineCreateMarket, ReturnShape::Scalar, L"Q", L"ENGINE.CREATE_MARKET", L"params",
                       L"Crea un mercado (params: rango clave/valor -- pillars, zero_rates, "
                       L"hazard_rate opcional, recovery_rate opcional) y devuelve su handle."),
-    ENGINE_XLL_ENTRY(xlEngineCreateContext, L"UQ", L"ENGINE.CREATE_CONTEXT", L"params",
+    ENGINE_XLL_ENTRY(xlEngineCreateContext, ReturnShape::Scalar, L"Q", L"ENGINE.CREATE_CONTEXT", L"params",
                       L"Crea un contexto de valoracion (params: pricing_date, n_paths, n_steps, "
                       L"seed) y devuelve su handle."),
-    ENGINE_XLL_ENTRY(xlEngineCreateExecution, L"UQ", L"ENGINE.CREATE_EXECUTION", L"params",
+    ENGINE_XLL_ENTRY(xlEngineCreateExecution, ReturnShape::Scalar, L"Q", L"ENGINE.CREATE_EXECUTION", L"params",
                       L"Crea un contexto de ejecucion (params: backend 'cpu'/'gpu'/'auto', "
                       L"precision opcional) y devuelve su handle."),
     ENGINE_XLL_ENTRY(
-        xlEnginePrice, L"UQQQQQQ", L"ENGINE.PRICE", L"trade,medidas,modelo,mercado,contexto,ejecucion",
+        xlEnginePrice, ReturnShape::Table, L"QQQQQQ", L"ENGINE.PRICE", L"trade,medidas,modelo,mercado,contexto,ejecucion",
         L"Calcula un lote de medidas (PV, DV01, ExpectedExposure, PFE95, UnilateralCVA) sobre "
         L"un trade/modelo/mercado/contexto de valoracion/contexto de ejecucion. Resultado en "
         L"formato largo: [MeasureName, Time, Value]."
     ),
     ENGINE_XLL_ENTRY(
-        xlEnginePriceBatch, L"UQQQQQQ", L"ENGINE.PRICE_BATCH", L"trades,medidas,modelo,mercado,contexto,ejecucion",
+        xlEnginePriceBatch, ReturnShape::Table, L"QQQQQQ", L"ENGINE.PRICE_BATCH", L"trades,medidas,modelo,mercado,contexto,ejecucion",
         L"Como ENGINE.PRICE pero para una COLUMNA de trades del mismo tipo/calendario (sin "
         L"tipo fijo 'a la par'), vectorizado sin bucle. Resultado en formato largo: "
         L"[TradeIndex, MeasureName, Time, Value]."
     ),
     ENGINE_XLL_ENTRY(
-        xlEnginePriceMany, L"UQQQQQQ", L"ENGINE.PRICE_MANY", L"trades,medidas,modelo,mercado,contexto,ejecucion",
+        xlEnginePriceMany, ReturnShape::Table, L"QQQQQQ", L"ENGINE.PRICE_MANY", L"trades,medidas,modelo,mercado,contexto,ejecucion",
         L"Como ENGINE.PRICE_BATCH pero admite trades de tipos/calendarios distintos: los agrupa "
         L"internamente y nunca falla por heterogeneidad. Resultado en el mismo formato largo, "
         L"en el orden de entrada de trades."
     ),
     ENGINE_XLL_ENTRY(
-        xlEnginePriceGrid, L"UQQQQQQ", L"ENGINE.PRICE_GRID", L"trades,medidas,modelos,mercados,contexto,ejecucion",
+        xlEnginePriceGrid, ReturnShape::Table, L"QQQQQQ", L"ENGINE.PRICE_GRID", L"trades,medidas,modelos,mercados,contexto,ejecucion",
         L"Calcula la rejilla Trades x Modelos x Mercados (columnas de handles); contexto de "
         L"valoracion/ejecucion compartidos, no forman parte de la rejilla. Resultado en "
         L"formato largo: [TradeIndex, ModelIndex, MarketIndex, MeasureName, Time, Value]."
     ),
     ENGINE_XLL_ENTRY(
-        xlEngineAllGreeks, L"UQQQQQQQQQ", L"ENGINE.ALL_GREEKS",
+        xlEngineAllGreeks, ReturnShape::Table, L"QQQQQQQQQ", L"ENGINE.ALL_GREEKS",
         L"trade,metrica,parametros_metrica,modelo,mercado,contexto,ejecucion,incluir_pillars,incluir_orden2",
         L"Calcula TODAS las Greeks de primer orden aplicables a 'metrica' sobre el "
         L"modelo/mercado dados (cada parametro del modelo, curva paralela, credito, theta), sin "
@@ -405,7 +430,7 @@ constexpr FnSpec kFunctions[] = {
         L"StdError], con los factores omitidos al final (Method=\"skipped\")."
     ),
     ENGINE_XLL_ENTRY(
-        xlEngineHessian, L"UQQQQQQQQ", L"ENGINE.HESSIAN",
+        xlEngineHessian, ReturnShape::Table, L"QQQQQQQQ", L"ENGINE.HESSIAN",
         L"trade,metrica,parametros_metrica,modelo,mercado,contexto,ejecucion,factores_de_riesgo",
         L"Hessiano local (segundo orden, pares i<=j) de 'metrica' sobre el trade/modelo/mercado "
         L"dados -- mejor esfuerzo, una combinacion (modelo, metrica) no soportada cae en el "
@@ -415,7 +440,7 @@ constexpr FnSpec kFunctions[] = {
         L"Method, Measure, StdError], con los candidatos omitidos al final (Method=\"skipped\")."
     ),
     ENGINE_XLL_ENTRY(
-        xlEngineHvp, L"UQQQQQQQQ", L"ENGINE.HVP",
+        xlEngineHvp, ReturnShape::Table, L"QQQQQQQQ", L"ENGINE.HVP",
         L"trade,metrica,parametros_metrica,modelo,mercado,contexto,ejecucion,direccion",
         L"Producto Hessiano-vector H*v de 'metrica' sobre el trade/modelo/mercado dados. "
         L"'direccion' es un rango obligatorio de 2 columnas [RiskFactor, Peso] (factores "
@@ -423,7 +448,7 @@ constexpr FnSpec kFunctions[] = {
         L"candidatos omitidos al final (Method=\"skipped\")."
     ),
     ENGINE_XLL_ENTRY(
-        xlEnginePortfolioCreate, L"UQ", L"ENGINE.PORTFOLIO.CREATE", L"trades",
+        xlEnginePortfolioCreate, ReturnShape::Scalar, L"Q", L"ENGINE.PORTFOLIO.CREATE", L"trades",
         L"Construye un Portfolio (PLAN_BACKWARD.md §6.4) a partir de una COLUMNA de handles de "
         L"trade ya creados (ENGINE.CREATE_PRODUCT) y devuelve su handle, memoizado por esa lista "
         L"EXACTA (mismos handles, mismo orden -> mismo Portfolio). Funcional, no mutante: no "
@@ -431,14 +456,14 @@ constexpr FnSpec kFunctions[] = {
         L"nuevo a esta funcion con la columna de trades actualizada."
     ),
     ENGINE_XLL_ENTRY(
-        xlEnginePortfolioPrice, L"UQQQQQQ", L"ENGINE.PORTFOLIO.PRICE",
+        xlEnginePortfolioPrice, ReturnShape::Table, L"QQQQQQ", L"ENGINE.PORTFOLIO.PRICE",
         L"portfolio,medidas,modelo,mercado,contexto,ejecucion",
         L"Como ENGINE.PRICE_MANY pero sobre un Portfolio ya creado (ENGINE.PORTFOLIO.CREATE) en "
         L"vez de una columna de trades sueltos -- envoltorio fino sobre price_many, misma tabla "
         L"larga de resultado: [TradeIndex, MeasureName, Time, Value]."
     ),
     ENGINE_XLL_ENTRY(
-        xlEnginePortfolioHessian, L"UQQQQQQQQ", L"ENGINE.PORTFOLIO.HESSIAN",
+        xlEnginePortfolioHessian, ReturnShape::Table, L"QQQQQQQQ", L"ENGINE.PORTFOLIO.HESSIAN",
         L"portfolio,metrica,parametros_metrica,modelo,mercado,contexto,ejecucion,factores_de_riesgo",
         L"Hessiano de un Portfolio (PLAN_BACKWARD.md §9 Fase 6): suma, trade a trade, los "
         L"HessianReport de ENGINE.HESSIAN sobre cada trade del portfolio -- exacto bajo el "
@@ -448,18 +473,18 @@ constexpr FnSpec kFunctions[] = {
         L"StdError]."
     ),
     ENGINE_XLL_ENTRY(
-        xlEnginePortfolioHvp, L"UQQQQQQQQ", L"ENGINE.PORTFOLIO.HVP",
+        xlEnginePortfolioHvp, ReturnShape::Table, L"QQQQQQQQ", L"ENGINE.PORTFOLIO.HVP",
         L"portfolio,metrica,parametros_metrica,modelo,mercado,contexto,ejecucion,direccion",
         L"Producto Hessiano-vector de un Portfolio: suma, trade a trade, los HvpReport de "
         L"ENGINE.HVP sobre cada trade. Misma forma de resultado que ENGINE.HVP: [RiskFactor, "
         L"Value, Method]."
     ),
-    ENGINE_XLL_ENTRY(xlEngineListCalibrators, L"U", L"ENGINE.LIST_CALIBRATORS", L"",
+    ENGINE_XLL_ENTRY(xlEngineListCalibrators, ReturnShape::Table, L"", L"ENGINE.LIST_CALIBRATORS", L"",
                       L"Lista los calibradores registrados en el motor."),
-    ENGINE_XLL_ENTRY(xlEngineCreateCalibrator, L"UQ", L"ENGINE.CREATE_CALIBRATOR", L"nombre",
+    ENGINE_XLL_ENTRY(xlEngineCreateCalibrator, ReturnShape::Scalar, L"Q", L"ENGINE.CREATE_CALIBRATOR", L"nombre",
                       L"Crea un calibrador y devuelve su handle."),
     ENGINE_XLL_ENTRY(
-        xlEngineCalibrate, L"UQQQ", L"ENGINE.CALIBRATE", L"calibrador,mercado,estimacion_inicial",
+        xlEngineCalibrate, ReturnShape::Table, L"QQQ", L"ENGINE.CALIBRATE", L"calibrador,mercado,estimacion_inicial",
         L"Calibra un modelo a un mercado (handle de ENGINE.CREATE_MARKET) partiendo de una "
         L"estimacion inicial (rango clave/valor); el resultado se puede pasar tal cual a "
         L"ENGINE.CREATE_MODEL."
@@ -472,12 +497,17 @@ constexpr FnSpec kFunctions[] = {
 
 extern "C" __declspec(dllexport) int WINAPI xlAutoOpen() {
     XLOPER12 module_name{};
-    Excel12(xlGetName, &module_name, 0); // ruta de este XLL, para pxModuleText (DLL-only)
+    const int module_rc = Excel12(xlGetName, &module_name, 0); // ruta de este XLL, para pxModuleText (DLL-only)
+    if (module_rc != xlretSuccess || base_type(module_name) != xltypeStr) {
+        if (base_type(module_name) == xltypeStr) Excel12(xlFree, nullptr, 1, &module_name);
+        return 0;
+    }
 
     for (const FnSpec& fn : kFunctions) {
         std::vector<XCHAR> b_proc, b_type, b_name, b_args, b_category;
         XLOPER12 procedure = local_str(b_proc, fn.procedure);
-        XLOPER12 type_text = local_str(b_type, fn.type_text);
+        const std::wstring registration_type = registration_type_text(fn);
+        XLOPER12 type_text = local_str(b_type, registration_type.c_str());
         XLOPER12 function_name = local_str(b_name, fn.name);
         XLOPER12 argument_text = local_str(b_args, fn.argument_text);
         XLOPER12 category = local_str(b_category, L"Motor XVA");
@@ -486,10 +516,14 @@ extern "C" __declspec(dllexport) int WINAPI xlAutoOpen() {
         macro_type.val.num = 1.0; // funcion de hoja de calculo (PLAN.md Fase 4 §7.8)
 
         XLOPER12 result{};
-        Excel12(
+        const int register_rc = Excel12(
             xlfRegister, &result, 7,
             &module_name, &procedure, &type_text, &function_name, &argument_text,
             &macro_type, &category);
+        if (register_rc != xlretSuccess || base_type(result) != xltypeNum) {
+            Excel12(xlFree, nullptr, 1, &module_name);
+            return 0;
+        }
     }
 
     Excel12(xlFree, nullptr, 1, &module_name);

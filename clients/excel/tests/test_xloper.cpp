@@ -188,6 +188,36 @@ TEST(ReadStringList, SingleCellBecomesOneElementList) {
     EXPECT_EQ(names[0], "PV");
 }
 
+TEST(NewStringColumn, PreservesThreeStringsAsVerticalMulti) {
+    const std::vector<std::string> expected{"uno", "dos", "tres"};
+    XLOPER12* out = xlbridge::new_string_column(expected);
+
+    ASSERT_NE(out, nullptr);
+    ASSERT_EQ(
+        out->xltype & ~static_cast<DWORD>(xlbitXLFree | xlbitDLLFree),
+        static_cast<DWORD>(xltypeMulti)
+    );
+    EXPECT_EQ(out->xltype, static_cast<DWORD>(xltypeMulti | xlbitDLLFree));
+    ASSERT_EQ(out->val.array.rows, 3);
+    ASSERT_EQ(out->val.array.columns, 1);
+    ASSERT_NE(out->val.array.lparray, nullptr);
+
+    for (RW row = 0; row < out->val.array.rows; ++row) {
+        const XLOPER12& cell = out->val.array.lparray[row];
+        ASSERT_EQ(
+            cell.xltype & ~static_cast<DWORD>(xlbitXLFree | xlbitDLLFree),
+            static_cast<DWORD>(xltypeStr)
+        );
+        ASSERT_NE(cell.val.str, nullptr);
+        EXPECT_EQ(
+            xlbridge::from_xl_string(cell.val.str + 1, cell.val.str[0]),
+            expected[static_cast<std::size_t>(row)]
+        );
+    }
+
+    xlbridge::free_xloper(out);
+}
+
 namespace {
 
 xlbridge::HandleRegistry make_registry() { return xlbridge::HandleRegistry(); }

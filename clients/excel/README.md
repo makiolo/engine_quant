@@ -18,6 +18,13 @@ cmake --build build --target engine_excel_ext
 El resultado es `build/clients/excel/engine_excel.xll`. Solo se construye en Windows (guard
 `WIN32` en el `CMakeLists.txt` raíz): un XLL es un artefacto específico de esa plataforma.
 
+## Requisito de Excel y arrays dinámicos
+
+Para las funciones que devuelven listas o tablas se requiere Microsoft 365 o Excel 2021,
+con arrays dinámicos habilitados. Esta es la superficie soportada del complemento: Excel
+antiguo y las fórmulas matriciales CSE (Ctrl+Shift+Intro) quedan fuera de alcance y no deben
+usarse para validar el spill.
+
 ## API (equivalente a `clients/python`)
 
 | Excel | Python (`clients/python`, Fase 3) |
@@ -38,6 +45,25 @@ El resultado es `build/clients/excel/engine_excel.xll`. Solo se construye en Win
 | `ENGINE.LIST_CALIBRATORS()` | `Engine().list_calibrators()` |
 | `ENGINE.CREATE_CALIBRATOR(nombre)` | `Engine().create_calibrator(nombre)` |
 | `ENGINE.CALIBRATE(calibrador, mercado, estimacion_inicial)` | `Calibrator.calibrate(market, initial_guess)` |
+
+### Fórmulas canónicas y referencias al spill
+
+Escribe cada fórmula en una celda superior izquierda libre y deja que Excel derrame el
+resultado verticalmente:
+
+```
+=ENGINE.LIST_MEASURES()
+=ENGINE.LIST_MODELS()
+=ENGINE.LIST_PRODUCTS()
+=ENGINE.LIST_CALIBRATORS()
+=ENGINE.PRICE(<Trade>, {"PV";"DV01"}, <Model>, <Market>, <Pricing>, <Compute>)
+```
+
+Para alimentar otra fórmula con todo el resultado, usa el operador de rango derramado `#`
+sobre la celda ancla (por ejemplo, si `=ENGINE.LIST_MEASURES()` está en `A1`, referencia
+`A1#`). No reserves un rango de tamaño fijo ni copies solo la primera celda. Si alguna celda
+del área de derrame está ocupada, Excel debe mostrar `#SPILL!`; libera esa área y recalcula,
+en lugar de interpretar el resultado como una lista truncada.
 
 `params` es un rango de Excel de 2 o más columnas: columna A = nombre del parámetro,
 columnas siguientes = su valor. Un parámetro escalar (`a`, `notional`, `backend`, ...) solo
@@ -91,9 +117,11 @@ expuesto todavía desde Excel/C ABI -- solo desde Python (`quantdesk`, ver
 — las medidas escalares (`PV`, `DV01`, `UnilateralCVA`) dan 1 fila (`Time` en blanco), las de
 perfil (`ExpectedExposure`, `PFE95`) dan una fila por fecha de monitorización. Un único
 formato homogéneo para todo el lote, fácil de filtrar/dinamizar en Excel (Tabla dinámica sobre
-`MeasureName`). En Excel moderno (arrays dinámicos) basta con escribir la fórmula en la celda
-superior izquierda y dejar que "derrame" (spill); en versiones sin arrays dinámicos hay que
-introducirla como fórmula matricial (Ctrl+Shift+Intro) sobre un rango del tamaño esperado.
+`MeasureName`). En Microsoft 365/Excel 2021 se escribe la fórmula canónica en la celda
+superior izquierda y Excel derrama la tabla completa automáticamente. Para referenciar todo
+el resultado desde otra fórmula, usa la referencia de derrame de esa celda, por ejemplo
+`A1#`. Si el área necesaria no está libre, el resultado visible debe ser `#SPILL!`; no se debe
+preseleccionar un rango ni convertir la fórmula en una matriz CSE.
 
 `Market` (`ENGINE.CREATE_MARKET`): rango clave/valor con `pillars`/`zero_rates` (vectores
 paralelos, mismo largo) y, opcionalmente, `hazard_rate`/`recovery_rate` (por defecto `0.0`,
@@ -263,11 +291,15 @@ que sí es automatizable (que el bridge invoca exactamente el mismo `engine::Reg
 `test_price.py`/`test_registry.cpp` — ver `HandleRegistry.ExpectedExposureAndPfe95MatchOtherClients`
 y `HandleRegistry.UnilateralCvaIsPositiveForNonzeroHazardRate`); falta confirmar que **Excel
 real**, cargando el `.xll`, reproduce esos mismos números a través de `xlAutoOpen`/las UDFs
-exportadas. Pasos:
+exportadas. Los pasos y el checklist siguientes documentan la validación pendiente; esta
+sección no afirma que la validación manual se haya ejecutado.
 
 1. Compilar (`cmake --build build --target engine_excel_ext`).
-2. En Excel: Archivo → Opciones → Complementos → Administrar "Complementos de Excel" → Ir... →
-   Examinar... → seleccionar `build/clients/excel/engine_excel.xll` → Aceptar.
+2. Si había una versión anterior cargada, descargar primero el complemento desde Archivo →
+   Opciones → Complementos → Administrar "Complementos de Excel" → Ir... (desmarcarlo o
+   quitarlo). Cerrar todas las ventanas de Excel y comprobar que el proceso terminó; volver a
+   abrir Excel y cargar `build/clients/excel/engine_excel.xll` desde Examinar... No considerar
+   válida una comprobación de recarga si Excel conserva la sesión o la registración anterior.
 3. En una hoja, construir el rango de parámetros de Hull-White (columna A = clave, columna B
    = valor): `a=0.1`, `b=0.03`, `sigma=0.01`, `r0=0.02`; el de IRS a la par a 5 años:
    `notional=1000000`, `payment_times=1,2,3,4,5` (una celda por valor, misma fila),
@@ -301,6 +333,23 @@ exportadas. Pasos:
    | PFE95 | 3 | `46152.44561612198` |
    | PFE95 | 4 | `27535.557267142714` |
    | UnilateralCVA | | `503.64194077997536` |
+
+### Checklist final de Fase 5 (pendiente de ejecutar)
+
+Marcar cada punto solo después de ejecutarlo en Microsoft 365 o Excel 2021 con el XLL
+recargado completamente:
+
+- [ ] `=ENGINE.LIST_MEASURES()` derrama todas las medidas en una columna y su celda ancla
+      puede referenciarse con `#` (por ejemplo, `A1#`).
+- [ ] `=ENGINE.LIST_MODELS()` derrama todos los modelos registrados.
+- [ ] `=ENGINE.LIST_PRODUCTS()` derrama todos los productos registrados.
+- [ ] `=ENGINE.LIST_CALIBRATORS()` derrama todos los calibradores registrados.
+- [ ] `=ENGINE.PRICE(...)` derrama la tabla completa, incluyendo al menos `PV` o `DV01` y
+      una medida de perfil; no se observa truncamiento a la primera fila.
+- [ ] Al ocupar una celda del área de derrame aparece `#SPILL!`; al liberarla, el resultado
+      vuelve a derramarse completo.
+- [ ] Tras descargar el complemento, cerrar Excel, abrirlo de nuevo y cargar el XLL, las
+      mismas fórmulas conservan la firma y el spill esperados.
 
 Si estos números coinciden, la capa 4 de §5.6 queda verificada de punta a punta (Python y
 Excel, mismo motor C++/Rust por debajo). Actualizar esta sección si cambia el caso base de

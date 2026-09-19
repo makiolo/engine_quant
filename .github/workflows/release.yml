@@ -7,9 +7,11 @@ name: Release
 #   2. Lanzarlo a mano (pestaña Actions > Release > Run workflow) con "publish" marcado y
 #      "version" relleno -- softprops/action-gh-release crea el tag "vX.Y.Z" y la release en
 #      el mismo paso, sin necesitar tocar git en local.
-# Un `workflow_dispatch` sin "publish" marcado compila wheels + .xll y los deja como
-# artefactos del workflow (pestaña Summary del run), sin crear ninguna release ni tag: sirve
-# para probar el pipeline de build antes de publicar de verdad.
+# Un `workflow_dispatch` sin "publish" marcado compila las wheels Windows + .xll y los deja
+# como artefactos del workflow (pestaña Summary del run), sin crear ninguna release ni tag:
+# sirve para probar el pipeline de build antes de publicar de verdad. Las wheels manylinux se
+# generan solamente cuando hay una release real (`publish == true`), porque son las destinadas
+# al conjunto de artefactos multiplataforma de PyPI.
 # Publicar en PyPI (job publish-pypi, PLAN_API_REFACTOR.md Fase 10) es un paso aparte,
 # desactivado por defecto: requiere ademas marcar a mano el input `publish_pypi` (booleano,
 # default false, independiente de "publish") en un `workflow_dispatch` -- un tag "vX.Y.Z" o un
@@ -205,12 +207,63 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: wheel-cp${{ matrix.python-version }}
+          name: wheel-win-cp${{ matrix.python-version }}
           path: dist/*.whl
+
+  build-manylinux-wheels:
+    name: Wheels Python (manylinux_2_28_x86_64, cp310-cp314)
+    needs: [determine-version, quality-gate]
+    # Las wheels Linux se preparan para publicar; no se construyen en los workflow_dispatch
+    # de prueba que no crean una release.
+    if: needs.determine-version.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fijar version en Rust
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ needs.determine-version.outputs.version }}
+        run: printf '%s' "$RELEASE_VERSION" > rust/VERSION
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Fijar la version del paquete
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ needs.determine-version.outputs.version }}
+        run: |
+          sed -i "s/^version = \"0.0.0\"/version = \"$RELEASE_VERSION\"/" pyproject.toml
+          echo "Version fijada: $RELEASE_VERSION"
+
+      # cibuildwheel construye dentro de la imagen manylinux y auditwheel repara el ELF
+      # resultante. Se seleccionan tags explicitos para no incluir cp314t (free-threaded),
+      # que no forma parte aun de la matriz publicada por este proyecto.
+      - name: Construir wheels manylinux
+        uses: pypa/cibuildwheel@v4.2.1
+        env:
+          CIBW_BUILD: cp310-manylinux_x86_64 cp311-manylinux_x86_64 cp312-manylinux_x86_64 cp313-manylinux_x86_64 cp314-manylinux_x86_64
+          CIBW_ARCHS_LINUX: x86_64
+          CIBW_MANYLINUX_X86_64_IMAGE: manylinux_2_28
+          CIBW_CONFIG_SETTINGS_LINUX: cmake.define.ENGINE_QUANT_VERSION=${{ needs.determine-version.outputs.version }}
+          # El toolchain del proyecto esta fijado en rust/rust-toolchain.toml; se instala
+          # dentro del contenedor porque el runner Ubuntu no comparte su cargo con manylinux.
+          CIBW_BEFORE_ALL_LINUX: >-
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs |
+            sh -s -- -y --profile minimal --default-toolchain 1.97.1
+          CIBW_ENVIRONMENT_LINUX: PATH=/root/.cargo/bin:$PATH
+          CIBW_OUTPUT_DIR: wheelhouse
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheel-manylinux
+          path: wheelhouse/*.whl
 
   publish-pypi:
     name: Publicar quantdesk en PyPI
-    needs: [determine-version, build-wheels]
+    needs: [determine-version, build-wheels, build-manylinux-wheels]
     if: needs.determine-version.outputs.publish == 'true' && inputs.publish_pypi == 'true'
     runs-on: ubuntu-latest
     # environment "pypi": permite exigir aprobacion manual en GitHub antes de este job, dado
@@ -221,12 +274,11 @@ jobs:
       id-token: write
     steps:
       # merge-multiple junta las N wheels (una por version de CPython, artefactos
-      # wheel-cp3.10/wheel-cp3.11/...) en un unico directorio -- mismo patron que usa
-      # build-installer mas abajo para el mismo conjunto de artefactos.
+      # wheel-win-cp3.10/wheel-manylinux/...) en un unico directorio.
       - name: Descargar las wheels
         uses: actions/download-artifact@v4
         with:
-          pattern: wheel-cp*
+          pattern: wheel-*
           path: dist
           merge-multiple: true
 
@@ -353,14 +405,14 @@ jobs:
       # El servidor/binario quant-api REST queda deliberadamente fuera del instalador en esta
       # fase. El payload sigue siendo únicamente wheels Python (incluido el SDK cliente) + XLL.
 
-      # merge-multiple junta las N wheels (una por version de CPython, artefactos
-      # wheel-cp3.10/wheel-cp3.11/...) en un unico directorio -- Install-EngineWheels.ps1
+      # merge-multiple junta las N wheels Windows (una por version de CPython, artefactos
+      # wheel-win-cp3.10/wheel-win-cp3.11/...) en un unico directorio -- Install-EngineWheels.ps1
       # (PLAN.md §7.9) elige la que corresponda a cada interprete detectado en tiempo de
       # instalacion, no hace falta seleccionar ninguna aqui.
       - name: Descargar las wheels
         uses: actions/download-artifact@v4
         with:
-          pattern: wheel-cp*
+          pattern: wheel-win-cp*
           path: installer/payload/wheels
           merge-multiple: true
 
@@ -405,7 +457,7 @@ jobs:
 
   publish-release:
     name: Publicar la release en GitHub
-    needs: [determine-version, build-wheels, build-xll, build-installer]
+    needs: [determine-version, build-wheels, build-manylinux-wheels, build-xll, build-installer]
     if: needs.determine-version.outputs.publish == 'true'
     runs-on: ubuntu-latest
     steps:
