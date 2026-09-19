@@ -12,7 +12,13 @@ FetchContent_MakeAvailable(simdjson)
 # and no known rule to make it" sobre cmake_pch.cxx.pch) -- lo desactivamos explicitamente via
 # la propiedad de target soportada para ese fin, sin parchear su CMakeLists.txt vendorizado.
 if(TARGET simdjson)
-    set_target_properties(simdjson PROPERTIES DISABLE_PRECOMPILE_HEADERS ON)
+    # La wheel Linux enlaza este staticlib dentro de la extension Python compartida.
+    # Sin PIC el enlace del .so falla con relocaciones R_X86_64_PC32; Windows no expone
+    # este requisito porque usa PE/COFF.
+    set_target_properties(simdjson PROPERTIES
+        DISABLE_PRECOMPILE_HEADERS ON
+        POSITION_INDEPENDENT_CODE ON
+    )
 endif()
 
 add_library(engine STATIC
@@ -49,6 +55,11 @@ add_library(engine STATIC
     src/payoff/payoff_product.cpp
     src/payoff/measures.cpp
 )
+
+# `engine` se enlaza dentro de `engine_py_ext` (MODULE/.so) y de `engine_abi` (SHARED) en
+# Linux. Mantener PIC en el staticlib permite reutilizar el mismo target en esas dos
+# fronteras compartidas; en Windows no cambia el resultado de la wheel.
+set_target_properties(engine PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 # La macro queda disponible para todos los consumidores C++ que enlacen `engine` (incluido el
 # XLL de Excel), y puede consultarse mediante engine/version.hpp.
